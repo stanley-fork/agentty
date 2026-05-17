@@ -97,9 +97,19 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
         // cache entry on the Pending→Done edge — not needed,
         // because we only set the field when terminal, so the very
         // first frame after the transition is the cache populate.
+        // Mix the tool's render key into the cache id so any content-
+        // relevant mutation (output bytes appended in a late chunk after
+        // status flipped terminal, expanded toggled, status transition
+        // from Done→Failed on a late error event) produces a fresh
+        // cache entry instead of blitting stale cells. maya's content-
+        // keyed component cache matches on (cache_id, width) only and
+        // ignores generation, so the cache_id itself has to be the
+        // content identity — otherwise stale cells get blit at the
+        // current row and scroll into permanent scrollback corruption.
         std::string event_cache_id;
         if (tc.is_terminal())
-            event_cache_id = std::string{"tool:"} + tc.id.value;
+            event_cache_id = std::string{"tool:"} + tc.id.value
+                           + ":" + std::to_string(tc.compute_render_key());
 
         cfg.events.push_back({
             .name            = tool_display_name(tc.name.value),
