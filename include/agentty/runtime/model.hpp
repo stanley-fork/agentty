@@ -173,18 +173,21 @@ struct Model {
         // thread switch (same lifecycle as thread_view_start).
         int                 thread_view_start_turn = 0;
 
-        // Set when streaming settles (phase → Idle) and cleared at the
-        // top of update() when the next non-Tick user-input Msg arrives.
-        // While true, that update returns an extra Cmd::force_redraw
-        // that collapses maya's coherence state to Divergent — the next
-        // render emits the full live frame fresh from the cursor's
-        // current position, pushing the OLD live-frame rows (which may
-        // include transient composer cells committed to scrollback
-        // during streaming) up into the terminal's native scrollback
-        // and writing a clean NEW live frame into the viewport. Same
-        // effect as a SIGWINCH-triggered handle_resize, but triggered
-        // on first user input instead of resize.
-        bool                  needs_force_redraw = false;
+        // (Removed) `needs_force_redraw` used to arm a Cmd::force_redraw()
+        // on the first user input after streaming settled, on the theory
+        // that it would flush any prev_cells/wire desync left by the
+        // stream's shrink path. The desync's only real source (the
+        // shrink loop's bottom-edge \r\n\x1b[2K) is fixed at the
+        // renderer level (one \x1b[J in maya/src/render/serialize.cpp),
+        // so the comfort firing was actively harmful: it pulled the
+        // cursor up by `wire_cursor_rows` on every first keystroke,
+        // and if anything between stream-end and the keystroke had
+        // moved the on-screen cursor (the user mouse-scrolling inside
+        // the emulator scroll buffer, a tmux pane swap, …) case (B)
+        // landed in scrollback and emitted a duplicate of the
+        // just-finished turn there. Stream finalisation no longer arms
+        // the flag (see update/stream.cpp), update.cpp no longer
+        // consumes it, and the field is gone.
 
         // Per-(thread, msg) render cache. View code reads + writes
         // through this — markdown rendering and per-turn Element
