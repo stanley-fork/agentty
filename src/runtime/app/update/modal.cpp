@@ -98,7 +98,31 @@ maya::Cmd<Msg> maybe_virtualize(Model& m) {
     }
     m.ui.thread_view_start      += kSliceChunk;
     m.ui.thread_view_start_turn += committed_turns;
-    return Cmd<Msg>::commit_scrollback_overflow();
+    // Do NOT call commit_scrollback_overflow here. maya commits
+    // max(0, prev_rows - term_h) rows of prev_cells — the rows that
+    // already overflowed the viewport. That count has no relationship
+    // to the rendered height of the messages we just dropped.
+    //
+    // Concrete failure: prev_rows=80, term_h=50 → overflow=30. We
+    // drop 8 messages whose combined rendered height is, say, 20.
+    // maya shifts prev_cells up by 30 rows; the next compose sees
+    // canvas[0..9] = the kept-but-already-scrolled-into-scrollback
+    // rows (because the dropped content was only 20 rows tall, so
+    // 10 of the rows maya treated as "committed" are actually still
+    // logically part of the live tree). The diff finds first_changed=0,
+    // re-emits those 10 rows at viewport top, which then scroll into
+    // native scrollback again as new content arrives below — a second
+    // copy of cells that were already there. That's the scrollback
+    // duplication / ghosting symptom.
+    //
+    // Without the commit, prev_cells stays at the full live-tree
+    // height. compose_inline_frame's shrink path handles the shorter
+    // tree by emitting only the surviving live-viewport rows and
+    // erasing the rest with \x1b[J — no rows are mis-claimed as
+    // scrollback, no duplicates ever land below the live frame. Memory
+    // cost is bounded by max(live_tree_height) × W × 8 bytes — for
+    // kViewWindow=20 turns of typical-height content, well under 1 MB.
+    return Cmd<Msg>::none();
 }
 
 Step submit_message(Model m) {
