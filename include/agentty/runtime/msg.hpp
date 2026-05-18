@@ -308,6 +308,17 @@ struct LoginPaste       { std::string text; };
 struct LoginCursorLeft  {};
 struct LoginCursorRight {};
 struct LoginSubmit      {};
+// User pressed the "copy URL to clipboard" key while the OAuthCode
+// modal is up. The reducer issues a Cmd<Msg>::write_clipboard with
+// the active authorize URL, then surfaces a brief status toast so
+// the user has visual confirmation the keystroke registered.
+struct LoginCopyAuthUrl {};
+// User pressed the "open browser again" key. Re-issues the same
+// xdg-open / `open` invocation that fired when OAuth was first
+// selected, in case the original launch was missed (alt-tabbed away
+// before the browser surfaced, or the OS swallowed the first open
+// silently). Idempotent — reuses the URL already in OAuthCode state.
+struct LoginOpenBrowserAgain {};
 // Result of the async OAuth code-exchange. Carries the typed
 // `auth::TokenResult` so the reducer can distinguish ApiError /
 // Network / MissingToken without parsing strings.
@@ -427,6 +438,7 @@ using TodoMsg = std::variant<
 using LoginMsg = std::variant<
     OpenLogin, CloseLogin, LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
+    LoginCopyAuthUrl, LoginOpenBrowserAgain,
     LoginExchanged, TokenRefreshed>;
 
 using DiffReviewMsg = std::variant<

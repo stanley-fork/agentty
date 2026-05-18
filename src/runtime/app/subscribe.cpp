@@ -174,6 +174,35 @@ std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
         return NoOp{};
     }
 
+    // ── OAuthCode-only chrome shortcuts ─────────────────────────────
+    // Bare letter `c` / `o` would collide with text input on the code
+    // field, so we gate these on a modifier OR on the field being
+    // empty (the typical state when the user has just landed in this
+    // screen and wants to copy the URL before pasting the code).
+    if (auto* oc = std::get_if<OAuthCode>(&state)) {
+        if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+            char32_t c = ck->codepoint;
+            // Normalize Ctrl-letter codes (terminals deliver Ctrl+X as
+            // either raw 0x01..0x1A or the lowercase letter + ctrl mod
+            // depending on whether KKP / modifyOtherKeys is enabled).
+            if (ev.mods.ctrl && c >= 0x01 && c <= 0x1A)
+                c = U'a' + (c - 1);
+            const bool empty_code = oc->code_input.empty();
+            // Ctrl+C is reserved for Quit at the global layer, so we
+            // use Ctrl+Y as the no-collision "yank URL" binding. Plain
+            // `c` / `o` also work when the code input is empty, so the
+            // typical happy path (land here, hit `c`, paste in
+            // browser) needs zero modifiers.
+            const bool is_y = (c == U'y' || c == U'Y');
+            const bool is_c = (c == U'c' || c == U'C');
+            const bool is_o = (c == U'o' || c == U'O');
+            if (ev.mods.ctrl && is_y) return LoginCopyAuthUrl{};
+            if (ev.mods.ctrl && is_o) return LoginOpenBrowserAgain{};
+            if (empty_code && is_c)   return LoginCopyAuthUrl{};
+            if (empty_code && is_o)   return LoginOpenBrowserAgain{};
+        }
+    }
+
     // OAuthCode or ApiKeyInput — both accept free-text input.
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         switch (std::get<SpecialKey>(ev.key)) {

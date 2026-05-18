@@ -192,6 +192,30 @@ Step login_submit(Model m) {
     return done(std::move(m));
 }
 
+Step login_copy_auth_url(Model m) {
+    auto* oc = std::get_if<login::OAuthCode>(&m.ui.login);
+    if (!oc || oc->authorize_url.empty()) return done(std::move(m));
+    auto url = oc->authorize_url;
+    auto write_cmd = Cmd<Msg>::write_clipboard(url);
+    auto toast = set_status_toast(m,
+        "authorize URL copied to clipboard",
+        std::chrono::seconds{3});
+    return {std::move(m),
+        Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
+}
+
+Step login_open_browser_again(Model m) {
+    auto* oc = std::get_if<login::OAuthCode>(&m.ui.login);
+    if (!oc || oc->authorize_url.empty()) return done(std::move(m));
+    auto url = oc->authorize_url;
+    auto open_cmd = cmd::open_browser_async(std::move(url));
+    auto toast = set_status_toast(m,
+        "opening browser\xe2\x80\xa6",
+        std::chrono::seconds{2});
+    return {std::move(m),
+        Cmd<Msg>::batch(std::move(open_cmd), std::move(toast))};
+}
+
 Step login_exchanged(Model m, auth::TokenResult result) {
     if (!std::holds_alternative<login::OAuthExchanging>(m.ui.login))
         return done(std::move(m));
@@ -337,6 +361,8 @@ Step login_update(Model m, msg::LoginMsg lm) {
         [&](LoginCursorLeft)        -> Step { return login_cursor_left(std::move(m)); },
         [&](LoginCursorRight)       -> Step { return login_cursor_right(std::move(m)); },
         [&](LoginSubmit)            -> Step { return login_submit(std::move(m)); },
+        [&](LoginCopyAuthUrl)       -> Step { return login_copy_auth_url(std::move(m)); },
+        [&](LoginOpenBrowserAgain)  -> Step { return login_open_browser_again(std::move(m)); },
         [&](LoginExchanged& e)      -> Step { return login_exchanged(std::move(m), std::move(e.result)); },
         [&](TokenRefreshed& e)      -> Step { return token_refreshed(std::move(m), std::move(e.result)); },
     }, lm);

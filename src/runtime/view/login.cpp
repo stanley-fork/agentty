@@ -1,8 +1,22 @@
-// In-app login modal — same overlay shape as the other pickers, but
-// state-driven by the closed `ui::login::State` variant. Each
-// alternative renders its own panel content; the chrome (border,
-// title, key hints) is shared so the layout doesn't shift between
-// transitions.
+// In-app login modal.
+//
+// Five sub-states keyed off `ui::login::State`:
+//
+//   Picking          choose OAuth (1) or API key (2)
+//   OAuthCode        browser opened; user pastes callback code.
+//                    The authorize URL gets a dedicated bordered box
+//                    + `[c] copy URL` / `[o] open in browser again`
+//                    affordances so the URL is one keystroke from the
+//                    user's clipboard — no terminal mouse-select needed.
+//   OAuthExchanging  HTTP POST in flight.
+//   ApiKeyInput      paste an sk-ant-… key.
+//   Failed           error toast above the Picking panel.
+//
+// Sizing is responsive: the outer wrapper sets a `min_width` floor
+// and the Overlay widget's default Stretch lets it fill the available
+// width (minus 2-col edge padding). Every text node uses TextWrap::Wrap
+// so long URLs / API key labels reflow rather than truncate. Mirrors
+// the picker chrome (see view/pickers.cpp's wrap_picker).
 
 #include "agentty/runtime/view/login.hpp"
 
@@ -25,23 +39,61 @@ namespace {
 
 // Shared key-hint footer. Each sub-state passes the keys that are
 // meaningful in its context so the user always sees a complete map.
+// Wrapped so long footers reflow on narrow terminals.
 Element key_hints(std::initializer_list<std::pair<std::string, std::string>> hints) {
-    std::vector<Element> cells;
+    // Flatten into one TextElement with styled runs so the painter can
+    // wrap across rows on a narrow terminal. The previous hstack approach
+    // overflowed without ever wrapping.
+    std::string content;
+    std::vector<StyledRun> runs;
+    auto push_run = [&](std::string_view s, Style sty) {
+        if (s.empty()) return;
+        runs.push_back(StyledRun{
+            .byte_offset = content.size(),
+            .byte_length = s.size(),
+            .style       = sty,
+        });
+        content.append(s);
+    };
+    const Style key_sty = Style{}.with_fg(fg).with_bold();
+    const Style sep_sty = fg_dim(muted);
+    const Style val_sty = fg_dim(muted);
     bool first = true;
     for (const auto& [k, v] : hints) {
-        if (!first) cells.push_back(text("  ", fg_dim(muted)));
+        if (!first) push_run("   \xc2\xb7   ", sep_sty);   //   ·
         first = false;
-        cells.push_back(text(k, fg_of(fg)));
-        cells.push_back(text(" ", fg_dim(muted)));
-        cells.push_back(text(v, fg_dim(muted)));
+        push_run(k, key_sty);
+        push_run(" ", sep_sty);
+        push_run(v, val_sty);
     }
-    return h(std::move(cells)).build();
+    return Element{TextElement{
+        .content = std::move(content),
+        .style   = Style{}.with_fg(fg),
+        .wrap    = TextWrap::Wrap,
+        .runs    = std::move(runs),
+    }};
+}
+
+// Wrap-mode body text — long URLs / explanation lines reflow rather
+// than overflowing the modal.
+Element body_text(std::string_view content, Style sty) {
+    return Element{TextElement{
+        .content = std::string{content},
+        .style   = sty,
+        .wrap    = TextWrap::Wrap,
+    }};
 }
 
 // Render an inline single-line text input with a block cursor. Mirrors
 // the composer's input style. `secret` masks each byte as a bullet so
 // keys/codes don't sit in plaintext on screen.
-Element input_row(std::string_view value, int cursor, bool secret) {
+//
+// The input row sits inside its own thin-bordered rect that spans the
+// modal width — readable at a glance, and the focus border tells the
+// user where to type without needing a separate label row above.
+Element input_row(std::string_view value, int cursor, bool secret,
+                  std::string_view placeholder)
+{
     std::string display;
     if (secret) {
         // Bytes, not codepoints — a full UTF-8 mask is overkill since
@@ -50,7 +102,21 @@ Element input_row(std::string_view value, int cursor, bool secret) {
     } else {
         display.assign(value);
     }
-    auto prefix = text("\xE2\x80\xBA ", fg_bold(accent));
+
+    auto prefix = text("\xE2\x80\xBA ", fg_bold(accent));   // ›
+
+    if (display.empty()) {
+        // Placeholder + cursor at home position.
+        auto caret = text(" ", Style{}.with_bold().with_inverse());
+        Element ph_el = !placeholder.empty()
+            ? Element{text(std::string{placeholder}, fg_dim(muted))}
+            : Element{text(" ", fg_of(fg))};
+        return (h(prefix, caret, std::move(ph_el))
+                | padding(0, 1)
+                | border(BorderStyle::Round)
+                | bcolor(accent)).build();
+    }
+
     if (cursor < 0) cursor = 0;
     if (cursor > static_cast<int>(display.size())) cursor = static_cast<int>(display.size());
     std::string before = display.substr(0, cursor);
@@ -58,27 +124,59 @@ Element input_row(std::string_view value, int cursor, bool secret) {
         ? std::string{display[cursor]} : std::string{" "};
     std::string after = (cursor + 1 < static_cast<int>(display.size()))
         ? display.substr(cursor + 1) : std::string{};
-    return h(
+    return (h(
         prefix,
         text(before, fg_of(fg)),
         text(at_cursor, Style{}.with_bold().with_inverse()),
         text(after, fg_of(fg))
-    ).build();
+    ) | padding(0, 1)
+      | border(BorderStyle::Round)
+      | bcolor(accent)).build();
+}
+
+// Bordered, wrap-mode "URL panel": the URL fills the modal width and
+// reflows across rows on narrow terminals, so the user can read every
+// character without horizontal scrolling. Background-styled so it
+// reads as a dedicated artifact (the thing to copy) rather than as
+// inline prose.
+Element url_panel(std::string_view url) {
+    auto url_text = Element{TextElement{
+        .content = std::string{url},
+        .style   = Style{}.with_fg(code_path),   // bright_cyan — "this is a path/identifier"
+        .wrap    = TextWrap::Wrap,
+    }};
+    return (v(url_text)
+            | padding(0, 1)
+            | border(BorderStyle::Round)
+            | bcolor(code_path)).build();
 }
 
 Element panel_picking(bool failed, std::string_view fail_msg) {
     std::vector<Element> rows;
     rows.push_back(text("Authenticate with Claude", fg_bold(fg)));
+    rows.push_back(body_text(
+        "Pick how you want to sign in. You can change this any time "
+        "from the command palette.",
+        fg_dim(muted)));
     rows.push_back(text(""));
     if (failed) {
-        rows.push_back(text(std::string{"\xE2\x9A\xA0 "} + std::string{fail_msg},
-                            fg_of(danger)));
+        // Wrap-mode danger toast so a long error message stays inside
+        // the modal instead of overflowing into the chrome.
+        rows.push_back(body_text(
+            std::string{"\xE2\x9A\xA0 "} + std::string{fail_msg},
+            fg_of(danger)));
         rows.push_back(text(""));
     }
     rows.push_back(h(text("  1) ", fg_bold(highlight)),
-                     text("OAuth via claude.ai (Pro/Max)", fg_of(fg))).build());
+                     text("OAuth via claude.ai", fg_bold(fg))).build());
+    rows.push_back(h(text("     ", fg_of(fg)),
+                     body_text("for Claude Pro / Max subscribers",
+                               fg_dim(muted))).build());
+    rows.push_back(text(""));
     rows.push_back(h(text("  2) ", fg_bold(highlight)),
-                     text("Paste an Anthropic API key (sk-ant-…)", fg_of(fg))).build());
+                     text("Paste an Anthropic API key", fg_bold(fg))).build());
+    rows.push_back(h(text("     ", fg_of(fg)),
+                     body_text("starts with sk-ant-…", fg_dim(muted))).build());
     rows.push_back(text(""));
     rows.push_back(key_hints({{"1/2", "choose"}, {"Esc", "close"}}));
     return v(std::move(rows)).build();
@@ -87,27 +185,44 @@ Element panel_picking(bool failed, std::string_view fail_msg) {
 Element panel_oauth_code(const login::OAuthCode& s) {
     std::vector<Element> rows;
     rows.push_back(text("OAuth via claude.ai", fg_bold(fg)));
+    rows.push_back(body_text(
+        "Step 1 — open this URL and authorize agentty:",
+        fg_dim(muted)));
     rows.push_back(text(""));
-    rows.push_back(text("Browser opened. After authorizing, paste the code shown",
-                        fg_dim(muted)));
-    rows.push_back(text("on the callback page below.", fg_dim(muted)));
+    rows.push_back(url_panel(s.authorize_url));
     rows.push_back(text(""));
-    rows.push_back(text("If the browser didn't open, visit:", fg_dim(muted)));
-    rows.push_back(text(s.authorize_url, fg_italic(muted)));
+    rows.push_back(body_text(
+        "Step 2 — paste the callback code below:",
+        fg_dim(muted)));
     rows.push_back(text(""));
-    rows.push_back(text("Code:", fg_dim(muted)));
-    rows.push_back(input_row(s.code_input, s.cursor, /*secret=*/true));
+    rows.push_back(input_row(s.code_input, s.cursor, /*secret=*/true,
+                             /*placeholder=*/"paste the code from claude.ai"));
     rows.push_back(text(""));
-    rows.push_back(key_hints({{"Enter", "submit"}, {"Esc", "cancel"}}));
+    // Two hint rows: top for the URL-side affordances, bottom for the
+    // form submit / cancel. The empty-code shortcuts are the most
+    // helpful surface — the user lands here with an empty field, so
+    // bare `c` / `o` give them the URL without any modifier dance.
+    rows.push_back(key_hints({
+        {"c",   "copy URL"},
+        {"o",   "open browser"},
+        {"^Y",  "copy"},
+        {"^O",  "open"},
+    }));
+    rows.push_back(key_hints({
+        {"Enter", "submit code"},
+        {"Esc",   "cancel"},
+    }));
     return v(std::move(rows)).build();
 }
 
 Element panel_oauth_exchanging() {
     std::vector<Element> rows;
-    rows.push_back(text("Exchanging authorization code…", fg_bold(fg)));
+    rows.push_back(text("Exchanging authorization code\xE2\x80\xA6",   // …
+                        fg_bold(fg)));
     rows.push_back(text(""));
-    rows.push_back(text("Talking to platform.claude.com — this should take a second.",
-                        fg_dim(muted)));
+    rows.push_back(body_text(
+        "Talking to platform.claude.com — this should take a second.",
+        fg_dim(muted)));
     rows.push_back(text(""));
     rows.push_back(key_hints({{"Esc", "cancel"}}));
     return v(std::move(rows)).build();
@@ -116,12 +231,13 @@ Element panel_oauth_exchanging() {
 Element panel_api_key(const login::ApiKeyInput& s) {
     std::vector<Element> rows;
     rows.push_back(text("Anthropic API key", fg_bold(fg)));
+    rows.push_back(body_text(
+        "Paste an sk-ant-… key. It will be saved to "
+        "~/.config/agentty/credentials.json (0600).",
+        fg_dim(muted)));
     rows.push_back(text(""));
-    rows.push_back(text("Paste an sk-ant-… key. It will be saved to ~/.config/agentty.",
-                        fg_dim(muted)));
-    rows.push_back(text(""));
-    rows.push_back(text("Key:", fg_dim(muted)));
-    rows.push_back(input_row(s.key_input, s.cursor, /*secret=*/true));
+    rows.push_back(input_row(s.key_input, s.cursor, /*secret=*/true,
+                             /*placeholder=*/"sk-ant-…"));
     rows.push_back(text(""));
     rows.push_back(key_hints({{"Enter", "submit"}, {"Esc", "cancel"}}));
     return v(std::move(rows)).build();
@@ -149,11 +265,25 @@ Element login_modal(const Model& m) {
         }
     }, m.ui.login);
 
-    auto content = (v(std::move(body)) | padding(1, 2) | width(70));
-    return (v(content.build())
-            | border(BorderStyle::Round) | bcolor(accent)
-            | btext(" Sign in to agentty ", BorderTextPos::Top, BorderTextAlign::Center)
-            ).build();
+    // Responsive sizing: `min_width` floors the modal at a readable
+    // width on tiny terminals; Overlay's default Stretch lets it
+    // grow to fill the available column space on wider terminals
+    // (minus the Overlay's 2-col edge padding). `max_width` clamps
+    // the upper bound so the URL doesn't reflow into one absurdly
+    // wide line on a 200-col terminal — readability over fill.
+    //
+    // No hard-coded `width(70)` like the previous version: that left
+    // narrow terminals with content that overflowed the border, and
+    // it wasted space on wider ones. Mirrors the pickers' wrap_picker.
+    return vstack()
+        .padding(1, 2)
+        .min_width(Dimension::fixed(48))
+        .max_width(Dimension::fixed(96))
+        .border(BorderStyle::Round)
+        .border_color(accent)
+        .border_text(" Sign in to agentty ",
+                     BorderTextPos::Top, BorderTextAlign::Center)
+        (std::move(body));
 }
 
 } // namespace agentty::ui
