@@ -37,14 +37,22 @@ maya::Element gap_row() {
 }
 
 // Leading separator between the frozen prefix and the first live
-// turn. A bare divider() gets visually eaten on the seam: the
-// width-aware component can resolve to blank() on the first frame
-// (w==0 during initial layout / resize), and even when it draws,
-// the adjacent Turn's top chrome sits flush against it. Sandwich
-// it with explicit blank rows so the seam is always visible.
+// turn. Historically this was a 3-row sandwich (blank + divider +
+// blank) to defend against the divider's width-aware component
+// resolving to blank() on the w==0 first frame. That defense had a
+// cost: when the in-flight turn later moved into m.ui.frozen,
+// freeze_range replaced this 3-row seam with the 1-row gap_row(),
+// shrinking the transcript by 2 rows in a single frame. The inline
+// renderer's diff can repaint cleanly, but rows that had already
+// scrolled into native scrollback during streaming retain the OLD
+// (3-row-seam) layout, surfacing as a ghost composer / duplicate
+// header at the scrollback↔viewport seam on the next keystroke.
+//
+// Symmetry with frozen.cpp's gap_row() eliminates the height shift
+// at the freeze instant. The w==0 first-frame risk is benign — maya
+// re-renders at proper width on the next frame anyway.
 maya::Element leading_seam_row() {
-    using namespace maya::dsl;
-    return v(blank(), maya::Conversation::divider(), blank()).build();
+    return maya::Conversation::divider();
 }
 
 // Sentinel-check: assistant message whose only content is tool_calls
