@@ -4,10 +4,13 @@
 #include <cctype>
 #include <chrono>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/activity_indicator_words.hpp"
 
 namespace agentty::ui {
 
@@ -38,6 +41,16 @@ std::string soft_verb(std::string_view raw) {
 
 } // namespace
 
+const std::vector<std::string_view>& activity_indicator_words() {
+    static const std::vector<std::string_view> pool = [] {
+        std::vector<std::string_view> v;
+        v.reserve(indicator_words::kPool.size());
+        for (auto sv : indicator_words::kPool) v.push_back(sv);
+        return v;
+    }();
+    return pool;
+}
+
 std::optional<maya::ActivityIndicator::Config>
 activity_indicator_config(const Model& m) {
     if (!m.s.active()) return std::nullopt;
@@ -59,6 +72,7 @@ activity_indicator_config(const Model& m) {
     cfg.edge_color    = edge;
     cfg.spinner_glyph = std::string{m.s.spinner.current_frame()};
     cfg.label         = soft_verb(phase_verb(m.s.phase));
+    cfg.words         = activity_indicator_words();
 
     // Elapsed seconds since the active phase started — same source the
     // status-bar PhaseChip reads. Shown as a muted "· 3.4s" tail so the

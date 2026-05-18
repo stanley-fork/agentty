@@ -14,8 +14,10 @@
 
 #include "agentty/runtime/view/thread/conversation.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <string_view>
 #include <utility>
 
 #include <maya/dsl.hpp>
@@ -24,6 +26,7 @@
 #include <maya/widget/turn.hpp>
 
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/activity_indicator.hpp"
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
 namespace agentty::ui {
@@ -182,6 +185,68 @@ void build_live_tail(const Model& m, int& running_turn,
             ind.edge_color    = cfg.rail_color;
             ind.spinner_glyph = std::string{m.s.spinner.current_frame()};
             ind.label         = "thinking";
+            ind.words         = activity_indicator_words();
+
+            // ── Stream telemetry. While the assistant message is an
+            // empty placeholder (pre-first-delta), we still surface
+            // live signals to the user:
+            //   • bytes already received on the wire (pending_stream
+            //     + streaming_text — the SSE smoother hasn't dripped
+            //     them into the visible text yet, but the bytes ARE
+            //     here),
+            //   • the rate the status-bar sparkline tracks,
+            //   • a Shannon-entropy estimate over the recent tail,
+            //     which gives the model's output a real fingerprint:
+            //     prose is ~4.0–4.5 bits/byte, code is ~5–6, dense
+            //     JSON tool calls climb to ~6–7. Watching H rise as a
+            //     reply transitions from prose into a tool argument
+            //     blob is genuinely informative.
+            // The active_ctx fields are populated from
+            // StreamStarted/Delta in the reducer; nullptr means the
+            // phase isn't a streaming phase, in which case we leave
+            // every telemetry field at its zero default and the
+            // widget collapses to the one-row form.
+            if (const auto* a = active_ctx(m.s.phase)) {
+                ind.stream_bytes = a->live_delta_bytes;
+                // Mirror the rate computed for the status-bar
+                // sparkline so the two readouts agree byte-for-byte:
+                // approx tokens (bytes/4) per elapsed second since
+                // first delta. Skip the first 250 ms to avoid
+                // divide-by-tiny-time spikes.
+                if (a->first_delta_at.time_since_epoch().count() != 0) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     now - a->first_delta_at).count();
+                    if (ts_ms >= 250) {
+                        double sec = static_cast<double>(ts_ms) / 1000.0;
+                        double tok = static_cast<double>(a->live_delta_bytes) / 4.0;
+                        ind.stream_rate = static_cast<float>(tok / sec);
+                    }
+                }
+            }
+
+            // Entropy window: last 512 bytes of pending_stream +
+            // streaming_text on the assistant message we're rendering
+            // for. Both buffers carry raw model output; we tail the
+            // combined view so the histogram reflects the freshest
+            // bytes regardless of which buffer they're currently in.
+            // Capped so cost stays trivial (~512 chars × 1 histogram
+            // pass per frame).
+            constexpr std::size_t kEntropyTail = 512;
+            const std::string& a_text = msg.streaming_text;
+            const std::string& a_pend = msg.pending_stream;
+            // Prefer the smoother's pending buffer if it carries
+            // anything (latest bytes off the wire); fall back to the
+            // already-rendered streaming_text otherwise. We don't
+            // need to concatenate — the histogram only needs *some*
+            // recent sample to produce a useful estimate.
+            const std::string& src = !a_pend.empty() ? a_pend : a_text;
+            if (!src.empty()) {
+                std::size_t n = std::min(kEntropyTail, src.size());
+                ind.entropy_window = std::string_view{
+                    src.data() + src.size() - n, n};
+            }
+
             cfg.body.emplace_back(
                 maya::ActivityIndicator{std::move(ind)}.build());
         }

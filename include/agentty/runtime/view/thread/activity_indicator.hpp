@@ -1,5 +1,7 @@
 #pragma once
 #include <optional>
+#include <string_view>
+#include <vector>
 #include <maya/widget/activity_indicator.hpp>
 #include "agentty/runtime/model.hpp"
 
@@ -12,5 +14,12 @@ namespace agentty::ui {
 // was just duplicate chrome.
 [[nodiscard]] std::optional<maya::ActivityIndicator::Config>
     activity_indicator_config(const Model& m);
+
+// Shared host-owned rotating word pool for the ActivityIndicator.
+// Returned by const-ref; lifetime is static. Both the bottom-of-
+// thread indicator and the in-Turn placeholder indicator wire this
+// into ActivityIndicator::Config::words so the widget stays
+// content-agnostic.
+[[nodiscard]] const std::vector<std::string_view>& activity_indicator_words();
 
 } // namespace agentty::ui
