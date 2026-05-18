@@ -467,4 +467,98 @@ using Msg = std::variant<
     msg::MetaMsg
 >;
 
+// ── Msg-domain proofs ─────────────────────────────────────────
+// The Msg variant relies on `std::variant`'s converting constructor to
+// route a leaf (e.g. `ComposerEnter{}`) into the right domain arm by
+// finding the UNIQUE domain whose variant accepts it. "Unique" is the
+// load-bearing word: if a leaf appears in two domain variants, the
+// converting constructor is ambiguous and the build fails — but only
+// at the call site that tries to construct the Msg. The proofs below
+// surface that property in one place so the failure is at THIS line,
+// not at every dispatch in the codebase.
+namespace msg_proofs {
+
+// True if leaf type L is one of the alternatives of variant V.
+template <class L, class V>
+struct in_variant : std::false_type {};
+template <class L, class... Ts>
+struct in_variant<L, std::variant<Ts...>>
+    : std::bool_constant<(std::is_same_v<L, Ts> || ...)> {};
+template <class L, class V>
+inline constexpr bool in_variant_v = in_variant<L, V>::value;
+
+// Count how many domain variants contain leaf L. Should be exactly 1
+// for every leaf the runtime actually uses.
+template <class L>
+consteval int leaf_domain_count() {
+    return int{in_variant_v<L, msg::ComposerMsg>}
+         + int{in_variant_v<L, msg::StreamMsg>}
+         + int{in_variant_v<L, msg::ToolMsg>}
+         + int{in_variant_v<L, msg::ModelPickerMsg>}
+         + int{in_variant_v<L, msg::ThreadListMsg>}
+         + int{in_variant_v<L, msg::CommandPaletteMsg>}
+         + int{in_variant_v<L, msg::MentionPaletteMsg>}
+         + int{in_variant_v<L, msg::SymbolPaletteMsg>}
+         + int{in_variant_v<L, msg::TodoMsg>}
+         + int{in_variant_v<L, msg::LoginMsg>}
+         + int{in_variant_v<L, msg::DiffReviewMsg>}
+         + int{in_variant_v<L, msg::MetaMsg>};
+}
+
+// Sample of representative leaves across every domain. If any of these
+// lands in 0 domains, the variant member needs an arm; if any lands in
+// 2+, the converting constructor for Msg becomes ambiguous and call
+// sites stop compiling. We hand-pick one leaf per domain rather than
+// trying to enumerate all 79+ leaves — the proof only needs to catch
+// the case where SOMEONE adds a leaf in two domains by accident; one
+// witness per domain is enough to keep the discipline visible here.
+static_assert(leaf_domain_count<ComposerCharInput>()         == 1,
+              "ComposerCharInput must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<StreamTextDelta>()           == 1,
+              "StreamTextDelta must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<ToolExecOutput>()            == 1,
+              "ToolExecOutput must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenModelPicker>()           == 1,
+              "OpenModelPicker must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<NewThread>()                 == 1,
+              "NewThread must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<CommandPaletteSelect>()      == 1,
+              "CommandPaletteSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<MentionPaletteSelect>()      == 1,
+              "MentionPaletteSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<SymbolPaletteSelect>()       == 1,
+              "SymbolPaletteSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<UpdateTodos>()               == 1,
+              "UpdateTodos must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<LoginSubmit>()               == 1,
+              "LoginSubmit must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<AcceptAllChanges>()          == 1,
+              "AcceptAllChanges must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<Tick>()                      == 1,
+              "Tick must belong to exactly one Msg domain");
+
+// Pin the top-level Msg domain count too — if someone adds a new domain
+// they must also update the kDomains array used by the dispatcher in
+// update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
+// switch loses a domain silently.
+static_assert(std::variant_size_v<Msg> == 12,
+              "Msg domain count changed — update the dispatcher in "
+              "src/runtime/app/update.cpp and this proof to match");
+
+// Spot-check the converting-constructor is unambiguous for a few
+// representative leaves. If a leaf appeared in two domain variants the
+// line `Msg{X{}}` would fail to compile here — surfacing the problem
+// at the proof site instead of every dispatch call site.
+static_assert([] {
+    Msg m1 = ComposerEnter{};       (void)m1;
+    Msg m2 = StreamFinished{};      (void)m2;
+    Msg m3 = Tick{};                (void)m3;
+    Msg m4 = NewThread{};           (void)m4;
+    Msg m5 = OpenLogin{};           (void)m5;
+    return true;
+}(), "Msg leaf construction must be unambiguous — if this fires, some "
+     "leaf appears in two domain variants");
+
+} // namespace msg_proofs
+
 } // namespace agentty
