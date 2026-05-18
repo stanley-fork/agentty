@@ -513,6 +513,54 @@ mutations happen on the UI thread inside the reducer. No race.
 
 ---
 
+## Finding 12 — StreamingMarkdown async-parse adopt races with direct mutators [RESOLVED]
+
+**Fix applied.** `set_content_async`'s worker writes `source_` /
+`committed_` / `prefix_` on the foreground thread when its result
+lands (`maybe_apply_async_`). The original adopt gate compared only
+`async_latest_source_` against the worker's input — it didn't check
+that the foreground's `source_` was still at that state. Any direct
+`set_content` / `append` / `finish` call between worker spawn and
+worker landing would NOT clear `async_latest_source_`, so the worker
+result would adopt: source_ rewinds to the worker's input, committed_
+snaps back, prefix_ is replaced — silently undoing the host's most
+recent mutation.
+
+Fix is three-pronged:
+
+1. `set_content_async`'s sync-delegate branches (both the growth-from-
+   prefix path and the below-threshold path) now clear `async_slot_`
+   and `async_latest_source_` so any in-flight worker's result is
+   discarded on arrival.
+2. `finish()` mirrors `clear()` and drops the in-flight slot. Without
+   this, finalize-during-async (would-be rare; possible if a long
+   thread loads and `cached_markdown_for` calls `finish()` while a
+   pending divergent-prefix parse is mid-flight) could see the worker
+   land *after* finish committed everything and clobber the finished
+   state.
+3. `maybe_apply_async_` adds defense-in-depth: even if a future caller
+   forgets to clear the sentinel, adoption requires `source_` to be
+   byte-equal to `async_latest_source_`. Mismatch → discard.
+
+**Files**
+
+- `maya/src/widget/markdown/streaming.cpp` — `set_content_async`,
+  `finish`, `maybe_apply_async_`.
+
+**Reachability in agentty's host flow.** The async path is only
+spawned when `source_` is non-empty AND the incoming content
+diverges from `source_` as a prefix AND content size ≥ 16 KB. In
+agentty's `cached_markdown_for` flow, settled-message bytes are
+immutable and live-streaming bytes only ever grow, so the divergent
+branch is essentially unreachable. The fix is still worth landing
+because (a) the widget's public API contract is now coherent, and
+(b) any future host operation that swaps a non-empty widget to a
+large unrelated body (thread switch into a cache slot that survived
+LRU eviction is the obvious candidate) would otherwise have hit
+silent state corruption.
+
+---
+
 ## Bottom line — confirmed corruption pathways
 
 | # | Severity | Trigger | Mode | Status |
@@ -522,6 +570,7 @@ mutations happen on the UI thread inside the reducer. No race.
 | 3 | File corruption (adjacent to rendering) | Stream cuts off mid-string in `content`/`new_string` field | truncated file write | **resolved** (`ended_inside_string` gate in `salvage_args`) |
 | 4 | Cosmetic | During compaction window | turn numbering off-by-N | **resolved** (seed `thread_view_start_turn` with folded count) |
 | 5 | Currently safe, zero slack | maybe_virtualize + finish() coincide on same frame | (potential — flag for future readers) | unchanged |
+| 12 | Latent widget-API hazard | async parse lands while host did direct set_content/append/finish | source_ / prefix_ rewind to stale snapshot | **resolved** (slot drop on sync delegate + finish; source_ verify in adopt gate) |
 
 The renderer itself (the `compose_inline_frame` diff path,
 `commit_prefix` shift math, the `(prev_width, prev_rows)` case
