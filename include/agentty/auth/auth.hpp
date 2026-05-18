@@ -66,6 +66,41 @@ struct OAuth {
 
 using Credentials = std::variant<cred::None, cred::ApiKey, cred::OAuth>;
 
+// ── AuthHeader (typed wire credential) ─────────────────────────────
+// Closed sum over the two header shapes Anthropic accepts. The variant
+// arm IS the header NAME — there is no codepath that takes a Bearer
+// token and emits it under `x-api-key:` (or vice versa) because the
+// header name is selected by std::visit on the arm, not by a side-
+// channel `Style` enum that could disagree with the value.
+//
+// Construct via `make_auth_header(creds)`; never assemble by hand from
+// loose strings. The transport's request type holds this directly
+// instead of the historical `(string auth_header, Style auth_style)`
+// pair, and the provider abstraction threads it through unchanged.
+struct ApiKeyHeader {
+    // Raw `sk-ant-…` key. Goes out as `x-api-key: <value>`.
+    std::string value;
+};
+struct BearerHeader {
+    // Just the token — "Bearer " is prepended at emission time. Goes
+    // out as `Authorization: Bearer <token>`.
+    std::string token;
+};
+using AuthHeader = std::variant<ApiKeyHeader, BearerHeader>;
+
+// Translate a credential to its wire-typed header. The single point of
+// translation — no other site in the codebase should be picking
+// (header_name, value) for itself.
+//
+// `cred::None` maps to an empty `ApiKeyHeader{""}`; transport callers
+// reject that with a "not authenticated" error before dialing.
+[[nodiscard]] AuthHeader make_auth_header(const Credentials& c);
+
+// True when the variant carries no usable secret — either arm with an
+// empty payload. The transport uses this in place of the historical
+// `auth_header.empty()` check.
+[[nodiscard]] bool is_empty(const AuthHeader& h) noexcept;
+
 // Free helpers — the variant is the truth, these are derived views.
 [[nodiscard]] bool        is_valid(const Credentials& c) noexcept;
 [[nodiscard]] bool        is_expired(const Credentials& c) noexcept;

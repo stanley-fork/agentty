@@ -19,10 +19,9 @@ void install_deps(Deps d) {
     g_deps = &storage;
 }
 
-void update_auth(std::string header, auth::Style style) {
+void update_auth(auth::AuthHeader auth) {
     if (!g_deps) return;
-    g_deps->auth_header = std::move(header);
-    g_deps->auth_style  = style;
+    g_deps->auth = std::move(auth);
 }
 
 } // namespace agentty::app

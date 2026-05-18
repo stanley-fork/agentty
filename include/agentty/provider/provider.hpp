@@ -52,8 +52,10 @@ struct Request {
     std::vector<ToolSpec> tools;
     int max_tokens = kSafeMaxTokens;
 
-    std::string auth_header;
-    auth::Style auth_style = auth::Style::ApiKey;
+    // Typed credential — the variant arm names the wire header. See
+    // agentty/auth/auth.hpp for the AuthHeader definition; transports
+    // never see a loose (header, style) pair.
+    auth::AuthHeader auth;
 
     // Optional cancellation handle. Tripping the token from the UI thread
     // tears down the in-flight stream within ~200 ms. Null means uncancellable.

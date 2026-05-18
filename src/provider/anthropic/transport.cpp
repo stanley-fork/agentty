@@ -548,8 +548,12 @@ std::string select_betas(std::string_view model, bool is_oauth,
 // `streaming=true` adds the same x-stainless-helper-method+x-stainless-helper
 // pair that cli.js's MessageStream._createMessage() injects when entering the
 // BetaToolRunner agent loop — Anthropic's edge keys some quotas off these.
-http::Headers build_request_headers(bool is_oauth,
-                                    const std::string& auth_header,
+//
+// AuthHeader is the closed sum (ApiKeyHeader | BearerHeader); std::visit
+// dispatches to the right header NAME at the type level. There's no way
+// to send an OAuth token under `x-api-key:` or vice versa — the variant
+// arm names the header.
+http::Headers build_request_headers(const AuthHeader& auth,
                                     std::string_view beta_value,
                                     int timeout_seconds,
                                     bool streaming = false) {
@@ -577,8 +581,17 @@ http::Headers build_request_headers(bool is_oauth,
         h.push_back({"x-stainless-helper-method", "stream"});
         h.push_back({"x-stainless-helper",        "BetaToolRunner"});
     }
-    if (is_oauth) h.push_back({"authorization", auth_header});
-    else          h.push_back({"x-api-key",     auth_header});
+    // The variant arm dictates the header. "Bearer " prefix is owned by
+    // this site — callers hand us a raw token, not a prefixed string —
+    // so an API key can't accidentally land with a Bearer prefix either.
+    std::visit([&](const auto& a) {
+        using T = std::decay_t<decltype(a)>;
+        if constexpr (std::is_same_v<T, ApiKeyHeader>) {
+            h.push_back({"x-api-key", a.value});
+        } else if constexpr (std::is_same_v<T, BearerHeader>) {
+            h.push_back({"authorization", "Bearer " + a.token});
+        }
+    }, auth);
     return h;
 }
 
@@ -1244,7 +1257,7 @@ std::vector<ToolSpec> default_tools() {
 // ----------------------------------------------------------------------------
 
 void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
-    if (req.auth_header.empty()) {
+    if (is_empty(req.auth)) {
         sink(StreamError{"not authenticated — run 'agentty login' or set ANTHROPIC_API_KEY"});
         return;
     }
@@ -1272,7 +1285,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         ctx.terminated = true;
     };
 
-    const bool is_oauth = (req.auth_style == auth::Style::Bearer);
+    const bool is_oauth = std::holds_alternative<BearerHeader>(req.auth);
 
     json body;
     body["model"]      = req.model;
@@ -1390,7 +1403,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // cancellation polled at frame boundaries.
     const bool any_eager = std::ranges::any_of(req.tools,
         [](const auto& t){ return t.eager_input_streaming; });
-    hreq.headers = build_request_headers(is_oauth, req.auth_header,
+    hreq.headers = build_request_headers(req.auth,
                                          select_betas(req.model, is_oauth, any_eager),
                                          /*timeout_seconds=*/300,
                                          /*streaming=*/true);
@@ -1526,12 +1539,11 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     emit_terminal(ctx, std::nullopt);
 }
 
-std::vector<ModelInfo> list_models(const std::string& auth_header,
-                                   auth::Style auth_style) {
+std::vector<ModelInfo> list_models(const AuthHeader& auth) {
     std::vector<ModelInfo> result;
-    if (auth_header.empty()) return result;
+    if (is_empty(auth)) return result;
 
-    const bool is_oauth = (auth_style == auth::Style::Bearer);
+    const bool is_oauth = std::holds_alternative<BearerHeader>(auth);
 
     http::Request hreq;
     hreq.method  = http::HttpMethod::Get;
@@ -1544,7 +1556,7 @@ std::vector<ModelInfo> list_models(const std::string& auth_header,
     hreq.path    = "/v1/models?limit=100";
     // /v1/models doesn't need the streaming beta cocktail — just the oauth
     // gate when applicable, matching how cli.js calls model-listing endpoints.
-    hreq.headers = build_request_headers(is_oauth, auth_header,
+    hreq.headers = build_request_headers(auth,
                                          is_oauth ? headers::beta_oauth : "",
                                          /*timeout_seconds=*/10);
     // /v1/models is a small list (~30 KB at typical catalog size). Cap

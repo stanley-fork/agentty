@@ -92,6 +92,29 @@ Style style(const Credentials& c) noexcept {
     return std::holds_alternative<cred::OAuth>(c) ? Style::Bearer : Style::ApiKey;
 }
 
+AuthHeader make_auth_header(const Credentials& c) {
+    return std::visit([](const auto& v) -> AuthHeader {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::same_as<T, cred::None>) {
+            // Empty ApiKeyHeader is the canonical "unauthenticated" arm —
+            // is_empty(...) catches it before the transport dials.
+            return AuthHeader{ApiKeyHeader{}};
+        } else if constexpr (std::same_as<T, cred::ApiKey>) {
+            return AuthHeader{ApiKeyHeader{v.key}};
+        } else /* cred::OAuth */ {
+            return AuthHeader{BearerHeader{v.access_token}};
+        }
+    }, c);
+}
+
+bool is_empty(const AuthHeader& h) noexcept {
+    return std::visit([](const auto& a) noexcept {
+        using T = std::decay_t<decltype(a)>;
+        if constexpr (std::same_as<T, ApiKeyHeader>) return a.value.empty();
+        else /* BearerHeader */                      return a.token.empty();
+    }, h);
+}
+
 std::string_view persist_tag(const Credentials& c) noexcept {
     return std::visit([](const auto& v) noexcept -> std::string_view {
         using T = std::decay_t<decltype(v)>;

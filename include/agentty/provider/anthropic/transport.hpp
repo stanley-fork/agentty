@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -16,6 +17,15 @@
 #include "agentty/runtime/msg.hpp"
 
 namespace agentty::provider::anthropic {
+
+// Re-export the typed credential from the auth domain. Keeping it in
+// `auth::` (not duplicated here) lets the abstract `provider::Request`
+// hold it without dragging an anthropic-specific header in.
+using auth::AuthHeader;
+using auth::ApiKeyHeader;
+using auth::BearerHeader;
+using auth::make_auth_header;
+using auth::is_empty;
 
 struct ToolSpec {
     std::string name;
@@ -34,8 +44,11 @@ struct Request {
     // override bug that masked the cap on long write/edit calls.
     int max_tokens;
 
-    std::string auth_header;                 // "Bearer <t>" or raw API key
-    auth::Style auth_style = auth::Style::ApiKey;
+    // Typed credential. The variant arm IS the header name; there's no
+    // way to send (Bearer-token, "x-api-key") or vice versa because
+    // build_request_headers does std::visit and the two arms emit
+    // different header names.
+    AuthHeader auth;
 };
 
 using EventSink = std::function<void(Msg)>;
@@ -56,8 +69,9 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
 // Tool specs corresponding to our local tool implementations.
 [[nodiscard]] std::vector<ToolSpec> default_tools();
 
-// Fetch available models from Anthropic API.
-[[nodiscard]] std::vector<ModelInfo> list_models(const std::string& auth_header,
-                                                 auth::Style auth_style);
+// Fetch available models from Anthropic API. Takes the typed AuthHeader
+// so the model-list endpoint shares the same header-vs-token discipline
+// as the streaming path.
+[[nodiscard]] std::vector<ModelInfo> list_models(const AuthHeader& auth);
 
 } // namespace agentty::provider::anthropic

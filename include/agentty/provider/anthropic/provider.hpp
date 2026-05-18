@@ -18,8 +18,7 @@ public:
         areq.system_prompt = std::move(req.system_prompt);
         areq.messages      = std::move(req.messages);
         areq.max_tokens    = req.max_tokens;
-        areq.auth_header   = std::move(req.auth_header);
-        areq.auth_style    = req.auth_style;
+        areq.auth          = std::move(req.auth);
         areq.tools.reserve(req.tools.size());
         for (auto& t : req.tools)
             areq.tools.push_back({std::move(t.name),

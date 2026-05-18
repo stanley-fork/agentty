@@ -48,7 +48,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // without leaving the TUI; subscribe.cpp routes all input there
     // until they finish (or Esc out, leaving agentty unauth'd — they'll
     // hit a stream error on first send and can /login from the palette).
-    if (deps().auth_header.empty())
+    if (auth::is_empty(deps().auth))
         m.ui.login = ui::login::Picking{};
 
     std::vector<maya::Cmd<Msg>> cmds;

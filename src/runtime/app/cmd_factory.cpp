@@ -325,8 +325,7 @@ Cmd<Msg> launch_stream(Model& m) {
                                  t.eager_input_streaming});
         }
     }
-    req.auth_header = deps().auth_header;
-    req.auth_style  = deps().auth_style;
+    req.auth = deps().auth;
 
     // Mint a fresh cancel token per turn and stash it on the active
     // ctx so the Esc handler (Msg::CancelStream) can flip it. The
@@ -601,7 +600,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
 Cmd<Msg> fetch_models() {
     return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
         try {
-            auto models = provider::anthropic::list_models(deps().auth_header, deps().auth_style);
+            auto models = provider::anthropic::list_models(deps().auth);
             dispatch(ModelsLoaded{std::move(models)});
         } catch (const std::exception& e) {
             dispatch(StreamError{std::string{"models fetch: "} + e.what()});

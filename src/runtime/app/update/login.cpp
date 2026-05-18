@@ -34,7 +34,7 @@ namespace {
 // point so OAuth and ApiKey paths can't drift — both end here.
 void install_and_close(Model& m, auth::Credentials creds) {
     auth::save_credentials(creds);
-    agentty::app::update_auth(auth::header_value(creds), auth::style(creds));
+    agentty::app::update_auth(auth::make_auth_header(creds));
     m.ui.login = login::Closed{};
     m.s.status = "logged in";
     m.s.status_until = std::chrono::steady_clock::now()
@@ -282,7 +282,7 @@ Step token_refreshed(Model m, auth::TokenResult result) {
         tok.expires_in_s ? now_ms + tok.expires_in_s * 1000 : 0,
     }};
     auth::save_credentials(creds);
-    agentty::app::update_auth(auth::header_value(creds), auth::style(creds));
+    agentty::app::update_auth(auth::make_auth_header(creds));
 
     auto toast_cmd = set_status_toast(m, "OAuth token refreshed",
                                       std::chrono::seconds{3});

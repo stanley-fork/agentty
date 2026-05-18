@@ -41,8 +41,7 @@ struct Deps {
     std::function<std::string(std::string_view)> title_from;
 
     // ── Auth context (immutable for the session) ─────────────────────────
-    std::string auth_header;
-    auth::Style auth_style = auth::Style::ApiKey;
+    auth::AuthHeader auth;
 };
 
 [[nodiscard]] const Deps& deps();
@@ -53,11 +52,11 @@ void install_deps(Deps d);
 // a Cmd that calls this so the next stream pick up the new bearer
 // without restarting the process. Safe to call from the UI thread —
 // streams in flight cache the header at request-build time.
-void update_auth(std::string header, auth::Style style);
+void update_auth(auth::AuthHeader auth);
 
 // Convenience: bind a Provider + Store satisfying the concepts.
 template <provider::Provider P, store::Store S>
-void install(P& p, S& s, std::string auth_header, auth::Style style) {
+void install(P& p, S& s, auth::AuthHeader auth) {
     install_deps(Deps{
         .stream = [&p](provider::Request req, provider::EventSink sink) {
             p.stream(std::move(req), std::move(sink));
@@ -69,8 +68,7 @@ void install(P& p, S& s, std::string auth_header, auth::Style style) {
         .save_settings   = [&s](const store::Settings& x) { s.save_settings(x); },
         .new_thread_id   = [&s] { return s.new_id(); },
         .title_from      = [&s](std::string_view t) { return s.title_from(t); },
-        .auth_header     = std::move(auth_header),
-        .auth_style      = style,
+        .auth            = std::move(auth),
     });
 }
 

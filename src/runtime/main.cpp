@@ -257,7 +257,7 @@ int main(int argc, char** argv) {
     // ── Wire the Provider + Store seams ─────────────────────────────────
     provider::anthropic::AnthropicProvider provider;
     io::FsStore                            store;
-    app::install(provider, store, auth::header_value(creds), auth::style(creds));
+    app::install(provider, store, auth::make_auth_header(creds));
 
     // Pre-warm TLS to api.anthropic.com on a detached background thread.
     // The first prompt the user types will reuse the SSL session + DNS +
