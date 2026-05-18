@@ -53,6 +53,7 @@
 // so no internal locking is needed.
 
 #include <cstddef>
+#include <chrono>
 #include <list>
 #include <memory>
 #include <string>
@@ -86,6 +87,28 @@ struct MessageMdCache {
     // alone is a sufficient invariant.
     std::size_t                               last_settled_size =
         static_cast<std::size_t>(-1);
+
+    // ── Typewriter reveal cursor ──
+    //
+    // While a message is live (streaming), bytes from the model land
+    // in chunks of arbitrary size — sometimes a single token, often
+    // tens or hundreds of bytes at once. Feeding those chunks
+    // verbatim to the streaming widget makes text pop in abruptly.
+    // To smooth this, we feed only the first `revealed_size` bytes
+    // of the source each frame, and advance `revealed_size` at a
+    // fixed character rate (kRevealCharsPerSec). When the model is
+    // ahead of the cursor, the cursor catches up smoothly; when the
+    // cursor catches up to the model, it idles waiting for more
+    // bytes. On finish (settled) we snap to full size so no bytes
+    // are dropped.
+    //
+    // `last_reveal_tick` is the wall-clock at which `revealed_size`
+    // was last advanced; the next frame computes elapsed time and
+    // bumps the cursor accordingly. Codepoint-clean: we round the
+    // target byte index DOWN to a UTF-8 start byte so we never feed
+    // a half-multibyte sequence to the parser.
+    std::size_t                               revealed_size = 0;
+    std::chrono::steady_clock::time_point     last_reveal_tick{};
 };
 
 struct TurnConfigCache {

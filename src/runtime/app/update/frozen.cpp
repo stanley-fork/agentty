@@ -134,6 +134,14 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         const bool first_overall = m.ui.frozen.empty();
         if (!first_overall && !continuation) {
             m.ui.frozen.push_back(gap_row());
+        } else if (!first_overall && continuation) {
+            // Continuation: no ─ rule, but a one-row breather so the
+            // previous Turn's bottom chrome (ACTIONS panel border,
+            // settled markdown) doesn't fuse into this Turn's first
+            // body line. Matches conversation.cpp's live-tail policy
+            // so the visual stays stable across the live→frozen
+            // transition.
+            m.ui.frozen.push_back(maya::dsl::blank().build());
         }
 
         if (run_end > i + 1) {

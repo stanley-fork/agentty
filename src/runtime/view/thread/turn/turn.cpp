@@ -8,6 +8,7 @@
 
 #include <maya/widget/agent_timeline.hpp>
 #include <maya/widget/markdown.hpp>
+#include <maya/app/app.hpp>
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -57,6 +58,101 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     const std::string& source =
         msg.text.empty() ? msg.streaming_text : msg.text;
 
+    const bool settled = !msg.text.empty() && msg.streaming_text.empty();
+
+    // Fast-path: fully settled message whose reveal has completed.
+    // Skip all per-frame work (typewriter advance, set_content,
+    // finish, live-mode checks) and return the cached element tree
+    // directly. This is the dominant case on long sessions — N
+    // visible turns × every frame would otherwise pay constant
+    // overhead for each one.
+    if (settled
+        && cache.last_settled_size == source.size()
+        && cache.revealed_size    == source.size()) {
+        return cache.streaming->build();
+    }
+
+    // ── Typewriter reveal ──
+    //
+    // While streaming, advance a reveal cursor at a fixed character
+    // rate so chunky model output unfolds smoothly. The cursor only
+    // reveals bytes that have actually arrived (capped at source.size())
+    // so it idles when the model is slower than the reveal rate, and
+    // never gets ahead of the model. On settle we snap to full size
+    // so the final state matches the source exactly.
+    //
+    // Backlog policy: if the model is more than kBacklogSnap bytes
+    // ahead of the cursor (the model just dumped a huge chunk), snap
+    // the cursor forward to within kBacklogSnap of source.size() so
+    // the reveal doesn't lag forever on a multi-KB paste. The reveal
+    // is meant to be a smoothing filter, not a hard rate limit.
+    constexpr double kRevealCharsPerSec = 220.0;   // ~ChatGPT cadence
+    constexpr std::size_t kBacklogSnap   = 200;    // max bytes behind
+
+    const auto now = std::chrono::steady_clock::now();
+    if (settled) {
+        // Stream finished — snap reveal to full size immediately.
+        // The freeze path (stream.cpp's freeze_through on idle)
+        // snapshots this message into m.ui.frozen and stops calling
+        // cached_markdown_for for it; if revealed_size were still
+        // catching up at that moment the snapshot would freeze
+        // partial text + scramble glyphs forever. Smooth reveal is
+        // a streaming-only effect.
+        cache.revealed_size = source.size();
+        cache.last_reveal_tick = now;
+    } else if (source.empty()) {
+        cache.revealed_size = 0;
+        cache.last_reveal_tick = now;
+    } else {
+        if (cache.last_reveal_tick.time_since_epoch().count() == 0) {
+            cache.last_reveal_tick = now;
+        }
+        // Advance by elapsed time × rate (rounded down).
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                now - cache.last_reveal_tick).count();
+        const double new_chars =
+            (static_cast<double>(elapsed) / 1'000'000.0)
+            * kRevealCharsPerSec;
+        std::size_t advance = static_cast<std::size_t>(new_chars);
+        if (advance > 0) {
+            cache.revealed_size += advance;
+            // Move tick forward by the bytes we actually consumed to
+            // avoid floating-point drift (don't reset to `now`, which
+            // would silently drop sub-character fractions every frame).
+            const auto consumed_us = static_cast<long long>(
+                (static_cast<double>(advance) / kRevealCharsPerSec)
+                * 1'000'000.0);
+            cache.last_reveal_tick +=
+                std::chrono::microseconds(consumed_us);
+        }
+        // Cap to source size (never reveal bytes that don't exist).
+        if (cache.revealed_size > source.size())
+            cache.revealed_size = source.size();
+        // Snap forward if the backlog is huge — keep the reveal
+        // bounded behind the model so a sudden chunk doesn't take
+        // seconds to play out. Only applies while the model is still
+        // streaming; once settled, let the cursor finish naturally
+        // even if the final chunk was large.
+        if (!settled && source.size() > kBacklogSnap &&
+            cache.revealed_size + kBacklogSnap < source.size()) {
+            cache.revealed_size = source.size() - kBacklogSnap;
+            cache.last_reveal_tick = now;
+        }
+        // Round DOWN to a UTF-8 codepoint boundary so we never feed
+        // a half-multibyte sequence to the markdown parser.
+        while (cache.revealed_size > 0 &&
+               cache.revealed_size < source.size() &&
+               (static_cast<unsigned char>(source[cache.revealed_size])
+                & 0xC0) == 0x80) {
+            --cache.revealed_size;
+        }
+    }
+
+    // What we actually feed the widget this frame: the revealed prefix.
+    const std::string_view feed_source =
+        std::string_view{source}.substr(0, cache.revealed_size);
+
     // Settled-message fast path. Once a message has settled
     // (msg.text is final, streaming_text empty) the source bytes are
     // immutable for the rest of the session. set_content's equal-
@@ -71,12 +167,20 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // every frame to guard against a same-length in-place rewrite
     // that doesn't exist cost O(text) per visible settled turn per
     // frame — the dominant per-frame cost on long sessions.
-    const bool settled = !msg.text.empty() && msg.streaming_text.empty();
     const bool already_settled_into_cache =
         settled
-        && cache.last_settled_size == source.size();
+        && cache.last_settled_size == source.size()
+        && cache.revealed_size == source.size();
     if (!already_settled_into_cache) {
-        cache.streaming->set_content(source);
+        // Use the async variant: tiny appends stay on the sync
+        // incremental path inside StreamingMarkdown (cheap), but a
+        // diverging-prefix swap of >=16 KB (loading an old thread,
+        // recovering scrollback, pasting a long markdown body)
+        // gets offloaded to a worker so the render thread doesn't
+        // stall on the parse. While the worker is in flight the
+        // widget keeps returning its previous element tree, so
+        // there's no visible blank during the handoff.
+        cache.streaming->set_content_async(feed_source);
 
         // Settled message → commit any trailing tail to the prefix's
         // block list. Necessary because find_block_boundary only commits
@@ -96,11 +200,33 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         //
         // finish() is idempotent (no-op once committed_ == source_.size()),
         // so calling it every frame for a settled message is cheap.
-        if (settled) {
+        if (settled && cache.revealed_size == source.size()) {
             cache.streaming->finish();
             cache.last_settled_size = source.size();
+
+            // Auto-fold code blocks longer than ~40 lines so a wall
+            // of code in a long conversation doesn't push every
+            // other turn off-screen. The user can still unfold any
+            // block; auto_fold_long_blocks respects an explicit
+            // unfold (entry stored as `false`) and won't re-fold
+            // on subsequent calls. Threshold deliberately generous
+            // so short snippets keep their natural inline rendering.
+            constexpr std::uint16_t kFoldLineThreshold = 40;
+            constexpr std::uint32_t kFoldKinds =
+                (1u << static_cast<unsigned>(maya::StreamingMarkdown::BlockKind::CodeBlock));
+            cache.streaming->auto_fold_long_blocks(kFoldLineThreshold, kFoldKinds);
         }
     }
+
+    // Live mode: while streaming OR while the reveal cursor is still
+    // catching up to source.size(). The second condition keeps the
+    // animation alive for a fraction of a second after StreamFinished
+    // when bytes haven't fully unfolded yet (rare but visible at the
+    // end of short replies). The widget's animation frame request
+    // drives the per-frame advance of cache.revealed_size above.
+    const bool reveal_complete = cache.revealed_size >= source.size();
+    cache.streaming->set_live(!settled || !reveal_complete);
+    if (!reveal_complete) ::maya::request_animation_frame();
 
     return cache.streaming->build();
 }

@@ -114,6 +114,16 @@ void build_live_tail(const Model& m, int& running_turn,
             out.push_back(first_in_tail && !m.ui.frozen.empty()
                               ? leading_seam_row()
                               : gap_row());
+        } else if (continuation && i > 0) {
+            // Continuation turn: no ─ divider (that signals a new
+            // speaker; continuations stay under the same rail), but
+            // we still need a one-row breather so the previous
+            // Turn's bottom chrome (ACTIONS panel border, settled
+            // text) doesn't slam into the next Turn's first body
+            // line. Without this, a `tools → post-tool markdown`
+            // sequence renders the markdown's first paragraph
+            // touching the ACTIONS panel's bottom edge.
+            out.push_back(maya::dsl::blank().build());
         }
         first_in_tail = false;
 
