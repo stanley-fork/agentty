@@ -3,24 +3,106 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace agentty::tools::util {
 
 // ─────────────────────────────────────────────────────────────────────────
-// Shared line scanner.
+// Cost model. Matches Zed's StreamingFuzzyMatcher byte-for-byte.
 //
-// `Line` records three offsets per line:
-//   start       — first byte of the line (after the prior '\n').
-//   end         — one past the '\n' (or file end).
-//   indent_end  — offset of the first non-whitespace char (== end on a
-//                 blank line).
-//   trimmed_end — offset past the last non-whitespace char. On a blank
-//                 line, indent_end == trimmed_end == start.
+//   REPLACEMENT_COST = 1   line align, content differs by a typo-tolerant
+//                          fuzzy_eq (cheap — most "drift" lives here).
+//   INSERTION_COST   = 3   buffer has an extra line the query skips —
+//                          cheap, so the model can omit blank/comment lines.
+//   DELETION_COST    = 10  query has an extra line the buffer doesn't —
+//                          expensive, biases the search toward windows
+//                          that contain ALL the query lines.
+//
+// Two lines are "fuzzy equal" when normalized Levenshtein (1 − d/max_len)
+// is ≥ 0.8 — i.e. ~20% of characters can differ before the line stops
+// counting as a match. That covers single-char typos, smart quotes,
+// inserted/removed punctuation, NBSP, etc., without needing a separate
+// unicode-normalization pass.
 // ─────────────────────────────────────────────────────────────────────────
-
 namespace {
+
+constexpr std::uint32_t REPLACEMENT_COST = 1;
+constexpr std::uint32_t INSERTION_COST   = 3;
+constexpr std::uint32_t DELETION_COST    = 10;
+constexpr double        FUZZY_EQ_THRESHOLD = 0.8;   // line-level
+constexpr double        MATCH_RATIO        = 0.8;   // accepted match
+constexpr std::uint32_t LINE_HINT_TOLERANCE = 200;  // lines
+// Beyond this, the O(n*m) DP gets expensive. The exact-match fast path
+// handles every case below the cap; above it we conservatively bail to
+// "no match" rather than burn the watchdog. Real files vs. real needles
+// are well under this in practice.
+constexpr std::size_t   MAX_DP_CELLS = 2'000'000;   // ~16 MiB of state
+
+enum class Dir : std::uint8_t { Up, Left, Diag };
+
+struct Cell {
+    std::uint32_t cost;
+    Dir           dir;
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// Levenshtein distance (classic two-row Wagner-Fischer). We only need the
+// normalized score, but the distance itself is what we threshold.
+// O(|a| * |b|) time, O(min(|a|, |b|)) space. Lines are typically <120 cols
+// so this is cheap.
+// ─────────────────────────────────────────────────────────────────────────
+std::size_t levenshtein(std::string_view a, std::string_view b) noexcept {
+    if (a.size() < b.size()) std::swap(a, b);
+    if (b.empty()) return a.size();
+
+    std::vector<std::size_t> prev(b.size() + 1);
+    std::vector<std::size_t> curr(b.size() + 1);
+    for (std::size_t j = 0; j <= b.size(); ++j) prev[j] = j;
+
+    for (std::size_t i = 1; i <= a.size(); ++i) {
+        curr[0] = i;
+        for (std::size_t j = 1; j <= b.size(); ++j) {
+            std::size_t sub = prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1);
+            std::size_t ins = curr[j - 1] + 1;
+            std::size_t del = prev[j]     + 1;
+            curr[j] = std::min({sub, ins, del});
+        }
+        std::swap(prev, curr);
+    }
+    return prev[b.size()];
+}
+
+// Cheap pre-filter: if the length difference alone forces normalized
+// distance below the threshold, skip the full Levenshtein computation.
+// Lines that are wildly different sizes can't be fuzzy-equal.
+bool fuzzy_eq(std::string_view a, std::string_view b) noexcept {
+    if (a.empty() && b.empty()) return true;
+    auto max_len = std::max(a.size(), b.size());
+    if (max_len == 0) return true;
+    auto min_len_diff = (a.size() > b.size()) ? (a.size() - b.size())
+                                              : (b.size() - a.size());
+    // Lower bound on Levenshtein is |len(a) - len(b)|.
+    double min_norm = 1.0 - static_cast<double>(min_len_diff) / static_cast<double>(max_len);
+    if (min_norm < FUZZY_EQ_THRESHOLD) return false;
+    auto d = levenshtein(a, b);
+    double norm = 1.0 - static_cast<double>(d) / static_cast<double>(max_len);
+    return norm >= FUZZY_EQ_THRESHOLD;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Line index. We track three offsets per line:
+//   start         — byte offset of first char.
+//   end           — byte offset one past the trailing '\n' (or file end).
+//   indent_end    — first non-whitespace byte (== trimmed_end on a blank line).
+//   trimmed_end   — one past the last non-whitespace byte. trimmed view is
+//                   `[indent_end, trimmed_end)` and is what the DP compares.
+//
+// `trim(s)` returns the trimmed view of a string_view in line-oriented
+// callers (the needle is also split via lines and trimmed the same way).
+// ─────────────────────────────────────────────────────────────────────────
 
 struct Line {
     std::size_t start;
@@ -37,13 +119,9 @@ std::vector<Line> scan_lines(std::string_view s) {
     std::vector<Line> out;
     out.reserve(s.size() / 40 + 1);
     auto push = [&](std::size_t start, std::size_t end) {
-        // trimmed_end: walk back over \r/space/tab.
         std::size_t te = end;
         if (te > start && s[te - 1] == '\n') --te;
         while (te > start && is_ws(s[te - 1])) --te;
-        // indent_end: walk forward over space/tab. (Don't skip \r; that
-        // can only occur on a blank CRLF line, in which case the check
-        // below leaves indent_end at start.)
         std::size_t ie = start;
         while (ie < te && (s[ie] == ' ' || s[ie] == '\t')) ++ie;
         out.push_back({start, end, ie, te});
@@ -56,102 +134,33 @@ std::vector<Line> scan_lines(std::string_view s) {
     return out;
 }
 
-// Byte-equal comparison over two substring ranges.
-bool range_eq(std::string_view a, std::size_t a_lo, std::size_t a_hi,
-              std::string_view b, std::size_t b_lo, std::size_t b_hi) noexcept {
-    auto la = a_hi - a_lo, lb = b_hi - b_lo;
-    if (la != lb) return false;
-    for (std::size_t i = 0; i < la; ++i)
-        if (a[a_lo + i] != b[b_lo + i]) return false;
-    return true;
+inline std::string_view trimmed_of(std::string_view s, const Line& l) noexcept {
+    return s.substr(l.indent_end, l.trimmed_end - l.indent_end);
 }
 
-// Count exact occurrences of `needle` in `file` (used for strategy 1's
-// uniqueness bookkeeping).
-int count_occurrences(std::string_view file, std::string_view needle) noexcept {
-    if (needle.empty() || needle.size() > file.size()) return 0;
-    int n = 0;
-    std::size_t p = 0;
-    while ((p = file.find(needle, p)) != std::string_view::npos) {
-        ++n;
-        p += needle.size();
-    }
-    return n;
-}
-
-// ── Strategy 2: CRLF-normalize, exact ────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// Indent adjustment for `new_text`. When the matched buffer region's
+// indentation differs from the needle's, the model's new_text — which
+// was written at the needle's level — must be shifted to the buffer's
+// level so the splice preserves the file's convention.
 //
-// Windows-authored files and pastes from web tools frequently carry \r\n
-// line endings while the model emits plain \n (or vice versa). We do the
-// match on a \r-stripped view of the file AND the needle, then recover
-// the original byte range by replaying the strip offsets.
-
-struct StripResult {
-    std::string          stripped;
-    std::vector<std::size_t> src_of;  // src_of[i] = original byte offset
-                                      // of stripped[i] (one past the end
-                                      // is represented by the final entry
-                                      // src_of[stripped.size()] = file.size()).
-};
-
-StripResult strip_cr(std::string_view s) {
-    StripResult r;
-    r.stripped.reserve(s.size());
-    r.src_of.reserve(s.size() + 1);
-    for (std::size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '\r') continue;
-        r.src_of.push_back(i);
-        r.stripped.push_back(s[i]);
-    }
-    r.src_of.push_back(s.size());
-    return r;
-}
-
-// ── Strategy 4/5 helpers ─────────────────────────────────────────────────
+// We capture both sides as a STRUCTURAL prefix:
+//   needle_base = longest common whitespace prefix across non-blank needle lines
+//   file_base   = same, for the matched buffer lines
+// On apply, we strip `needle_base` from each non-blank new_text line and
+// prepend `file_base`. Blank lines stay verbatim.
 //
-// Detect a uniform per-line indent delta between a needle block and the
-// file lines it matched. Returns {have_delta, delta}. "Delta" means: for
-// every non-blank line pair, file_indent == needle_indent prefixed-or-
-// replaced by the same bytes. Concretely: we require there exists a
-// string D such that for every non-blank pair, file_indent == D +
-// needle_indent (the file is deeper) OR needle_indent == D + file_indent
-// (the file is shallower), consistently across all lines.
-//
-// The common cases this captures:
-//   - model output is at 2-space indent, file at 4-space → D = "  "
-//     prepended to every new_text non-blank line.
-//   - model output at 4-space, file at 2-space → strip first 2 spaces
-//     from every new_text non-blank line.
-//   - model tabs, file spaces, or vice versa → the "D" is computed
-//     byte-wise so mixed tab/space works if it's consistent.
-//
-// If the delta isn't consistent (some lines deeper, others shallower, or
-// differing prefixes), we return have_delta=false and leave new_text
-// unchanged. Better to keep the model's text than to corrupt it.
-
-// Detect a structural indentation shift between the needle and the file
-// lines it matched. We model it as: every non-blank needle line has the
-// form `needle_base + tail_i`, every corresponding file line has the form
-// `file_base + tail_i`, where `tail_i` is identical on both sides and
-// `needle_base`/`file_base` are the common leading indent of each side
-// respectively. If such a decomposition exists, we return it; `new_text`
-// is then transformed by stripping `needle_base` from each non-blank line
-// (if present) and prepending `file_base`.
-//
-// This handles the common realistic case where the model emits a block
-// at "outdented" zero or shallow indent (e.g. a method body shown without
-// its class wrapper) and the file has it at deeper indent — the per-line
-// byte delta differs (outer line gains 4 spaces, body line gains 4+2=6),
-// but the STRUCTURAL delta "drop the first N chars, add the first M chars"
-// is uniform.
+// Compared to Zed's per-character `IndentDelta { Spaces(±n) | Tabs(±n) }`,
+// this byte-prefix approach handles mixed tabs+spaces consistently and
+// degrades to a no-op when the bases are identical.
+// ─────────────────────────────────────────────────────────────────────────
 
 struct IndentDelta {
     bool        have = false;
-    std::string needle_base;   // strip this prefix from each non-blank new_text line
-    std::string file_base;     // then prepend this one
+    std::string needle_base;
+    std::string file_base;
 };
 
-// Longest common prefix of two byte strings.
 std::size_t common_prefix_len(std::string_view a, std::string_view b) noexcept {
     std::size_t n = std::min(a.size(), b.size());
     std::size_t k = 0;
@@ -160,74 +169,41 @@ std::size_t common_prefix_len(std::string_view a, std::string_view b) noexcept {
 }
 
 IndentDelta detect_indent_delta(std::string_view file_text,
-                                const std::vector<Line>& matched_file_lines,
                                 std::string_view needle_text,
+                                const std::vector<Line>& fl,
+                                std::size_t fl_lo,
+                                std::size_t fl_hi,
                                 const std::vector<Line>& nl) {
-    // 1. Find needle_base: the longest common whitespace prefix of every
-    //    non-blank needle line's indent.
     std::string_view needle_base;
     bool first = true;
     for (const auto& N : nl) {
         if (N.indent_end == N.trimmed_end) continue;
         std::string_view ind{needle_text.data() + N.start, N.indent_end - N.start};
         if (first) { needle_base = ind; first = false; }
-        else       { needle_base = needle_base.substr(0, common_prefix_len(needle_base, ind)); }
-    }
-    if (first) return {};   // no non-blank lines — nothing to infer
-
-    // 2. Same for file_base.
-    std::string_view file_base;
-    first = true;
-    for (std::size_t i = 0; i < nl.size(); ++i) {
-        const auto& F = matched_file_lines[i];
-        const auto& N = nl[i];
-        if (N.indent_end == N.trimmed_end) continue;
-        if (F.indent_end == F.trimmed_end) continue;
-        std::string_view ind{file_text.data() + F.start, F.indent_end - F.start};
-        if (first) { file_base = ind; first = false; }
-        else       { file_base = file_base.substr(0, common_prefix_len(file_base, ind)); }
+        else needle_base = needle_base.substr(0, common_prefix_len(needle_base, ind));
     }
     if (first) return {};
 
-    // 3. Verify the transformation is consistent: for every non-blank
-    //    pair, needle_line has `needle_base + tail` and file_line has
-    //    `file_base + tail` with the SAME tail (including the tail's own
-    //    leading whitespace, which represents real intra-block indentation).
-    for (std::size_t i = 0; i < nl.size(); ++i) {
-        const auto& N = nl[i];
-        const auto& F = matched_file_lines[i];
-        if (N.indent_end == N.trimmed_end) continue;
-        if (F.indent_end == F.trimmed_end) return {};  // needle non-blank maps to file blank — weird
-        std::string_view nind{needle_text.data() + N.start, N.indent_end - N.start};
-        std::string_view find{file_text.data()   + F.start, F.indent_end - F.start};
-        // Peel the bases.
-        if (nind.size() < needle_base.size()) return {};
-        if (find.size() < file_base.size())   return {};
-        std::string_view ntail = nind.substr(needle_base.size());
-        std::string_view ftail = find.substr(file_base.size());
-        if (ntail != ftail) return {};
-        // And the post-indent content must match byte-for-byte (already
-        // guaranteed by strategy 4's match, but we double-check indirectly
-        // by comparing trimmed content ranges).
-        if (!range_eq(file_text, F.indent_end, F.trimmed_end,
-                      needle_text, N.indent_end, N.trimmed_end))
-            return {};
+    std::string_view file_base;
+    first = true;
+    for (std::size_t i = fl_lo; i < fl_hi; ++i) {
+        const auto& F = fl[i];
+        if (F.indent_end == F.trimmed_end) continue;
+        std::string_view ind{file_text.data() + F.start, F.indent_end - F.start};
+        if (first) { file_base = ind; first = false; }
+        else file_base = file_base.substr(0, common_prefix_len(file_base, ind));
     }
+    if (first) return {};
 
     IndentDelta d;
-    d.have        = true;
+    d.have = true;
     d.needle_base.assign(needle_base);
     d.file_base.assign(file_base);
     return d;
 }
 
-// Apply the structural shift to `text`: strip `needle_base` from each
-// non-blank line's leading bytes if present, then prepend `file_base`.
-// Blank lines are preserved verbatim so we don't introduce trailing
-// whitespace on them.
 std::string apply_indent_delta(std::string_view text, const IndentDelta& d) {
-    if (!d.have) return std::string{text};
-    if (d.needle_base.empty() && d.file_base.empty()) return std::string{text};
+    if (!d.have || d.needle_base == d.file_base) return std::string{text};
     std::string out;
     out.reserve(text.size() + text.size() / 8);
     std::size_t i = 0;
@@ -235,7 +211,7 @@ std::string apply_indent_delta(std::string_view text, const IndentDelta& d) {
         std::size_t line_start = i;
         while (i < text.size() && text[i] != '\n') ++i;
         std::size_t line_end = i;
-        if (i < text.size()) ++i;  // consume '\n'
+        if (i < text.size()) ++i;
         bool blank = true;
         for (std::size_t k = line_start; k < line_end; ++k)
             if (!is_ws(text[k])) { blank = false; break; }
@@ -245,7 +221,8 @@ std::string apply_indent_delta(std::string_view text, const IndentDelta& d) {
             std::size_t strip = 0;
             if (!d.needle_base.empty()
                 && line_end - line_start >= d.needle_base.size()
-                && std::string_view{text.data() + line_start, d.needle_base.size()} == d.needle_base) {
+                && std::string_view{text.data() + line_start,
+                                    d.needle_base.size()} == d.needle_base) {
                 strip = d.needle_base.size();
             }
             out.append(d.file_base);
@@ -257,149 +234,140 @@ std::string apply_indent_delta(std::string_view text, const IndentDelta& d) {
     return out;
 }
 
-// Normalize a byte string for strategy 5:
-//   - strip carriage returns
-//   - replace common unicode gotchas with ASCII
-//       NBSP (U+00A0, C2 A0)         → ' '
-//       Narrow NBSP (U+202F, E2 80 AF)
-//       Figure space / en / em / thin → ' '
-//       Left/right single quote       → '\''
-//       Left/right double quote       → '"'
-//       En/em dash                    → '-'
-//       Ellipsis (U+2026)             → '...'
-//   - collapse any run of [space tab] into a single space
-// Newlines are preserved 1:1. We also record a parallel src_of[] mapping
-// from every emitted byte back to the original offset so the caller can
-// recover the file-coordinate range of a match.
-
-struct SquashResult {
-    std::string              text;
-    std::vector<std::size_t> src_of; // size == text.size() + 1
-};
-
-SquashResult squash_normalize(std::string_view s) {
-    SquashResult r;
-    r.text.reserve(s.size());
-    r.src_of.reserve(s.size() + 1);
-    bool in_ws = false;
-    auto emit = [&](char c, std::size_t src) {
-        if (c == ' ' || c == '\t') {
-            if (in_ws) return;        // collapse
-            in_ws = true;
-            r.src_of.push_back(src);
-            r.text.push_back(' ');
-        } else {
-            in_ws = false;
-            r.src_of.push_back(src);
-            r.text.push_back(c);
-        }
-    };
-    for (std::size_t i = 0; i < s.size(); ) {
-        unsigned char c = static_cast<unsigned char>(s[i]);
-        if (c == '\r') { ++i; continue; }
-        if (c == '\n') {
-            in_ws = false;
-            r.src_of.push_back(i);
-            r.text.push_back('\n');
-            ++i;
-            continue;
-        }
-        if (c < 0x80) {
-            emit(static_cast<char>(c), i);
-            ++i;
-            continue;
-        }
-        // 2-byte UTF-8: U+0080..U+07FF.
-        if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) {
-            unsigned char c2 = static_cast<unsigned char>(s[i + 1]);
-            std::uint32_t cp = ((c & 0x1Fu) << 6) | (c2 & 0x3Fu);
-            if (cp == 0x00A0) { emit(' ', i); i += 2; continue; }
-            // Pass through as bytes.
-            emit(static_cast<char>(c),  i);
-            emit(static_cast<char>(c2), i + 1);
-            i += 2;
-            continue;
-        }
-        // 3-byte UTF-8: U+0800..U+FFFF.
-        if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) {
-            unsigned char c2 = static_cast<unsigned char>(s[i + 1]);
-            unsigned char c3 = static_cast<unsigned char>(s[i + 2]);
-            std::uint32_t cp = ((c & 0x0Fu) << 12)
-                             | ((c2 & 0x3Fu) << 6)
-                             |  (c3 & 0x3Fu);
-            switch (cp) {
-                case 0x2002: case 0x2003: case 0x2004: case 0x2005:
-                case 0x2006: case 0x2007: case 0x2008: case 0x2009:
-                case 0x200A: case 0x202F: case 0x205F: case 0x3000:
-                    emit(' ', i);   i += 3; continue;
-                case 0x2018: case 0x2019: case 0x201A: case 0x201B:
-                    emit('\'', i);  i += 3; continue;
-                case 0x201C: case 0x201D: case 0x201E: case 0x201F:
-                    emit('"',  i);  i += 3; continue;
-                case 0x2013: case 0x2014: case 0x2212:
-                    emit('-',  i);  i += 3; continue;
-                case 0x2026:
-                    emit('.', i); emit('.', i); emit('.', i);
-                    i += 3; continue;
-                default: break;
-            }
-            emit(static_cast<char>(c),  i);
-            emit(static_cast<char>(c2), i + 1);
-            emit(static_cast<char>(c3), i + 2);
-            i += 3;
-            continue;
-        }
-        // 4-byte and invalid: pass through.
-        emit(static_cast<char>(c), i);
-        ++i;
+// Count exact byte occurrences of `needle` in `file`.
+int count_occurrences(std::string_view file, std::string_view needle) noexcept {
+    if (needle.empty() || needle.size() > file.size()) return 0;
+    int n = 0;
+    std::size_t p = 0;
+    while ((p = file.find(needle, p)) != std::string_view::npos) {
+        ++n;
+        p += needle.size();
     }
-    r.src_of.push_back(s.size());
-    return r;
+    return n;
 }
 
-// Slide `needle_lines` across `file_lines` comparing byte ranges with the
-// supplied predicate. Return {ok, pos, len, count} in *file* coordinates.
-// `eq` is a line-level equality: (fline, nline) -> bool.
-template <class LineEq>
-FuzzyMatch sliding_match(std::string_view file_text,
-                         const std::vector<Line>& fl,
-                         std::string_view needle_text,
-                         const std::vector<Line>& nl,
-                         LineEq eq) {
-    FuzzyMatch r{false, 0, 0, 0, {}, 0};
-    if (nl.empty() || nl.size() > fl.size()) return r;
+// ─────────────────────────────────────────────────────────────────────────
+// The DP itself. Returns every (buffer_row_start, buffer_row_end_exclusive)
+// pair that ties for the minimum cost in the final row AND passes the
+// match-ratio quality gate. Caller picks one using line_hint or reports
+// ambiguity.
+// ─────────────────────────────────────────────────────────────────────────
 
-    std::size_t found_pos = 0, found_end = 0;
-    int count = 0;
-    for (std::size_t i = 0; i + nl.size() <= fl.size(); ++i) {
-        bool all = true;
-        for (std::size_t k = 0; k < nl.size(); ++k) {
-            if (!eq(file_text, fl[i + k], needle_text, nl[k])) {
-                all = false; break;
+struct DPMatch {
+    std::size_t row_start;     // inclusive
+    std::size_t row_end;       // inclusive
+    std::uint32_t cost;
+};
+
+std::vector<DPMatch> run_line_dp(std::string_view file,
+                                 std::string_view needle,
+                                 const std::vector<Line>& fl,
+                                 const std::vector<Line>& nl) {
+    if (nl.empty() || fl.empty()) return {};
+
+    const std::size_t Q = nl.size();          // query rows
+    const std::size_t B = fl.size();          // buffer rows
+    const std::size_t cols = B + 1;
+    const std::size_t rows = Q + 1;
+
+    if (rows * cols > MAX_DP_CELLS) return {};
+
+    // Pre-compute trimmed needle lines (cheap, lets fuzzy_eq skip work).
+    std::vector<std::string_view> needle_tr;
+    needle_tr.reserve(Q);
+    for (const auto& N : nl) needle_tr.push_back(trimmed_of(needle, N));
+
+    std::vector<Cell> dp(rows * cols, Cell{0, Dir::Diag});
+
+    // Top row is the "empty query" — cost 0 anywhere in the buffer (we can
+    // start matching at any column for free).
+    for (std::size_t c = 0; c <= B; ++c) dp[0 * cols + c] = {0, Dir::Diag};
+
+    // Left column: matching i query lines against zero buffer lines costs
+    // i * DELETION_COST. (Skipping query lines is expensive — biases toward
+    // complete-query matches.)
+    for (std::size_t r = 1; r <= Q; ++r)
+        dp[r * cols + 0] = {static_cast<std::uint32_t>(r) * DELETION_COST, Dir::Up};
+
+    for (std::size_t r = 1; r <= Q; ++r) {
+        std::string_view qline = needle_tr[r - 1];
+        for (std::size_t c = 1; c <= B; ++c) {
+            std::string_view bline = trimmed_of(file, fl[c - 1]);
+
+            std::uint32_t up = dp[(r - 1) * cols + c].cost;
+            up = (up > std::numeric_limits<std::uint32_t>::max() - DELETION_COST)
+               ?  std::numeric_limits<std::uint32_t>::max() : up + DELETION_COST;
+
+            std::uint32_t left = dp[r * cols + (c - 1)].cost;
+            left = (left > std::numeric_limits<std::uint32_t>::max() - INSERTION_COST)
+                 ?  std::numeric_limits<std::uint32_t>::max() : left + INSERTION_COST;
+
+            std::uint32_t diag_base = dp[(r - 1) * cols + (c - 1)].cost;
+            std::uint32_t diag;
+            if (qline == bline) {
+                diag = diag_base;
+            } else if (fuzzy_eq(qline, bline)) {
+                diag = (diag_base > std::numeric_limits<std::uint32_t>::max() - REPLACEMENT_COST)
+                     ?  std::numeric_limits<std::uint32_t>::max() : diag_base + REPLACEMENT_COST;
+            } else {
+                constexpr std::uint32_t mismatch = DELETION_COST + INSERTION_COST;
+                diag = (diag_base > std::numeric_limits<std::uint32_t>::max() - mismatch)
+                     ?  std::numeric_limits<std::uint32_t>::max() : diag_base + mismatch;
+            }
+
+            Cell best{up, Dir::Up};
+            if (left < best.cost) best = {left, Dir::Left};
+            if (diag < best.cost) best = {diag, Dir::Diag};
+            dp[r * cols + c] = best;
+        }
+    }
+
+    // Find all columns in the final row that tie for the minimum cost.
+    std::uint32_t best_cost = std::numeric_limits<std::uint32_t>::max();
+    std::vector<std::size_t> best_cols;
+    for (std::size_t c = 1; c <= B; ++c) {
+        auto cost = dp[Q * cols + c].cost;
+        if (cost < best_cost) { best_cost = cost; best_cols.clear(); best_cols.push_back(c); }
+        else if (cost == best_cost)               { best_cols.push_back(c); }
+    }
+    if (best_cols.empty()) return {};
+
+    // Trace back from each best column. We need the start row of the match
+    // and how many query lines actually aligned (diagonal moves).
+    std::vector<DPMatch> matches;
+    matches.reserve(best_cols.size());
+    for (std::size_t end_col : best_cols) {
+        std::size_t r = Q;
+        std::size_t c = end_col;
+        std::size_t matched = 0;
+        while (r > 0 && c > 0) {
+            auto d = dp[r * cols + c].dir;
+            if (d == Dir::Diag) {
+                // Only count this as a "matched line" when the trimmed
+                // pair is actually equal-or-fuzzy-equal — a Diag move
+                // with full mismatch cost is the DP's way of saying
+                // "we had to align this pair but they're not really the
+                // same line". Counting those inflates the match ratio
+                // and makes the quality gate accept garbage.
+                std::string_view qline = needle_tr[r - 1];
+                std::string_view bline = trimmed_of(file, fl[c - 1]);
+                if (qline == bline || fuzzy_eq(qline, bline)) ++matched;
+                --r; --c;
+            } else if (d == Dir::Up) {
+                --r;
+            } else {
+                --c;
             }
         }
-        if (!all) continue;
-
-        std::size_t pos = fl[i].start;
-        std::size_t end = fl[i + nl.size() - 1].end;
-        // Needle-had-trailing-newline? If not, strip the file's trailing
-        // \n from the match range so the splice length matches what the
-        // caller's `new_text` expects.
-        bool needle_had_trailing_nl = !needle_text.empty() && needle_text.back() == '\n';
-        if (!needle_had_trailing_nl && end > pos && file_text[end - 1] == '\n')
-            --end;
-
-        if (count == 0) { found_pos = pos; found_end = end; }
-        ++count;
-        if (count > 1) { r.count = count; return r; }
+        std::size_t row_start = c;            // first buffer row used
+        std::size_t row_end   = end_col - 1;  // inclusive last buffer row
+        std::size_t buf_rows  = end_col - row_start;
+        double ratio = static_cast<double>(matched)
+                     / static_cast<double>(std::max(buf_rows, Q));
+        if (ratio >= MATCH_RATIO)
+            matches.push_back({row_start, row_end, best_cost});
     }
-    if (count == 1) {
-        r.ok = true;
-        r.pos = found_pos;
-        r.len = found_end - found_pos;
-        r.count = 1;
-    }
-    return r;
+    return matches;
 }
 
 } // namespace
@@ -409,123 +377,102 @@ FuzzyMatch sliding_match(std::string_view file_text,
 // ─────────────────────────────────────────────────────────────────────────
 
 FuzzyMatch fuzzy_find(std::string_view file, std::string_view needle) {
-    return fuzzy_find(file, needle, {});
+    return fuzzy_find(file, needle, {},
+                      std::numeric_limits<std::uint32_t>::max());
 }
 
 FuzzyMatch fuzzy_find(std::string_view file,
                       std::string_view needle,
                       std::string_view new_text) {
+    return fuzzy_find(file, needle, new_text,
+                      std::numeric_limits<std::uint32_t>::max());
+}
+
+FuzzyMatch fuzzy_find(std::string_view file,
+                      std::string_view needle,
+                      std::string_view new_text,
+                      std::uint32_t    line_hint) {
     if (needle.empty()) return {false, 0, 0, 0, {}, 0};
 
-    // ── 1. Exact match, uniqueness check ────────────────────────────────
+    // ── Exact-match fast path ────────────────────────────────────────────
+    // Zero allocations, no DP. Single match wins outright; ambiguous cases
+    // still need the DP because a `line_hint` can break the tie.
     {
         int n = count_occurrences(file, needle);
         if (n == 1) {
             auto pos = file.find(needle);
             return {true, pos, needle.size(), 1, {}, 1};
         }
-        if (n >= 2) return {false, 0, 0, n, {}, 0};
+        // n == 0 → keep going (DP may still find a fuzzy hit).
+        // n >= 2 → keep going too; line_hint may disambiguate. Below we
+        // return that count so the error message is honest if neither
+        // path lands a unique match.
     }
 
-    // ── 2. CRLF-normalized exact ────────────────────────────────────────
-    //
-    // Only worth the cost if there's actually a \r in either side.
-    if (file.find('\r') != std::string_view::npos
-        || needle.find('\r') != std::string_view::npos) {
-        auto sf = strip_cr(file);
-        auto sn = strip_cr(needle);
-        int n = count_occurrences(sf.stripped, sn.stripped);
-        if (n == 1) {
-            auto p = sf.stripped.find(sn.stripped);
-            std::size_t src_lo = sf.src_of[p];
-            std::size_t src_hi = sf.src_of[p + sn.stripped.size()];
-            return {true, src_lo, src_hi - src_lo, 1, {}, 2};
-        }
-        if (n >= 2) return {false, 0, 0, n, {}, 0};
-    }
-
-    // ── Line windows ────────────────────────────────────────────────────
+    // ── Line index ───────────────────────────────────────────────────────
     auto fl = scan_lines(file);
     auto nl = scan_lines(needle);
 
-    // ── 3. Trailing-whitespace tolerant ─────────────────────────────────
-    {
-        auto m = sliding_match(file, fl, needle, nl,
-            [](std::string_view f, const Line& a,
-               std::string_view n, const Line& b) {
-                return range_eq(f, a.start, a.trimmed_end,
-                                n, b.start, b.trimmed_end);
-            });
-        if (m.ok)        { m.strategy = 3; return m; }
-        if (m.count >= 2){ return m; }
+    auto matches = run_line_dp(file, needle, fl, nl);
+    if (matches.empty()) {
+        // Re-check exact-count for the caller's diagnostic — if exact was
+        // ambiguous and DP found nothing better, surface the exact count.
+        int n = count_occurrences(file, needle);
+        if (n >= 2) return {false, 0, 0, n, {}, 0};
+        return {false, 0, 0, 0, {}, 0};
     }
 
-    // ── 4. Both-sides-trim (indentation drift) ──────────────────────────
-    //
-    // Compare line *content* (between indent_end and trimmed_end). If we
-    // land a unique hit and the caller supplied `new_text`, re-indent it
-    // from the needle's uniform prefix to the file's uniform prefix so
-    // the splice keeps the file's convention.
-    {
-        auto m = sliding_match(file, fl, needle, nl,
-            [](std::string_view f, const Line& a,
-               std::string_view n, const Line& b) {
-                // Blank lines: both must be blank.
-                bool ablank = (a.indent_end == a.trimmed_end);
-                bool bblank = (b.indent_end == b.trimmed_end);
-                if (ablank != bblank) return false;
-                if (ablank) return true;
-                return range_eq(f, a.indent_end, a.trimmed_end,
-                                n, b.indent_end, b.trimmed_end);
-            });
-        if (m.count >= 2) return m;
-        if (m.ok) {
-            m.strategy = 4;
-            if (!new_text.empty()) {
-                // Find the matched file lines so we can read their indent.
-                // sliding_match doesn't return the window index, so rescan
-                // by pos.
-                std::size_t wi = 0;
-                while (wi < fl.size() && fl[wi].start != m.pos) ++wi;
-                if (wi < fl.size() && wi + nl.size() <= fl.size()) {
-                    std::vector<Line> matched(fl.begin() + static_cast<std::ptrdiff_t>(wi),
-                                              fl.begin() + static_cast<std::ptrdiff_t>(wi + nl.size()));
-                    auto d = detect_indent_delta(file, matched, needle, nl);
-                    if (d.have && d.needle_base != d.file_base) {
-                        m.adjusted_new_text = apply_indent_delta(new_text, d);
-                    }
-                }
+    // Pick a single match. Prefer line_hint when supplied AND we have
+    // multiple candidates within tolerance.
+    const DPMatch* pick = nullptr;
+    if (matches.size() == 1) {
+        pick = &matches[0];
+    } else if (line_hint != std::numeric_limits<std::uint32_t>::max()) {
+        std::uint32_t best_dist = std::numeric_limits<std::uint32_t>::max();
+        for (const auto& m : matches) {
+            // start row of buffer match in 0-based file coordinates.
+            auto row = static_cast<std::uint32_t>(m.row_start);
+            std::uint32_t dist = (row > line_hint) ? (row - line_hint)
+                                                   : (line_hint - row);
+            if (dist <= LINE_HINT_TOLERANCE && dist < best_dist) {
+                best_dist = dist;
+                pick = &m;
             }
-            return m;
         }
     }
 
-    // ── 5. Whitespace-squash + unicode-normalize ────────────────────────
-    //
-    // Last-chance match. We compare per-line AFTER normalizing both sides
-    // with `squash_normalize` (all internal whitespace runs collapsed to
-    // a single space, NBSP/smart-quote/dash-ish unicode folded to ASCII).
-    {
-        auto sf = squash_normalize(file);
-        auto sn = squash_normalize(needle);
-        auto slf = scan_lines(sf.text);
-        auto sln = scan_lines(sn.text);
-        auto m = sliding_match(sf.text, slf, sn.text, sln,
-            [](std::string_view f, const Line& a,
-               std::string_view n, const Line& b) {
-                return range_eq(f, a.indent_end, a.trimmed_end,
-                                n, b.indent_end, b.trimmed_end);
-            });
-        if (m.count >= 2) return m;
-        if (m.ok) {
-            // Lift squashed coords back to original file coords.
-            std::size_t lo = sf.src_of[m.pos];
-            std::size_t hi = sf.src_of[m.pos + m.len];
-            return {true, lo, hi - lo, 1, {}, 5};
-        }
+    if (!pick) {
+        // Ambiguous and no usable hint. Report match count so the caller
+        // can emit a precise "appears N times at lines …" error.
+        return {false, 0, 0, static_cast<int>(matches.size()), {}, 0};
     }
 
-    return {false, 0, 0, 0, {}, 0};
+    // Compute the byte range. The match spans buffer rows [row_start, row_end].
+    // If the needle ended without a trailing newline, drop the trailing '\n'
+    // from the file range so the splice length stays consistent.
+    const auto& start_line = fl[pick->row_start];
+    const auto& end_line   = fl[pick->row_end];
+    std::size_t pos = start_line.start;
+    std::size_t end = end_line.end;
+    bool needle_had_trailing_nl = !needle.empty() && needle.back() == '\n';
+    if (!needle_had_trailing_nl && end > pos && file[end - 1] == '\n')
+        --end;
+
+    FuzzyMatch out{};
+    out.ok = true;
+    out.pos = pos;
+    out.len = end - pos;
+    out.count = 1;
+    out.strategy = (pick->cost == 0) ? 1 : 2;
+
+    // Indent fix-up. Only when caller actually supplied a replacement.
+    if (!new_text.empty()) {
+        auto d = detect_indent_delta(file, needle, fl,
+                                     pick->row_start, pick->row_end + 1, nl);
+        if (d.have && d.needle_base != d.file_base)
+            out.adjusted_new_text = apply_indent_delta(new_text, d);
+    }
+    return out;
 }
 
 } // namespace agentty::tools::util
