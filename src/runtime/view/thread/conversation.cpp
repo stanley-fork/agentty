@@ -110,11 +110,23 @@ void build_live_tail(const Model& m, int& running_turn,
         // continuations into the head message's panel. Identical
         // policy to freeze_range — keeps the visual stable across
         // the live→frozen transition.
+        //
+        // Head eligibility is any non-empty Assistant message (text,
+        // streaming text, or tool_calls). Without including text-only
+        // heads, a `text reply → tool call` two-message turn renders
+        // as two Turns where the second is flagged continuation and
+        // loses its `> Opus` header banner.
+        const bool head_mergeable =
+            msg.role == Role::Assistant
+            && (!msg.text.empty() || !msg.streaming_text.empty()
+                || !msg.tool_calls.empty());
         std::size_t run_end = i + 1;
-        while (run_end < total
-               && m.d.current.messages[run_end].role == Role::Assistant
-               && is_tool_only_assistant(m.d.current.messages[run_end])) {
-            ++run_end;
+        if (head_mergeable) {
+            while (run_end < total
+                   && m.d.current.messages[run_end].role == Role::Assistant
+                   && is_tool_only_assistant(m.d.current.messages[run_end])) {
+                ++run_end;
+            }
         }
 
         int turn_num = running_turn;

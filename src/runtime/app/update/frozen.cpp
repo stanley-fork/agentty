@@ -106,14 +106,25 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
 
         // Tool-batch merge: collapse a run of tool-only Assistant
         // continuations into the head message's panel. See
-        // conversation.cpp's legacy view path for the full rationale —
+        // conversation.cpp's live-tail path for the full rationale —
         // we replicate it here so the frozen visual matches what the
         // user saw during the live phase.
+        //
+        // Head eligibility is any non-empty Assistant message (text
+        // OR tool_calls). Without this, a `text reply → tool call`
+        // two-message turn freezes as two Turns where the second
+        // gets continuation=true and loses its header banner.
+        const bool head_mergeable =
+            msg.role == Role::Assistant
+            && (!msg.text.empty() || !msg.streaming_text.empty()
+                || !msg.tool_calls.empty());
         std::size_t run_end = i + 1;
-        while (run_end < to
-               && m.d.current.messages[run_end].role == Role::Assistant
-               && is_tool_only_assistant(m.d.current.messages[run_end])) {
-            ++run_end;
+        if (head_mergeable) {
+            while (run_end < to
+                   && m.d.current.messages[run_end].role == Role::Assistant
+                   && is_tool_only_assistant(m.d.current.messages[run_end])) {
+                ++run_end;
+            }
         }
 
         // Leading gap: one blank row before every fresh-speaker turn

@@ -141,19 +141,24 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
         cfg.footer = std::move(f);
     }
 
-    // ── Title and border.
+    // ── Title and border. Left side: "ACTIONS · done/total". Right side
+    //    (border-text-end): currently-running tool name while in flight,
+    //    or the total elapsed once settled — splitting the two pins the
+    //    elapsed to the right edge instead of leaving it left-glued to
+    //    the action count.
     std::string title = " " + small_caps("Actions") + "  \xc2\xb7  "
-                      + std::to_string(done) + "/" + std::to_string(total);
+                      + std::to_string(done) + "/" + std::to_string(total) + " ";
+    std::string title_end;
     if (running_idx >= 0) {
-        title += "  \xc2\xb7  " + tool_display_name(
-            tool_calls[static_cast<std::size_t>(running_idx)].name.value);
+        title_end = " " + tool_display_name(
+            tool_calls[static_cast<std::size_t>(running_idx)].name.value) + " ";
     } else if (done == total && total > 0) {
-        title += "  \xc2\xb7  " + format_duration_compact(total_elapsed);
+        title_end = " " + format_duration_compact(total_elapsed) + " ";
     }
-    title += " ";
 
     bool all_done = (done == total && total > 0);
     cfg.title        = std::move(title);
+    cfg.title_end    = std::move(title_end);
     cfg.border_color = all_done ? muted : rail_color;
     return cfg;
 }
