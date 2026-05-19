@@ -82,16 +82,24 @@ Element model_picker(const Model& m) {
         for (const auto& mi : m.d.available_models) {
             bool sel    = i == picker->index;
             bool active = mi.id == m.d.model_id;
-            auto prefix = sel ? text("› ", fg_bold(accent)) : text("  ");
+            // Selected row gets a full-width gray bar (bright_black
+            // bg) so the entire row is the affordance — no need for a
+            // › glyph that visually competes with the favourite star
+            // and the active checkmark. Text bumps to bright_white +
+            // bold so it stands out against the gray bg.
             auto star   = mi.favorite ? text("★ ", fg_of(warn)) : text("  ");
             auto active_mark = active ? text(" ✓", fg_of(success)) : text("");
-            cfg.items.push_back(hstack()
+            auto builder = hstack()
                 .width(Dimension::percent(100))
-                (prefix, star,
-                 text(mi.display_name,
-                      sel ? fg_bold(fg) : fg_of(muted)) | clip,
-                 spacer(),
-                 active_mark));
+                .padding(0, 1);
+            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
+            cfg.items.push_back(std::move(builder)(
+                star,
+                text(mi.display_name,
+                     sel ? fg_bold(maya::Color::bright_white())
+                         : fg_of(muted)) | clip,
+                spacer(),
+                active_mark));
             ++i;
         }
     }
@@ -129,7 +137,6 @@ Element thread_list(const Model& m) {
         int i = 0;
         for (const auto& t : m.d.threads) {
             bool sel = i == picker->index;
-            auto prefix = sel ? text("› ", fg_bold(info)) : text("  ");
             // Each row uses hstack().width(100%) so the row genuinely
             // spans the picker's full cross-axis width — without that,
             // a plain h(...).build() sizes to its content's natural
@@ -137,13 +144,23 @@ Element thread_list(const Model& m) {
             // messenger.cpp build_header() comment). With explicit
             // 100% width, spacer() absorbs everything between title
             // and timestamp, pushing the timestamp flush right.
-            cfg.items.push_back(hstack()
+            //
+            // Selection affordance: gray bar across the whole row
+            // (bg = bright_black) + bright_white bold text. Drops the
+            // › glyph so the row stays column-aligned regardless of
+            // selection state.
+            auto builder = hstack()
                 .width(Dimension::percent(100))
-                (prefix,
-                 text(t.title.empty() ? "(untitled)" : t.title,
-                      sel ? fg_of(fg) : fg_of(muted)) | clip,
-                 spacer(),
-                 text(timestamp_full(t.updated_at), fg_dim(muted))));
+                .padding(0, 1);
+            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
+            cfg.items.push_back(std::move(builder)(
+                text(t.title.empty() ? "(untitled)" : t.title,
+                     sel ? fg_bold(maya::Color::bright_white())
+                         : fg_of(muted)) | clip,
+                spacer(),
+                text(timestamp_full(t.updated_at),
+                     sel ? fg_of(maya::Color::bright_white())
+                         : fg_dim(muted))));
             ++i;
         }
     }
@@ -186,14 +203,18 @@ Element command_palette(const Model& m) {
         for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
             const auto& cmd = *matches[static_cast<std::size_t>(i)];
             bool sel = i == o->index;
-            auto prefix = sel ? text("› ", fg_bold(highlight)) : text("  ");
-            cfg.items.push_back(hstack()
+            auto builder = hstack()
                 .width(Dimension::percent(100))
-                (prefix,
-                 text(std::string{cmd.label},
-                      sel ? fg_bold(fg) : fg_of(muted)) | clip,
-                 spacer(),
-                 text(std::string{cmd.description}, fg_dim(muted)) | clip));
+                .padding(0, 1);
+            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
+            cfg.items.push_back(std::move(builder)(
+                text(std::string{cmd.label},
+                     sel ? fg_bold(maya::Color::bright_white())
+                         : fg_of(muted)) | clip,
+                spacer(),
+                text(std::string{cmd.description},
+                     sel ? fg_of(maya::Color::bright_white())
+                         : fg_dim(muted)) | clip));
         }
     }
 
@@ -230,14 +251,18 @@ Element mention_palette(const Model& m) {
             const auto& path = o->files[matches[static_cast<std::size_t>(i)]];
             auto [name, dir] = split_name_dir(path);
             bool sel = i == o->index;
-            auto prefix = sel ? text("› ", fg_bold(info)) : text("  ");
-            cfg.items.push_back(hstack()
+            auto builder = hstack()
                 .width(Dimension::percent(100))
-                (prefix,
-                 text(std::string{name},
-                      sel ? fg_bold(fg) : fg_of(fg)) | clip,
-                 spacer(),
-                 text(parent_segment(dir), fg_dim(muted)) | clip));
+                .padding(0, 1);
+            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
+            cfg.items.push_back(std::move(builder)(
+                text(std::string{name},
+                     sel ? fg_bold(maya::Color::bright_white())
+                         : fg_of(fg)) | clip,
+                spacer(),
+                text(parent_segment(dir),
+                     sel ? fg_of(maya::Color::bright_white())
+                         : fg_dim(muted)) | clip));
         }
     }
 
@@ -283,17 +308,24 @@ Element symbol_palette(const Model& m) {
             const auto& sym = o->entries[matches[static_cast<std::size_t>(i)]];
             auto [fname, dir] = split_name_dir(sym.path);
             bool sel = i == o->index;
-            auto prefix = sel ? text("› ", fg_bold(highlight)) : text("  ");
             std::string locus = std::string{fname} + ":"
                               + std::to_string(sym.line_number);
-            cfg.items.push_back(hstack()
+            auto builder = hstack()
                 .width(Dimension::percent(100))
-                (prefix,
-                 text(sym.name, sel ? fg_bold(fg) : fg_of(fg)) | clip,
-                 text("  "),
-                 text(locus, fg_dim(muted)) | clip,
-                 spacer(),
-                 text(parent_segment(dir), fg_dim(muted)) | clip));
+                .padding(0, 1);
+            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
+            cfg.items.push_back(std::move(builder)(
+                text(sym.name,
+                     sel ? fg_bold(maya::Color::bright_white())
+                         : fg_of(fg)) | clip,
+                text("  "),
+                text(locus,
+                     sel ? fg_of(maya::Color::bright_white())
+                         : fg_dim(muted)) | clip,
+                spacer(),
+                text(parent_segment(dir),
+                     sel ? fg_of(maya::Color::bright_white())
+                         : fg_dim(muted)) | clip));
         }
     }
 
