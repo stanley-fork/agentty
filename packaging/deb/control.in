@@ -1,0 +1,16 @@
+Package: agentty
+Version: @VERSION@
+Section: devel
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Ayush Bhat <tfeayush@gmail.com>
+Homepage: https://github.com/1ay1/agentty
+Recommends: bubblewrap, openssh-client
+Description: Blazing-fast Claude in your terminal
+ agentty is a single-binary terminal client for Anthropic's Claude,
+ written in C++26. Sub-millisecond cold start, sandboxed shell calls
+ by default (via bubblewrap), and one-command SSH airgap for running
+ the agent on hosts without direct internet access.
+ .
+ Drop-in alternative to claude-code with no Node, Python, or Electron
+ runtime. Authenticates with Claude Pro/Max OAuth or ANTHROPIC_API_KEY.
