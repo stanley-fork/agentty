@@ -20,3 +20,6 @@ credentials.json
 # Release artifacts (uploaded to GitHub releases, not committed)
 agentty-linux-*
 SHA256SUMS
+
+# Local dotfiles dump (not part of moha)
+dotfiles/
