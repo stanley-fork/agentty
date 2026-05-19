@@ -2,8 +2,8 @@
 # scripts/bump.sh — one-line release: bump → build everything → tag → publish.
 #
 # Usage:
-#   scripts/bump.sh 0.2.0          # full release (github + aur)
-#   scripts/bump.sh 0.2.0 --dry    # everything except `git push`, `gh release`, aur push
+#   scripts/bump.sh 0.2.0          # full release (github + aur + homebrew + scoop)
+#   scripts/bump.sh 0.2.0 --dry    # everything except `git push`, `gh release`, downstream pushes
 #   scripts/bump.sh 0.2.0 --no-aur # skip the AUR sync
 #
 # Flow:
@@ -12,9 +12,9 @@
 #   3. `cmake --build build -j` (sanity: the new version still compiles).
 #   4. git commit "release: vX.Y.Z" + git tag vX.Y.Z.
 #   5. scripts/release.sh --tag vX.Y.Z (builds every artifact + uploads via gh).
-#   6. Sync AUR repo: pull aur@aur.archlinux.org:agentty-bin.git into dist/aur/,
-#      replace PKGBUILD + regenerate .SRCINFO, commit + push.
-#   7. git push origin master --tags.
+#   6. Sync AUR repo (aur@aur.archlinux.org:agentty-bin.git).
+#   7. Sync 1ay1/homebrew-tap Formula/agentty.rb and 1ay1/scoop-bucket bucket/agentty.json.
+#   8. git push origin master --tags.
 #
 # Single source of truth: `CMakeLists.txt`. Everything downstream — User-Agent
 # strings baked into the binary, deb/rpm/arch/scoop/homebrew/AUR manifests,
@@ -52,7 +52,7 @@ ok()   { printf '\033[1;32m\xe2\x9c\x93\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m\xe2\x9c\x97\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---- 1. tree clean -----------------------------------------------------------
-hr "1/7  preflight"
+hr "1/8  preflight"
 current=$(sed -nE 's/.*project\(agentty VERSION ([0-9.]+).*/\1/p' CMakeLists.txt | head -1)
 [ -n "$current" ] || err "could not read current VERSION from CMakeLists.txt"
 info "$current  ->  $NEW_VERSION"
@@ -67,14 +67,14 @@ commit or stash them first."
 [ "$current" != "$NEW_VERSION" ] || err "version already $NEW_VERSION — nothing to bump"
 
 # ---- 2. rewrite CMakeLists.txt ----------------------------------------------
-hr "2/7  bump CMakeLists.txt"
+hr "2/8  bump CMakeLists.txt"
 sed -i -E "s/(project\(agentty VERSION )[0-9.]+/\1$NEW_VERSION/" CMakeLists.txt
 grep -E "^project\(agentty VERSION $NEW_VERSION" CMakeLists.txt >/dev/null \
     || err "sed rewrite failed"
 ok "project(agentty VERSION $NEW_VERSION ...)"
 
 # ---- 3. compile sanity-check ------------------------------------------------
-hr "3/7  build (sanity)"
+hr "3/8  build (sanity)"
 if [ -d build ]; then
     cmake --build build -j10 >/dev/null
     ok "rebuild green"
@@ -86,7 +86,7 @@ else
 fi
 
 # ---- 4. commit + tag --------------------------------------------------------
-hr "4/7  commit + tag"
+hr "4/8  commit + tag"
 git add CMakeLists.txt
 git commit -m "release: v$NEW_VERSION" >/dev/null
 ok "committed"
@@ -94,7 +94,7 @@ git tag "v$NEW_VERSION"
 ok "tagged v$NEW_VERSION"
 
 # ---- 5. release.sh ----------------------------------------------------------
-hr "5/7  build + upload artifacts"
+hr "5/8  build + upload artifacts"
 if [ "$DRY" -eq 1 ]; then
     info "--dry: skipping release.sh upload, building only"
     "$root/scripts/release.sh"
@@ -103,7 +103,7 @@ else
 fi
 
 # ---- 6. AUR sync ------------------------------------------------------------
-hr "6/7  AUR (agentty-bin)"
+hr "6/8  AUR (agentty-bin)"
 if [ "$DO_AUR" -eq 0 ]; then
     info "--no-aur: skipping AUR push"
 elif ! command -v makepkg >/dev/null 2>&1; then
@@ -149,8 +149,44 @@ else
     fi
 fi
 
-# ---- 7. push ----------------------------------------------------------------
-hr "7/7  push github"
+# ---- 7. downstream bucket/tap repos -----------------------------------------
+# Helper: sync ONE file into a separate GitHub repo at a target path. Idempotent;
+# bumps the version commit only when the file content actually changed.
+sync_to_repo() {
+    src=$1; remote=$2; rel_path=$3; label=$4
+    work=$(mktemp -d)
+    if ! git clone -q --depth 1 "$remote" "$work/repo" 2>/dev/null; then
+        info "$label: clone failed (does $remote exist? skipping)"
+        rm -rf "$work"
+        return 0
+    fi
+    mkdir -p "$(dirname "$work/repo/$rel_path")"
+    cp "$src" "$work/repo/$rel_path"
+    if [ -z "$(cd "$work/repo" && git status --porcelain)" ]; then
+        info "$label: already up-to-date"
+        rm -rf "$work"
+        return 0
+    fi
+    ( cd "$work/repo" \
+        && git add "$rel_path" \
+        && git -c user.name="$(git config user.name)" \
+               -c user.email="$(git config user.email)" \
+               commit -q -m "agentty $NEW_VERSION" )
+    if [ "$DRY" -eq 1 ]; then
+        info "$label: --dry, skipping push (staged in $work)"
+    else
+        ( cd "$work/repo" && git push -q origin HEAD )
+        ok "$label: $remote @ v$NEW_VERSION"
+        rm -rf "$work"
+    fi
+}
+
+hr "7/8  homebrew + scoop"
+sync_to_repo "$root/dist/packaging/agentty.rb"   git@github.com:1ay1/homebrew-tap.git  Formula/agentty.rb     homebrew
+sync_to_repo "$root/dist/packaging/agentty.json" git@github.com:1ay1/scoop-bucket.git  bucket/agentty.json    scoop
+
+# ---- 8. push ----------------------------------------------------------------
+hr "8/8  push github"
 if [ "$DRY" -eq 1 ]; then
     info "--dry: skipping git push"
 else
@@ -159,5 +195,7 @@ else
 fi
 
 hr "done — v$NEW_VERSION"
-info "github: https://github.com/1ay1/agentty/releases/tag/v$NEW_VERSION"
-[ "$DO_AUR" -eq 1 ] && info "aur:    https://aur.archlinux.org/packages/agentty-bin"
+info "github:   https://github.com/1ay1/agentty/releases/tag/v$NEW_VERSION"
+[ "$DO_AUR" -eq 1 ] && info "aur:      https://aur.archlinux.org/packages/agentty-bin"
+info "homebrew: https://github.com/1ay1/homebrew-tap"
+info "scoop:    https://github.com/1ay1/scoop-bucket"
