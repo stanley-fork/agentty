@@ -63,7 +63,7 @@ ExecResult run_web_search(const WebSearchArgs& a) {
     req.host   = "html.duckduckgo.com";
     req.port   = 443;
     req.path   = "/html/?q=" + url_escape(a.query);
-    req.headers.push_back({"user-agent", "agentty/0.1 (terminal agent)"});
+    req.headers.push_back({"user-agent", "agentty/" AGENTTY_VERSION " (terminal agent)"});
 
     http::Timeouts tos{
         .connect = std::chrono::milliseconds(10'000),

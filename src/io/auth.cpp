@@ -431,7 +431,7 @@ FormPostResult http_post_form(const std::string& url,
     hreq.headers = {
         {"content-type", "application/x-www-form-urlencoded"},
         {"accept",       "application/json"},
-        {"user-agent",   "agentty/0.1.0"},
+        {"user-agent",   "agentty/" AGENTTY_VERSION},
     };
     hreq.body = form_urlencode(fields);
     // OAuth token exchange/refresh response is a tiny JSON object

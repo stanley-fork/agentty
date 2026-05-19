@@ -261,11 +261,19 @@ struct Timeouts {
 // ---------------------------------------------------------------------------
 // Client. One instance = one process-wide HTTP/2 connection pool.
 // ---------------------------------------------------------------------------
+
+// Build-time version, baked from CMakeLists.txt's PROJECT_VERSION via
+// -DAGENTTY_VERSION. The fallback exists only for hand-invoked compiler
+// runs that bypass our CMake — keep the binary self-describing.
+#ifndef AGENTTY_VERSION
+#define AGENTTY_VERSION "0.0.0-dev"
+#endif
+
 class Client {
 public:
     struct Config {
-        // Defaults to a descriptive UA with the agentty version; override for tests.
-        std::string user_agent = "agentty/0.1.0";
+        // UA includes the build version; override for tests.
+        std::string user_agent = "agentty/" AGENTTY_VERSION;
         // When set, skip TLS chain verification — wire matches `-k` in curl.
         // Honors AGENTTY_INSECURE=1 env automatically in the ctor path.
         bool insecure = false;
