@@ -82,24 +82,39 @@ Element model_picker(const Model& m) {
         for (const auto& mi : m.d.available_models) {
             bool sel    = i == picker->index;
             bool active = mi.id == m.d.model_id;
-            // Selected row gets a full-width gray bar (bright_black
-            // bg) so the entire row is the affordance — no need for a
-            // › glyph that visually competes with the favourite star
-            // and the active checkmark. Text bumps to bright_white +
-            // bold so it stands out against the gray bg.
-            auto star   = mi.favorite ? text("★ ", fg_of(warn)) : text("  ");
-            auto active_mark = active ? text(" ✓", fg_of(success)) : text("");
+            // Two orthogonal affordances:
+            //   • SELECTED (cursor): full-width gray bar + bright_white
+            //     bold text. Transient — follows the user's arrows.
+            //   • ACTIVE (currently in use): a magenta left-edge bar
+            //     (▎) pinned to col 0 of the row. Persistent — marks
+            //     which model is actually live, regardless of cursor.
+            //
+            // Together: cursor on the active model shows both (gray bg
+            // + magenta left bar). Cursor on a different model shows
+            // only the gray bg; the magenta bar stays on the active
+            // row so the user can see what they'd be switching FROM.
+            // The previous trailing ✓ sat next to the scrollbar and
+            // read as visual noise; the left bar is the convention
+            // every modern editor (VS Code, Helix, Zed) uses for
+            // "current" affordances and reads instantly.
+            auto edge_bar = active
+                ? text("\xe2\x96\x8e",   // ▎ LEFT ONE QUARTER BLOCK
+                       fg_bold(accent))
+                : text(" ");
+            auto star = mi.favorite ? text(" ★", fg_of(warn)) : text("  ");
             auto builder = hstack()
                 .width(Dimension::percent(100))
                 .padding(0, 1);
             if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
             cfg.items.push_back(std::move(builder)(
-                star,
+                edge_bar,
+                text(" "),
                 text(mi.display_name,
-                     sel ? fg_bold(maya::Color::bright_white())
-                         : fg_of(muted)) | clip,
+                     sel    ? fg_bold(maya::Color::bright_white())
+                     : active ? fg_bold(fg)
+                              : fg_of(muted)) | clip,
                 spacer(),
-                active_mark));
+                star));
             ++i;
         }
     }
