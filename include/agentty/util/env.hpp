@@ -21,6 +21,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <string_view>
 
 namespace agentty::util::env {
