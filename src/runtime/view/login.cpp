@@ -270,19 +270,15 @@ Element login_modal(const Model& m) {
     }, m.ui.login);
 
     // Responsive sizing: `min_width` floors the modal at a readable
-    // width on tiny terminals; Overlay's default Stretch lets it
-    // grow to fill the available column space on wider terminals
-    // (minus the Overlay's 2-col edge padding). `max_width` clamps
-    // the upper bound so the URL doesn't reflow into one absurdly
-    // wide line on a 200-col terminal — readability over fill.
-    //
-    // No hard-coded `width(70)` like the previous version: that left
-    // narrow terminals with content that overflowed the border, and
-    // it wasted space on wider ones. Mirrors the pickers' wrap_picker.
+    // width on tiny terminals; the Overlay's default Stretch lets it
+    // grow to fill all available columns on wider terminals (minus the
+    // Overlay's 2-col edge padding). No max cap — every text node uses
+    // TextWrap::Wrap, so URLs and prose reflow naturally to whatever
+    // width the terminal gives us. Capping at 96 cols left ~50 cols of
+    // empty terminal on a typical 150-col window.
     return vstack()
         .padding(1, 2)
         .min_width(Dimension::fixed(48))
-        .max_width(Dimension::fixed(96))
         .border(BorderStyle::Round)
         .border_color(accent)
         .border_text(" Sign in to agentty ",
