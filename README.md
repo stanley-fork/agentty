@@ -5,105 +5,87 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++26](https://img.shields.io/badge/C%2B%2B-26-00599C)](https://en.cppreference.com/w/cpp/26)
 
-<p align="center"><em>a calm middleware between you and the model</em></p>
+**Claude in your terminal. One 9 MB binary. Sandboxed by default. SSH-airgap in one command.**
 
-**Single-binary terminal client for Claude** — 9 MB static, sandboxed bash by default, one-command SSH airgap. A drop-in alternative to `claude-code` with no Electron / Node / Python in the loop.
+A drop-in alternative to `claude-code` written in C++26 — no Node, no Python, no Electron, no `npm install`. Same OAuth (Pro/Max) and `ANTHROPIC_API_KEY` flows.
 
 <p align="center">
-  <img src="agentty.gif" alt="agentty — a real turn streaming, with a tool call landing" />
+  <img src="agentty.gif" alt="agentty streaming a turn with a tool call landing inline" />
 </p>
 
-Three things the official `claude-code` CLI doesn't try to do:
+## Why
 
-1. **Single static binary.** 9 MB. No Node runtime, no `npm install`, no JIT warmup, no GC pauses mid-stream. Spawns in milliseconds.
-2. **Sandbox by default.** Every `bash` and `diagnostics` call runs inside `bwrap` (Linux) / `sandbox-exec` (macOS). Workspace + system libs + network are reachable; `~/.ssh`, `/etc`, other projects are read-only. Even an approved bash call can't `cat ~/.ssh/id_rsa`.
-3. **One-command SSH airgap.** `agentty airgap user@host` runs the agent on a box that can't reach the internet directly — your laptop relays the bytes over a SOCKS5-over-SSH tunnel, TLS verification still pins on the real upstreams.
+Three things the official client doesn't try to do:
 
-Same OAuth (Pro/Max) and `ANTHROPIC_API_KEY` flows as `claude-code`. Switch between auth styles without re-authing.
+1. **One static binary.** 9 MB. `curl | chmod +x | run`. No runtime, no GC pauses mid-stream, spawns in milliseconds.
+2. **Sandbox by default.** Every shell and build call runs inside `bwrap` (Linux) / `sandbox-exec` (macOS). Workspace + system libs + network reachable; `~/.ssh`, `/etc`, other projects read-only. An approved `bash` call still can't `cat ~/.ssh/id_rsa`.
+3. **One-command SSH airgap.** `agentty airgap user@host` runs the agent on a box with no direct internet — your laptop relays the bytes over SOCKS5-over-SSH. TLS pins on the real upstreams end-to-end.
 
-- **Workspace boundary.** Filesystem tools refuse paths outside the directory you launched from. `--workspace /` opts out.
+Plus:
+
+- **Workspace boundary.** Filesystem tools refuse paths outside the launch directory (`--workspace /` opts out).
 - **Inline render.** Lives at the bottom of your terminal, preserves scrollback, doesn't take over the screen.
-- **Read every line.** The reducer is one `std::visit` over a closed event sum. The permission trust matrix is a `constexpr` function with `static_assert`s — change a policy cell and the build breaks, not a test that nobody runs.
+- **Reads like a single function.** The reducer is one `std::visit` over a closed event sum; the permission matrix is a `constexpr` with `static_assert`s — change a policy cell and the build breaks, not a test nobody runs.
 
 ## Install
 
-**Prebuilt binaries** (Linux) — fully-static musl builds, drop and run:
+**Prebuilt** — fully-static musl on Linux, drop and run:
 
 ```bash
-# x86_64
+# Linux x86_64
 curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-linux-x86_64 -o agentty && chmod +x agentty && ./agentty
 
-# aarch64
+# Linux aarch64
 curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-linux-aarch64 -o agentty && chmod +x agentty && ./agentty
+
+# Windows x86_64
+curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-windows-x86_64.exe -o agentty.exe && ./agentty.exe
 ```
 
-Verify integrity with [`SHA256SUMS`](https://github.com/1ay1/agentty/releases/latest) on the release page.
+macOS users build from source. Verify with [`SHA256SUMS`](https://github.com/1ay1/agentty/releases/latest) on the release page.
 
 **From source** (Linux, macOS, Windows):
 
 ```bash
 git clone --recursive git@github.com:1ay1/agentty.git
 cd agentty
-cmake -B build && cmake --build build
-./build/agentty      # Linux/macOS
-.\build\Release\agentty.exe   # Windows
+cmake -B build && cmake --build build -j
+./build/agentty
 ```
 
-- **Linux/macOS**: GCC 14+ / Clang 18+, CMake 3.28+
-- **Windows**: MSVC 14.40+ (VS 2022 17.10+), CMake 3.28+
+Requires GCC 14+ / Clang 18+ / MSVC 14.40+ and CMake 3.28+. Auth happens in-app on first launch.
 
-Auth happens in-app on first launch.
-
-## Getting started
+## Quick start
 
 ```bash
 cd path/to/your/project   # cwd is the workspace root
-./build/agentty           # or `agentty` if it's on PATH
+agentty
 ```
 
-### Auth
+First launch opens an auth modal:
 
-First launch opens an auth modal with two paths:
+- **API key.** Paste an `sk-ant-…` token. Saved at `~/.config/agentty/credentials.json`, `0600`.
+- **OAuth (Claude Pro/Max).** Opens your browser; the callback writes the token to the same file. agentty picks the right header on relaunch automatically.
 
-- **API key.** Paste an Anthropic-issued `sk-ant-…` token. Saved to `~/.config/agentty/credentials.json` (POSIX, `0600` perms) or `%USERPROFILE%\.config\agentty\credentials.json` (Windows, restrictive ACL).
-- **OAuth (Claude Pro/Max).** Opens your browser to the Anthropic consent screen; the callback returns a token stored in the same `credentials.json`. The file records which auth kind it holds, so on relaunch agentty picks the right header automatically (`x-api-key:` vs `Authorization: Bearer`).
+Override order, highest priority first:
 
-Override order, highest priority first — useful for ephemeral sessions, CI, or testing alternate accounts without touching the saved creds:
+1. `-k <key>` / `--key <key>` — single-session, never written to disk.
+2. `ANTHROPIC_API_KEY` env var.
+3. `CLAUDE_CODE_OAUTH_TOKEN` env var.
+4. The on-disk creds from the modal.
 
-1. `-k <key>` / `--key <key>` — single-session API key, never written to disk.
-2. `ANTHROPIC_API_KEY` env var — API-key flow.
-3. `CLAUDE_CODE_OAUTH_TOKEN` env var — OAuth flow.
-4. The on-disk `credentials.json` from the modal.
+Then you're in a thread. Type, hit `Enter`. Mid-stream typing queues your next message and lands it when the current turn finishes. `Esc` cancels.
 
-CLI subcommands cover the rest:
+You start in the `Ask` profile — writes, shell calls, and network calls each prompt before running. `S-Tab` cycles to `Write` (autonomous) or `Minimal` (prompts for everything but pure reads). Choice persists.
 
-- `agentty status` — prints the resolved auth state: which env vars are set, whether the on-disk creds are present, which one will actually be used.
-- `agentty login` — runs the auth flow non-interactively (useful for first-time setup over SSH or in scripts).
-- `agentty logout` — clears `credentials.json`. Next launch returns to the modal.
-- `agentty airgap user@host` — run agentty on an air-gapped host through an SSH tunnel.  See [Air-gapped hosts](#air-gapped-hosts-ssh-tunnel) below.
-
-Then you're in a thread. Type, hit `Enter`. The model has the full tool catalog (read/write/edit/bash/grep/git/web — see below); mid-stream typing queues your next message and lands it when the current turn finishes. `Esc` cancels a streaming response or rejects a permission prompt.
-
-You start in the `Ask` profile — writes, shell calls, and network calls each prompt before running. `S-Tab` cycles to `Write` (autonomous, no prompts) or `Minimal` (prompts for everything but pure reads). Profile choice persists across restarts.
-
-Threads live at `~/.agentty/threads/<workspace-hash>/`, one JSON file per thread; safe to inspect, back up, or delete. `^J` opens the thread list — pick an old one, fork it, or hit `^N` for a new thread in the same workspace.
-
-To run against a different workspace without `cd`-ing:
+Threads live at `~/.agentty/threads/<workspace-hash>/`, one JSON file each — safe to inspect, back up, delete. `^J` opens the thread list.
 
 ```bash
-./build/agentty --workspace ~/code/other-project
+agentty --workspace ~/code/other-project   # run against a different workspace without cd
+agentty status                              # which auth source will be used
+agentty login / logout                      # non-interactive auth, useful over SSH
+agentty airgap user@host                    # see below
 ```
-
-Filesystem tools refuse paths outside the workspace. Pass `--workspace /` to opt out.
-
-## What ships
-
-- **Streaming** with mid-stream input queuing — type while the model answers, your message lands when it's done.
-- **Threads** persisted under `~/.agentty/`. Browse / fork / delete from `^J`.
-- **Markdown** with syntax-highlighted code blocks.
-- **Tools** — `read`, `write`, `edit`, `bash`, `grep`, `glob`, `list_dir`, `find_definition`, `web_fetch`, `web_search`, `todo`, `diagnostics`, `git_*`, `remember`, `forget`. Each one gets a purpose-built widget: diffs render as diffs, search results group by file with line numbers, bash shows exit codes, todos become checklists.
-- **Permission profiles** — `Write` (autonomous), `Ask` (prompt before any Exec/WriteFs/Net call), `Minimal` (prompt for everything except Pure). Cycle with `S-Tab`.
-- **Auth, in-app.** Paste an API key (`sk-ant-…`) or OAuth against your Claude Pro/Max subscription. Credentials live at `~/.config/agentty/` with `0600` perms (POSIX) / restrictive ACLs (Windows). `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and `-k` still work.
 
 ## Keys
 
@@ -116,9 +98,15 @@ S-Tab      cycle profile          ^N     new thread
                                   ^C     quit
 ```
 
+## Tools
+
+Each tool gets a purpose-built widget: diffs render as diffs, search results group by file with line numbers, bash shows exit codes, todos become checklists.
+
+`read`, `write`, `edit`, `bash`, `grep`, `glob`, `list_dir`, `find_definition`, `web_fetch`, `web_search`, `todo`, `diagnostics`, `git_status`, `git_diff`, `git_log`, `git_commit`, `remember`, `forget`.
+
 ## Air-gapped hosts (SSH tunnel)
 
-Run agentty on a box that can't reach the internet directly — your laptop relays the bytes, TLS / cert verification still pin on the real upstreams so the network path between laptop and remote can't MITM you.
+Run agentty on a box that can't reach the internet directly. Your laptop relays the bytes; TLS pins on the real upstreams, so the network between laptop and remote can't MITM you.
 
 One command, from the laptop that *does* have internet:
 
@@ -127,38 +115,22 @@ agentty airgap --setup user@airgapped-host    # first time: also copies your cre
 agentty airgap user@airgapped-host            # every time after
 ```
 
-How it works: `ssh -R 1080` (port-only form) makes OpenSSH expose a SOCKS5 proxy on the remote at `localhost:1080`; connections to it are tunnelled back over SSH and dialed by your laptop.  The remote agentty gets `AGENTTY_SOCKS_PROXY=localhost:1080` and routes every TCP destination through that single proxy — chat (`api.anthropic.com`), OAuth refresh (`platform.claude.com`), and `web_fetch` / `web_search` against arbitrary URLs all work without per-host enumeration.  TLS happens end-to-end with the real upstream over the tunnelled socket, so the proxy can't MITM you.
+How: `ssh -R 1080` exposes a SOCKS5 proxy on the remote at `localhost:1080`; connections to it tunnel back over SSH and are dialed by your laptop. The remote agentty gets `AGENTTY_SOCKS_PROXY=localhost:1080` and routes every TCP destination through it — chat, OAuth refresh, `web_fetch`, `web_search`. One env var, no per-host enumeration.
 
-> **Trust model.** `agentty airgap` doesn't trust the *network* between laptop and remote, but it does trust the *remote* with your tokens. `--setup` puts a copy of `~/.config/agentty/credentials.json` (containing your OAuth refresh token, or API key) on the remote at chmod 600. A compromised remote can therefore exfiltrate your Anthropic credentials independent of the tunnel — protecting the byte stream doesn't help if the endpoint is hostile. Run airgap mode against hosts you'd already trust with the same secret; it's not a substitute for sandboxing the remote itself.
+> **Trust model.** Airgap doesn't trust the network between laptop and remote, but does trust the *remote* with your tokens — `--setup` copies `credentials.json` over at `chmod 600`. A compromised remote can exfiltrate your Anthropic credentials independent of the tunnel. Use it on hosts you'd already trust with the same secret.
 
-`--setup` does three small remote operations: `mkdir -p ~/.config/agentty && chmod 700`, `scp` the laptop's `~/.config/agentty/credentials.json` over, then `chmod 600` it on the remote.  Re-run after a fresh `agentty login` on the laptop (e.g. once the refresh token itself eventually rotates).
-
-Knobs: `--remote-agentty PATH` if `agentty` isn't on the remote PATH.  `AGENTTY_AIRGAP_SSH` injects extra `ssh` flags (`-i`, `-p`, `-J jump-host`, …).
-
-The subcommand is sugar.  The bare-metal version, on the laptop:
+Bare-metal version, if you'd rather not use the wrapper:
 
 ```bash
 ssh -t -R 1080 user@airgapped-host \
     'AGENTTY_SOCKS_PROXY=localhost:1080 agentty'
 ```
 
-`AGENTTY_SOCKS_PROXY` overrides only the TCP dial path (every connection goes through SOCKS5, with DNS resolution on the proxy side).  SNI, cert verification, and the HTTP `Host` header stay pinned on the real upstreams.
+Requires OpenSSH ≥ 7.6 on both ends (October 2017 — every distro has it). `AGENTTY_AIRGAP_SSH` injects extra `ssh` flags; `--remote-agentty PATH` if it isn't on the remote PATH.
 
-For non-SOCKS forward proxies, `AGENTTY_API_HOST` / `AGENTTY_OAUTH_HOST` (`host[:port]`) override the TCP target for those two specific upstreams only.  The SOCKS proxy supersedes them when both are set.
+### Behind a TLS-terminating corporate proxy
 
-Requires OpenSSH ≥ 7.6 on both ends (released October 2017 — every distro has it).
-
-### Custom CA / TLS-terminating proxy
-
-The SOCKS path keeps TLS end-to-end with the real upstream, so cert verification works untouched.  Different story if you're routing through a corporate forward proxy that **terminates** TLS and re-encrypts with its own cert (Zscaler, Bluecoat, mitmproxy, etc.) — verification will refuse the proxy's chain.
-
-`AGENTTY_INSECURE=1` skips peer verification entirely (every connection: chat, OAuth refresh, web tools).  Use it knowingly — it disables the only thing keeping a tampering middlebox from reading and rewriting your conversations:
-
-```bash
-AGENTTY_INSECURE=1 agentty
-```
-
-Strictly preferable: install your proxy's CA into the system trust store (`/etc/ssl/certs/` on Debian/Ubuntu via `update-ca-certificates`, `/etc/pki/ca-trust/source/anchors/` on Fedora via `update-ca-trust`).  agentty picks up the system roots at startup, so a proxy with a trusted-root cert needs no env-var change.
+SOCKS keeps TLS end-to-end, so cert verification works untouched. Different story if you route through a forward proxy that re-encrypts with its own cert (Zscaler, Bluecoat, mitmproxy). Install the proxy's CA into the system trust store (`update-ca-certificates` on Debian, `update-ca-trust` on Fedora) — agentty picks up system roots at startup. As a last resort, `AGENTTY_INSECURE=1` skips peer verification entirely; don't ship that to anyone you care about.
 
 ## How it compares
 
@@ -170,7 +142,7 @@ Strictly preferable: install your proxy's CA into the system trust store (`/etc/
 | Auth                | OAuth (Pro/Max) + `ANTHROPIC_API_KEY` | OAuth + `ANTHROPIC_API_KEY`       | per-provider env vars               |
 | Models              | Claude (Anthropic)                    | Claude (Anthropic)                | many (OpenAI / Anthropic / local …) |
 
-If you want a multi-model agent across providers, aider is excellent. If you want Anthropic's first-party experience with their support behind it, claude-code. agentty is the niche pick when you specifically want a single-binary Claude client with no runtime dependency, or you need to run on an air-gapped host through an SSH tunnel.
+Want a multi-model agent across providers? aider. Want Anthropic's first-party experience with their support behind it? claude-code. agentty is the niche pick when you specifically want a single-binary Claude client with no runtime dependency, or you need an air-gapped host through an SSH tunnel.
 
 ## How it works
 
@@ -190,21 +162,19 @@ cmake -B build -DAGENTTY_STANDALONE=ON
 
 Statically links OpenSSL + nghttp2 + libstdc++ + libgcc when their `.a` archives are installed. libc stays dynamic on Linux/macOS (fully-static glibc breaks `getaddrinfo` and the NSS resolver). Pass `-DAGENTTY_FULLY_STATIC=ON` with a musl toolchain for a 100% static binary. Windows: implies `/MT` and pulls third-party libs from the `x64-windows-static` vcpkg triplet.
 
-So the accurate one-liner: **statically linked except libc and (usually) OpenSSL.**
-
-For a 100%-static drop-in binary, the [v0.1.0 release](https://github.com/1ay1/agentty/releases/tag/v0.1.0) ships pre-built `agentty-linux-x86_64` and `agentty-linux-aarch64` with zero shared-library dependencies (Alpine + musl + GCC 14.2).
+Accurate one-liner: **statically linked except libc and (usually) OpenSSL.** For a 100%-static drop-in, the [latest release](https://github.com/1ay1/agentty/releases/latest) ships pre-built `agentty-linux-x86_64` and `agentty-linux-aarch64` with zero shared-library dependencies (Alpine + musl + GCC 14.2).
 
 ## Status
 
-Pre-1.0. Core loop, tools, streaming, permission profiles, in-app auth, persistence, and cross-platform subprocess all work and are built daily.
+Pre-1.0. Core loop, tools, streaming, permission profiles, in-app auth, persistence, sandbox, airgap, and cross-platform subprocess all work and are built daily.
 
 Stubbed honestly:
 - **Checkpoint restore** — `CheckpointId` + per-message marker exist; `RestoreCheckpoint` currently surfaces "not implemented yet" and does nothing.
 - **Diff review pane** — modal renders, but `pending_changes` isn't populated by any tool yet, so review/accept/reject toast "no pending changes".
 
-All three platforms (Linux, macOS, Windows) are actively tested. Prebuilt release binaries are currently Linux-only; macOS and Windows users build from source.
+All three platforms (Linux, macOS, Windows) are actively tested. Prebuilt release binaries are Linux + Windows; macOS users build from source.
 
-File terminal-rendering bugs with `$TERM`, your terminal emulator name, and a screenshot. Code-path bugs welcome too — paste the relevant block and `git rev-parse HEAD`.
+File bugs with `$TERM`, your terminal emulator name, and a screenshot. Code-path bugs welcome too — paste the relevant block and `git rev-parse HEAD`.
 
 ## License
 
