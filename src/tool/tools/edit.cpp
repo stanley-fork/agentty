@@ -246,8 +246,44 @@ int closest_line_hint(std::string_view buf, std::string_view needle) noexcept {
     return (best_score * 2 >= probe.size()) ? best_ln : 0;
 }
 
+// Render a small window of lines centred on `line_1based`, prefixed with
+// their line numbers. Used by no-match error messages so the model has
+// the EXACT bytes around the closest hit to copy without re-reading.
+// Pure text — no ANSI — lands cleanly inside a tool_result envelope.
+std::string render_context_window(std::string_view buf,
+                                  int line_1based,
+                                  int radius = 2) {
+    if (line_1based <= 0) return {};
+    int lo = std::max(1, line_1based - radius);
+    int hi = line_1based + radius;
+    std::string out;
+    int ln = 1;
+    std::size_t pos = 0;
+    while (pos < buf.size() && ln <= hi) {
+        std::size_t le = pos;
+        while (le < buf.size() && buf[le] != '\n') ++le;
+        if (ln >= lo) {
+            char prefix[16];
+            std::snprintf(prefix, sizeof(prefix), "%4d %s ",
+                          ln, ln == line_1based ? ">" : " ");
+            out += prefix;
+            out.append(buf.data() + pos, le - pos);
+            out.push_back('\n');
+        }
+        pos = (le < buf.size()) ? le + 1 : le;
+        ++ln;
+    }
+    return out;
+}
+
 // Apply a single edit to `buf`. Returns number of replacements; sets `err`
-// on terminal failure (ambiguous match, not found).
+// on terminal failure (ambiguous match, not found). When the edit's
+// `new_text` already appears in `buf` where `old_text` would have matched
+// (the model is re-applying a change that already landed), returns -1 to
+// signal "idempotent no-op" — the caller treats this as a soft success
+// rather than a hard error.
+constexpr int kIdempotentNoOp = -1;
+
 int apply_one(std::string& buf, const OneEdit& e,
               const std::string& path_str, std::string& err) {
     auto replace_exact = [&](std::string_view needle,
@@ -270,43 +306,53 @@ int apply_one(std::string& buf, const OneEdit& e,
         return n;
     };
 
+    // CRLF normalisation helpers used by multiple strategies.
+    auto without_cr = [](std::string_view s) {
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s) if (c != '\r') out.push_back(c);
+        return out;
+    };
+    auto with_crlf = [](std::string_view s) {
+        std::string out;
+        out.reserve(s.size() + s.size() / 40);
+        for (std::size_t i = 0; i < s.size(); ++i) {
+            char c = s[i];
+            if (c == '\n' && (i == 0 || s[i-1] != '\r'))
+                out.push_back('\r');
+            out.push_back(c);
+        }
+        return out;
+    };
+
+    // ── Idempotency check (runs FIRST, covers both branches) ──────────
+    // The model often re-applies an edit that already landed (it re-read
+    // the file, saw the new content, is "confirming"). old_text is gone
+    // — replaced by new_text — so fuzzy_find returns no-match and we
+    // surface a confusing error. Detect this up front: if `new_text`
+    // is non-empty and substantive AND already in the buffer AND
+    // `old_text` is absent, treat as idempotent no-op. The 8-byte size
+    // gate filters out tiny new_texts whose accidental presence in the
+    // buffer would false-positive.
+    if (!e.new_text.empty()
+        && e.new_text.size() >= 8
+        && e.new_text != e.old_text
+        && buf.find(e.new_text) != std::string::npos
+        && buf.find(e.old_text) == std::string::npos)
+    {
+        err.clear();
+        return kIdempotentNoOp;
+    }
+
     if (e.replace_all) {
         int n = replace_exact(e.old_text, e.new_text);
         if (n > 0) return n;
 
         // Fallback: CRLF drift. If the buffer contains \r\n and the
-        // needle doesn't (or vice versa), exact misses. Try the match
-        // with both sides \r-stripped, and synthesize a replacement that
-        // re-emits the original line ending style of each hit. We do
-        // this by locating hits in the stripped view and projecting
-        // the splice range back via the src_of[] mapping — keeping the
-        // surrounding bytes (including any \r) identical.
+        // needle doesn't (or vice versa), exact misses. Try both
+        // CRLF and LF normalised needles.
         if (buf.find('\r') != std::string::npos
             || e.old_text.find('\r') != std::string::npos) {
-            // Cheap re-normalize inline to avoid pulling more of the
-            // fuzzy_match internals into a public API. Strip \r from the
-            // needle, replace \r\n→\n in the buffer temporarily, do the
-            // exact replace, and finally un-normalize is not safe. Simpler:
-            // do two exact passes — with \r\n needle variant, then with
-            // plain \n needle variant — and apply whichever hits.
-            auto with_crlf = [](std::string_view s) {
-                std::string out;
-                out.reserve(s.size() + s.size() / 40);
-                for (std::size_t i = 0; i < s.size(); ++i) {
-                    char c = s[i];
-                    if (c == '\n' && (i == 0 || s[i-1] != '\r'))
-                        out.push_back('\r');
-                    out.push_back(c);
-                }
-                return out;
-            };
-            auto without_cr = [](std::string_view s) {
-                std::string out;
-                out.reserve(s.size());
-                for (char c : s) if (c != '\r') out.push_back(c);
-                return out;
-            };
-
             std::string alt_needle = with_crlf(without_cr(e.old_text));
             std::string alt_new    = with_crlf(without_cr(e.new_text));
             if (alt_needle != e.old_text) {
@@ -340,17 +386,62 @@ int apply_one(std::string& buf, const OneEdit& e,
             return 1;
         }
 
-        if (int ln = closest_line_hint(buf, e.old_text); ln > 0)
+        if (int ln = closest_line_hint(buf, e.old_text); ln > 0) {
+            auto window = render_context_window(buf, ln, 2);
             err = std::format(
                 "old_text not found in {} (replace_all tried exact, CRLF, "
                 "and fuzzy strategies). The closest matching line is around "
-                "line {} \u2014 re-read that region and copy the snippet "
-                "byte-for-byte.", path_str, ln);
+                "line {} — here are the actual bytes at that location:\n"
+                "```\n{}```\n"
+                "Copy the snippet byte-for-byte from above and retry.",
+                path_str, ln, window);
+        }
         else
             err = "old_text not found in " + path_str
                 + " (replace_all tried exact, CRLF, and fuzzy strategies). "
                   "Re-read the file and copy the snippet byte-for-byte.";
         return 0;
+    }
+
+    // ── Idempotency check ([was here, now hoisted above replace_all]) ──
+    // The block previously sitting here was redundant; the hoisted
+    // version handles both `replace_all` and single-match paths uniformly.
+
+    // ── Exact-match fast path with CRLF fallback ────────────────────────
+    // Before going through fuzzy_find, try CRLF-normalised exact
+    // matching when there's any sign of line-ending drift. fuzzy_find
+    // handles whitespace inside lines but doesn't reconcile \r\n vs
+    // \n at end-of-line — a single missed \r in the needle on a CRLF
+    // file produces a fuzzy_find ambiguity / miss that's painful to
+    // debug. The exact match here is O(buf) and zero-allocation when
+    // there's no drift; only the actual normalisation path allocates.
+    if (!e.replace_all
+        && (buf.find('\r') != std::string::npos
+            || e.old_text.find('\r') != std::string::npos))
+    {
+        // Try \r-stripped needle against \r-stripped buffer. If exactly
+        // one hit, splice using the buffer's original line endings
+        // by re-rendering the replacement with the buffer's style.
+        std::string plain_needle = without_cr(e.old_text);
+        std::string plain_new    = without_cr(e.new_text);
+        if (plain_needle != e.old_text) {
+            // Quick count on plain_buf; if exactly one occurrence, do
+            // an exact replace on the CRLF-aware variant.
+            std::string plain_buf = without_cr(buf);
+            std::size_t first = plain_buf.find(plain_needle);
+            if (first != std::string::npos) {
+                std::size_t next = plain_buf.find(plain_needle, first + plain_needle.size());
+                if (next == std::string::npos) {
+                    // Unique — try both line-ending styles on the real buf.
+                    std::string crlf_needle = with_crlf(plain_needle);
+                    std::string crlf_new    = with_crlf(plain_new);
+                    int n = replace_exact(crlf_needle, crlf_new);
+                    if (n == 1) return 1;
+                    n = replace_exact(plain_needle, plain_new);
+                    if (n == 1) return 1;
+                }
+            }
+        }
     }
 
     auto m = util::fuzzy_find(buf, e.old_text, e.new_text, e.line_hint);
@@ -410,11 +501,15 @@ int apply_one(std::string& buf, const OneEdit& e,
                     "and copy the snippet byte-for-byte.", ln);
             }
             if (hint.empty()) {
-                if (int ln = closest_line_hint(buf, e.old_text); ln > 0)
+                if (int ln = closest_line_hint(buf, e.old_text); ln > 0) {
+                    auto window = render_context_window(buf, ln, 2);
                     hint = std::format(
-                        " The closest matching line is around line {} \u2014 "
-                        "re-read that region and copy the snippet byte-for-byte.",
-                        ln);
+                        " The closest matching line is around line {} — "
+                        "here are the actual bytes at that location:\n"
+                        "```\n{}```\n"
+                        "Copy the snippet byte-for-byte from above and retry.",
+                        ln, window);
+                }
             }
             err = "old_text not found in " + path_str + "." + hint;
         }
@@ -474,102 +569,216 @@ ExecResult run_edit(const EditArgs& a) {
               "artifact). If this is a text file with a stray NUL, use "
               "`write` to rewrite it whole."));
 
+    // Staleness hint: if a prior tool (read/edit/write) saw a snapshot
+    // of this file and the on-disk state has drifted since, surface the
+    // mismatch as a warning prefix on the output. We DON'T refuse the
+    // edit — the fuzzy matcher may still land cleanly on the new bytes,
+    // and false-failing a legitimate edit is worse than a soft warning.
+    // But the model needs to know it might be working from stale context.
+    std::string staleness_warning;
+    if (util::staleness_of(p) == util::StaleVerdict::Stale) {
+        staleness_warning =
+            "⚠  The file has changed on disk since the last time a tool "
+            "observed it this session. The edit was applied to the CURRENT "
+            "bytes; if the result looks wrong, re-read the file before "
+            "making further edits.\n\n";
+    }
+
     std::string original = util::read_file(a.path);
     std::string updated  = original;
 
-    // Apply in order. Identical old==new is silently skipped (it's a no-op,
-    // not worth failing a batch over). If any other edit fails, report
-    // which one, whether prior edits had already landed, and whether the
-    // failing old_text was visible in the pre-batch buffer — the model
-    // needs that distinction to decide between "re-read" and "re-order".
+    // Best-effort batching: per-edit outcomes are collected; the file
+    // is written if ANY edit applied successfully. The output reports
+    // every per-edit result so the model knows exactly what landed and
+    // what didn't. This is materially better than the previous all-or-
+    // nothing semantic where one bad edit in a 5-edit batch caused all
+    // four good ones to be discarded — the model would then re-emit
+    // the entire batch, often re-introducing the failing edit.
+    struct EditOutcome {
+        std::size_t index;
+        int  applied;       // >0 = replacements; 0 = failed; kIdempotentNoOp = already-present
+        bool exact_count_mismatch;
+        std::string err;
+    };
+    std::vector<EditOutcome> outcomes;
+    outcomes.reserve(a.edits.size());
     std::size_t skipped_noop = 0;
     std::size_t applied = 0;
+    std::size_t idempotent = 0;
     for (std::size_t i = 0; i < a.edits.size(); ++i) {
         const auto& ed = a.edits[i];
         if (ed.old_text == ed.new_text) { ++skipped_noop; continue; }
         std::string err;
         int n = apply_one(updated, ed, a.path.string(), err);
 
-        // Optional Anthropic-spec count enforcement. When the caller pinned
-        // `expected_replacements`, demand exactly that many hits. n==0
-        // already became an error above; here we catch the over/under hit.
-        if (n > 0 && ed.expected_replacements > 0
-            && n != ed.expected_replacements) {
-            std::string ctx = a.edits.size() == 1
-                ? std::format("expected_replacements={} but matched {} occurrence(s) in {}. "
-                              "Adjust expected_replacements or add context to old_text.",
-                              ed.expected_replacements, n, a.path.string())
-                : std::format("edits[{}]: expected_replacements={} but matched {} "
-                              "occurrence(s) in {} (prior {} edit(s) already applied to the buffer).",
-                              i, ed.expected_replacements, n, a.path.string(), applied);
-            return std::unexpected(ToolError::ambiguous(std::move(ctx)));
+        if (n == kIdempotentNoOp) {
+            // The edit's effect is already in the buffer (model is
+            // re-applying). Soft-success: don't write anything new,
+            // but don't fail either. Reported in the output so the
+            // model sees "this one was already done".
+            ++idempotent;
+            outcomes.push_back({i, kIdempotentNoOp, false, {}});
+            continue;
+        }
+
+        // Optional Anthropic-spec count enforcement.
+        bool count_mismatch =
+            (n > 0 && ed.expected_replacements > 0
+             && n != ed.expected_replacements);
+        if (count_mismatch) {
+            // Don't write the partial result for a count mismatch —
+            // the user pinned the count explicitly, so honour the
+            // strict contract: roll back this edit. The fact that
+            // `apply_one` already mutated `updated` means we need to
+            // revert it.
+            updated = original;
+            // Re-apply every successful prior edit on the rolled-back
+            // buffer so the partial-success picture stays consistent.
+            for (const auto& prior : outcomes) {
+                if (prior.applied <= 0) continue;
+                std::string tmp_err;
+                (void)apply_one(updated, a.edits[prior.index],
+                                a.path.string(), tmp_err);
+            }
+            outcomes.push_back({i, n, true, std::format(
+                "expected_replacements={} but matched {} occurrence(s)",
+                ed.expected_replacements, n)});
+            continue;
         }
 
         if (n == 0) {
-            // Was this old_text present in the ORIGINAL file? If so, a
-            // prior edit in this batch likely overwrote the region —
-            // a sequencing problem, not a stale read. Surface that
-            // distinction so the model retries the right way.
+            // Was old_text present in the ORIGINAL file? Distinguishes
+            // "a prior edit clobbered the region" from "stale read".
             bool was_in_original = !original.empty()
                 && original.find(ed.old_text) != std::string::npos;
-            std::string ctx;
-            if (a.edits.size() == 1) {
-                ctx = std::move(err);
-            } else if (was_in_original && applied > 0) {
-                ctx = std::format(
-                    "edits[{}]: {} The text WAS present in the file before "
-                    "this batch, but {} earlier edit(s) altered the region. "
-                    "Re-order the edits (apply this one first), merge them "
-                    "into a single larger old_text, or run them in separate "
-                    "tool calls.",
-                    i, err, applied);
-            } else {
-                ctx = std::format("edits[{}]: {}{}", i, err,
-                    applied > 0
-                        ? std::format(" ({} earlier edit(s) had already applied; "
-                                      "the file is now partially modified in memory "
-                                      "but NOT on disk \u2014 nothing was written.)",
-                                      applied)
-                        : std::string{});
+            if (was_in_original && applied > 0) {
+                err = std::format(
+                    "{} The text WAS present in the file before this batch, "
+                    "but {} earlier edit(s) altered the region. Re-order "
+                    "this edit before the conflicting ones, OR merge them "
+                    "into a single larger old_text.",
+                    err, applied);
             }
-            // Preserve the error category based on the message shape.
-            if (err.find("appears") != std::string::npos)
-                return std::unexpected(ToolError::ambiguous(std::move(ctx)));
-            return std::unexpected(ToolError::no_match(std::move(ctx)));
+            outcomes.push_back({i, 0, false, std::move(err)});
+            continue;
         }
+
+        outcomes.push_back({i, n, false, {}});
         ++applied;
     }
 
-    // All edits were no-ops? Tell the model clearly so it stops retrying.
-    if (applied == 0 && skipped_noop == a.edits.size())
+    // Summarise. The four buckets:
+    //   applied        = edit landed N > 0 hits
+    //   idempotent     = effect already in buffer (no-op)
+    //   skipped_noop   = old == new (caller no-op)
+    //   failed         = no-match / count-mismatch (err non-empty)
+    std::size_t failed = 0;
+    for (const auto& o : outcomes) if (o.applied == 0) ++failed;
+
+    // All-no-op short circuits.
+    if (applied == 0 && skipped_noop == a.edits.size()) {
         return ToolOutput{std::format(
-            "No edits were applied \u2014 all {} edit(s) had identical "
+            "{}No edits were applied — all {} edit(s) had identical "
             "old_text and new_text (nothing to change). File on disk is "
-            "unchanged.", a.edits.size()), std::nullopt};
+            "unchanged.", staleness_warning, a.edits.size()), std::nullopt};
+    }
+    if (applied == 0 && idempotent > 0 && failed == 0) {
+        // Every requested edit was already in the file. The model is
+        // "confirming" a state that's already reached. Tell it clearly
+        // so it stops the retry loop.
+        return ToolOutput{std::format(
+            "{}No write needed — all {} edit(s) were already present in "
+            "the file (new_text matched the on-disk bytes, old_text was "
+            "absent). The desired state is already in place; move on.",
+            staleness_warning, idempotent), std::nullopt};
+    }
+
+    // Some failures, but nothing landed. Fail the call entirely — the
+    // model has nothing to act on. Surface every per-edit error so it
+    // can rebuild the batch.
+    if (applied == 0 && failed > 0) {
+        std::string msg;
+        if (a.edits.size() == 1) {
+            msg = outcomes.front().err;
+        } else {
+            msg = std::format(
+                "All {} edit(s) failed; file on disk is unchanged.",
+                a.edits.size());
+            for (const auto& o : outcomes) {
+                if (o.applied == 0 && !o.err.empty())
+                    msg += std::format("\n  edits[{}]: {}", o.index, o.err);
+            }
+        }
+        // Preserve typed category when one edit's error message looks
+        // ambiguous — keeps downstream error-class routing happy.
+        for (const auto& o : outcomes) {
+            if (o.applied == 0
+                && o.err.find("appears") != std::string::npos)
+                return std::unexpected(ToolError::ambiguous(std::move(msg)));
+        }
+        return std::unexpected(ToolError::no_match(std::move(msg)));
+    }
 
     if (original == updated)
-        return ToolOutput{"No edits were made \u2014 all old_text / new_text pairs "
-                          "produced identical content (file unchanged on "
-                          "disk).", std::nullopt};
+        return ToolOutput{staleness_warning
+            + "No edits were made — all old_text / new_text pairs "
+              "produced identical content (file unchanged on "
+              "disk).", std::nullopt};
 
     auto change = diff::compute(a.path.string(), original, updated);
     if (auto werr = util::write_file(a.path, updated); !werr.empty())
         return std::unexpected(ToolError::io(werr));
 
+    // Snapshot the new file state so subsequent tools don't false-alarm
+    // on the change we just made.
+    {
+        std::error_code mt_ec;
+        auto new_mtime = fs::last_write_time(p, mt_ec);
+        if (!mt_ec) {
+            util::record_file_seen(p, new_mtime,
+                                   static_cast<std::uintmax_t>(updated.size()),
+                                   util::content_fnv1a(updated));
+        }
+    }
+
     std::string unified = diff::render_unified(change);
     std::ostringstream msg;
+    if (!staleness_warning.empty()) msg << staleness_warning;
     if (!a.display_description.empty())
         msg << a.display_description << "\n\n";
     msg << "Edited " << a.path.string() << " (" << change.added << "+ "
         << change.removed << "-";
     if (a.edits.size() > 1) {
-        msg << ", " << a.edits.size() << " edits";
-        if (skipped_noop > 0)
-            msg << " (" << skipped_noop << " skipped as no-op)";
+        msg << ", " << applied << "/" << a.edits.size() << " edits applied";
+        if (idempotent > 0)   msg << ", " << idempotent   << " already present";
+        if (skipped_noop > 0) msg << ", " << skipped_noop << " no-op";
+        if (failed > 0)       msg << ", " << failed       << " failed";
     }
     msg << "):\n\n```diff\n" << unified;
     if (unified.empty() || unified.back() != '\n') msg << "\n";
     msg << "```";
+
+    // Per-edit detail when the batch had partial success. The model
+    // needs to know which edits to re-emit (the failed ones) and which
+    // to drop (the idempotent ones).
+    if (a.edits.size() > 1 && (failed > 0 || idempotent > 0)) {
+        msg << "\n\nPer-edit results:";
+        for (const auto& o : outcomes) {
+            msg << std::format("\n  edits[{}]: ", o.index);
+            if (o.applied == kIdempotentNoOp)
+                msg << "already present (no-op)";
+            else if (o.applied > 0)
+                msg << std::format("applied ({} replacement(s))", o.applied);
+            else
+                msg << "FAILED — " << o.err;
+        }
+        if (failed > 0) {
+            msg << "\n\nThe successful edits have been written. To fix the "
+                   "failed edits, retry ONLY those entries (don't re-emit "
+                   "the ones already applied).";
+        }
+    }
+
     return ToolOutput{msg.str(), std::move(change)};
 }
 

@@ -187,6 +187,18 @@ ExecResult run_write(const WriteArgs& a) {
         if (original_size <= kMaxWriteBytes)
             original = util::read_file(a.path);
     }
+
+    // Staleness hint: if a prior tool observed this file and it's drifted
+    // since, warn but don't refuse. Same rationale as edit.cpp — a stale
+    // snapshot is a signal to the model, not a reason to fail the write.
+    std::string staleness_warning;
+    if (exists && util::staleness_of(p) == util::StaleVerdict::Stale) {
+        staleness_warning =
+            "⚠  The file has changed on disk since the last time a tool "
+            "observed it this session. The write OVERWROTE those changes — "
+            "if that's not what you wanted, re-read the file and rewrite "
+            "with the intended merged content.\n\n";
+    }
     // No-op short-circuit: an identical rewrite is often the model
     // "confirming" a file state it already reached. Skipping the fs
     // touch avoids spurious mtime bumps that break incremental builds.
@@ -203,9 +215,23 @@ ExecResult run_write(const WriteArgs& a) {
         change.path = a.path.string();
     if (auto err = util::write_file(a.path, a.content); !err.empty())
         return std::unexpected(ToolError::io(err));
+
+    // Snapshot the freshly-written state so subsequent edit/write calls
+    // don't false-alarm on the change we just made.
+    {
+        std::error_code mt_ec;
+        auto new_mtime = fs::last_write_time(p, mt_ec);
+        if (!mt_ec) {
+            util::record_file_seen(p, new_mtime,
+                                   static_cast<std::uintmax_t>(a.content.size()),
+                                   util::content_fnv1a(a.content));
+        }
+    }
+
     std::string prefix;
+    if (!staleness_warning.empty()) prefix += staleness_warning;
     if (!a.display_description.empty())
-        prefix = a.display_description + "\n\n";
+        prefix += a.display_description + "\n\n";
     auto msg = std::format("{}{} {} ({}+ {}-){}",
                            prefix,
                            exists ? "Overwrote" : "Created",

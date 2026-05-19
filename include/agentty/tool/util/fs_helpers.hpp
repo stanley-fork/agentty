@@ -6,6 +6,7 @@
 
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -145,5 +146,71 @@ promote_to_workspace_path(NormalizedPath p, std::string_view tool_name);
 // Heuristic: scan the first 512 bytes for a NUL. Good enough to avoid
 // grep'ing PNGs / executables / model weights into the prompt.
 [[nodiscard]] bool is_binary_file(const fs::path& p);
+
+// ── Per-file state cache ────────────────────────────────────────────────
+// Shared across tools so edit/write can detect "the file changed since the
+// model last looked at it". Keyed on canonical path; value is the mtime
+// the tool saw plus a content-fingerprint hash so we catch sub-second
+// edits that don't bump mtime (some filesystems have 1 s mtime resolution).
+//
+// Records are written by `read` after every successful read, and by
+// `write` / `edit` after a successful mutation (so the next call from
+// the same session sees the new state and doesn't false-alarm on its
+// own change). Lookups never block on IO — the cache is purely an
+// in-memory hint surface.
+//
+// The cache is process-wide and persists for the lifetime of the agent.
+// A long-running session that keeps editing the same files only pays
+// the stat cost once per file per change — every subsequent staleness
+// check is a hash-table hit.
+struct FileSnapshot {
+    fs::file_time_type mtime{};
+    std::uintmax_t     size = 0;
+    std::uint64_t      content_hash = 0;   // FNV-1a of the bytes the tool saw
+};
+
+// Record that `path` was observed at `mtime` / `size` with the given
+// content hash. `path` is canonicalised internally. Pass `0` for
+// `content_hash` when the caller doesn't have the bytes handy (e.g.
+// stat-only paths); staleness checks then degrade to mtime+size only.
+void record_file_seen(const fs::path& path,
+                      fs::file_time_type mtime,
+                      std::uintmax_t size,
+                      std::uint64_t content_hash) noexcept;
+
+// Look up the snapshot the tools last saw for `path`. Returns nullopt
+// when no tool has touched the file this session. `path` is canonicalised.
+[[nodiscard]] std::optional<FileSnapshot> last_seen_file(const fs::path& path) noexcept;
+
+// Compute FNV-1a 64-bit over a byte range. Inlineable; used by tools
+// that have already read the file to record its hash in the snapshot.
+// FNV-1a was picked over xxHash because it's branch-free, zero-alloc,
+// and pulls in no dependencies — collision risk at 64 bits across one
+// session's worth of files is negligible.
+[[nodiscard]] inline std::uint64_t content_fnv1a(std::string_view bytes) noexcept {
+    constexpr std::uint64_t kOffset = 0xcbf29ce484222325ULL;
+    constexpr std::uint64_t kPrime  = 0x00000100000001b3ULL;
+    std::uint64_t h = kOffset;
+    for (unsigned char c : bytes) {
+        h ^= static_cast<std::uint64_t>(c);
+        h *= kPrime;
+    }
+    return h;
+}
+
+// Staleness classification. Computed by checking the file's current
+// (mtime, size) and optionally content hash against the cached snapshot.
+enum class StaleVerdict : std::uint8_t {
+    Unknown,      // no prior snapshot — caller decides what to do
+    Fresh,        // snapshot matches current on-disk state
+    Stale,        // file changed since the snapshot was recorded
+};
+
+// Check whether `path` looks stale relative to its last snapshot.
+// Stat-based (cheap): compares mtime + size. Returns Unknown when no
+// snapshot exists or stat fails. For a stronger guarantee, the caller
+// can additionally hash the file's current bytes and compare against
+// the snapshot's `content_hash`.
+[[nodiscard]] StaleVerdict staleness_of(const fs::path& path) noexcept;
 
 } // namespace agentty::tools::util

@@ -5,9 +5,11 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -398,6 +400,73 @@ bool is_binary_file(const fs::path& p) {
     for (int i = 0; i < n; ++i)
         if (buf[i] == '\0') return true;
     return false;
+}
+
+// ── File snapshot cache ────────────────────────────────────────────────────
+namespace {
+
+struct FileCache {
+    std::mutex mu;
+    std::unordered_map<std::string, FileSnapshot> by_path;
+};
+
+[[nodiscard]] FileCache& file_cache() {
+    static FileCache c;
+    return c;
+}
+
+// Canonicalise without requiring the file to exist (write target might
+// not exist yet at the moment we record). Falls back to the lexically-
+// normal absolute form when weakly_canonical errors out — we still get
+// a stable key per file across calls, just not symlink-aware.
+[[nodiscard]] std::string canon_key(const fs::path& p) noexcept {
+    std::error_code ec;
+    auto canon = fs::weakly_canonical(p, ec);
+    if (!ec) return canon.string();
+    if (p.is_absolute()) return p.lexically_normal().string();
+    auto abs = fs::absolute(p, ec);
+    if (!ec) return abs.lexically_normal().string();
+    return p.string();
+}
+
+} // namespace
+
+void record_file_seen(const fs::path& path,
+                      fs::file_time_type mtime,
+                      std::uintmax_t size,
+                      std::uint64_t content_hash) noexcept {
+    auto key = canon_key(path);
+    if (key.empty()) return;
+    auto& c = file_cache();
+    std::lock_guard lk{c.mu};
+    c.by_path[std::move(key)] = FileSnapshot{mtime, size, content_hash};
+}
+
+std::optional<FileSnapshot> last_seen_file(const fs::path& path) noexcept {
+    auto key = canon_key(path);
+    if (key.empty()) return std::nullopt;
+    auto& c = file_cache();
+    std::lock_guard lk{c.mu};
+    auto it = c.by_path.find(key);
+    if (it == c.by_path.end()) return std::nullopt;
+    return it->second;
+}
+
+StaleVerdict staleness_of(const fs::path& path) noexcept {
+    auto snap = last_seen_file(path);
+    if (!snap) return StaleVerdict::Unknown;
+    std::error_code ec;
+    auto cur_mtime = fs::last_write_time(path, ec);
+    if (ec) return StaleVerdict::Unknown;
+    auto cur_size  = fs::file_size(path, ec);
+    if (ec) cur_size = 0;
+    // mtime granularity is filesystem-dependent (HFS+ 1 s, ext4 ns, FAT
+    // 2 s). Compare strictly: any difference — forward OR backward —
+    // counts as stale. Size mismatch is also a stale signal even when
+    // mtime didn't change (some tools touch-without-updating-mtime).
+    if (snap->mtime == cur_mtime && snap->size == cur_size)
+        return StaleVerdict::Fresh;
+    return StaleVerdict::Stale;
 }
 
 } // namespace agentty::tools::util

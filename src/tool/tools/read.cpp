@@ -352,6 +352,11 @@ ExecResult run_read(const ReadArgs& a) {
                     read_cache().seen[std::move(key)] = current_mtime;
                 }
             }
+            // Snapshot the file content so edit/write staleness checks
+            // work even when the model only saw the outline.
+            util::record_file_seen(p, current_mtime,
+                                   static_cast<std::uintmax_t>(content.size()),
+                                   util::content_fnv1a(content));
             return ToolOutput{std::move(out), std::nullopt};
         }
         // Empty outline (no recognisable definitions — README, log
@@ -434,6 +439,15 @@ ExecResult run_read(const ReadArgs& a) {
             read_cache().seen[std::move(key)] = current_mtime;
         }
     }
+
+    // Also record a per-file snapshot in the shared cache so edit/write
+    // can detect "the file changed since the model last read it".
+    // Hash the bytes we actually returned to the model so a sub-second
+    // mtime-stable edit is still caught — the content_hash mismatch is
+    // the stronger signal than mtime alone.
+    util::record_file_seen(p, current_mtime,
+                           static_cast<std::uintmax_t>(content.size()),
+                           util::content_fnv1a(content));
 
     return ToolOutput{std::move(out), std::nullopt};
 }
