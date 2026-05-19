@@ -127,10 +127,17 @@ Element thread_list(const Model& m) {
         for (const auto& t : m.d.threads) {
             bool sel = i == picker->index;
             auto prefix = sel ? text("› ", fg_bold(info)) : text("  ");
+            // Title takes leftover width via grow(1.0f) so the
+            // timestamp lands flush against the right edge of the
+            // row; without that the title's natural width swallows
+            // the row and the timestamp glues to the title text. The
+            // explicit `text("  ")` gutter guarantees at least two
+            // columns between truncated-title-end and timestamp on
+            // narrow terminals where the title clips.
             cfg.items.push_back(h(prefix,
                 text(t.title.empty() ? "(untitled)" : t.title,
-                     sel ? fg_of(fg) : fg_of(muted)) | clip,
-                spacer(),
+                     sel ? fg_of(fg) : fg_of(muted)) | clip | grow(1.0f),
+                text("  "),
                 text(timestamp_hh_mm(t.updated_at), fg_dim(muted))
             ).build());
             ++i;
@@ -178,8 +185,8 @@ Element command_palette(const Model& m) {
             auto prefix = sel ? text("› ", fg_bold(highlight)) : text("  ");
             cfg.items.push_back(h(prefix,
                 text(std::string{cmd.label},
-                     sel ? fg_bold(fg) : fg_of(muted)) | clip,
-                spacer(),
+                     sel ? fg_bold(fg) : fg_of(muted)) | clip | grow(1.0f),
+                text("  "),
                 text(std::string{cmd.description}, fg_dim(muted)) | clip
             ).build());
         }
@@ -221,8 +228,8 @@ Element mention_palette(const Model& m) {
             auto prefix = sel ? text("› ", fg_bold(info)) : text("  ");
             cfg.items.push_back(h(prefix,
                 text(std::string{name},
-                     sel ? fg_bold(fg) : fg_of(fg)) | clip,
-                spacer(),
+                     sel ? fg_bold(fg) : fg_of(fg)) | clip | grow(1.0f),
+                text("  "),
                 text(parent_segment(dir), fg_dim(muted)) | clip
             ).build());
         }
@@ -276,8 +283,8 @@ Element symbol_palette(const Model& m) {
             cfg.items.push_back(h(prefix,
                 text(sym.name, sel ? fg_bold(fg) : fg_of(fg)) | clip,
                 text("  "),
-                text(locus, fg_dim(muted)) | clip,
-                spacer(),
+                text(locus, fg_dim(muted)) | clip | grow(1.0f),
+                text("  "),
                 text(parent_segment(dir), fg_dim(muted)) | clip
             ).build());
         }
