@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (preloaded format=pdflatex 2026.4.11)  21 MAY 2026 17:30
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (preloaded format=pdflatex 2026.4.11)  21 MAY 2026 17:40
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
@@ -998,12 +998,12 @@ Package microtype Info: Loading generic protrusion settings for font family
  [2
 
 
-] [3] [4] [5] [6] [7] [8])
+] [3] [4] [5] [6] [7] [8]
+[9] [10])
 \tf@toc=\write5
 \openout5 = `maya-book.toc'.
 
-
-[9] [1
+ [11] [1
 
 
 ]
@@ -1103,10 +1103,18 @@ Package hyperref Warning: Token not allowed in a PDF string (Unicode):
 
 
 
-] [23]
+]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\kernel@ifnextchar' on input line 129.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\@ifnextchar' on input line 129.
+
 LaTeX Font Info:    Trying to load font information for TS1+lmtt on input line 
-154.
- (/usr/share/texmf-dist/tex/latex/lm/ts1lmtt.fd
+136.
+(/usr/share/texmf-dist/tex/latex/lm/ts1lmtt.fd
 File: ts1lmtt.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
 )
 Package microtype Info: Loading generic protrusion settings for font family
@@ -1116,53 +1124,64 @@ Package microtype Info: Loading generic protrusion settings for font family
 Package microtype Info: Character `texttrademark ' is missing
 (microtype)             in font `TS1/lmtt/m/it/9'.
 (microtype)             Ignoring protrusion settings for this character.
- [24] [25] [26]
-[27] [28] [29] [30] [31]
-Overfull \hbox (18.17427pt too wide) in paragraph at lines 713--718
+Package microtype Info: Character `texttrademark ' is missing
+(microtype)             in font `TS1/lmtt/m/n/9'.
+(microtype)             Ignoring protrusion settings for this character.
+ [23] [24]
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <9> on input line 226.
+ [25{/usr/share/texmf-dist/fonts/enc/dvips/lm/lm-mathsy.enc}] [26] [27] [28] [2
+9] [30] [31] [32]
+[33] [34] [35] [36] [37] [38] [39] [40] [41] [42] [43]
+Overfull \hbox (18.17427pt too wide) in paragraph at lines 1586--1591
 []\T1/lmtt/m/n/10.95 consteval Str(const char (&s)[N])\T1/lmr/m/n/10.95 (-20) :
  a con-struc-tor that \T1/lmr/m/it/10.95 (-20) must \T1/lmr/m/n/10.95 (-20) run
  at com-pile time (\T1/lmtt/m/n/10.95 consteval\T1/lmr/m/n/10.95 (-20) )
  []
 
-[32]
-LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <9> on input line 819.
+[44] [45]
+Overfull \hbox (19.86685pt too wide) in paragraph at lines 1713--1716
+[]\T1/lmr/m/n/10.95 (-20) The de-duc-tion guide \T1/lmtt/m/n/10.95 overload(Fs.
+..) -> overload<Fs...> \T1/lmr/m/n/10.95 (-20) lets you write \T1/lmtt/m/n/10.9
+5 overload{lambda1,
+ []
 
-Overfull \hbox (52.7986pt too wide) in paragraph at lines 829--835
+[46]
+Overfull \hbox (52.7986pt too wide) in paragraph at lines 1792--1798
 []\T1/lmr/m/n/10.95 (-20) The \T1/lmtt/m/n/10.95 requires \T1/lmr/m/n/10.95 (-2
 0) ex-pres-sion lists state-ments that must be valid for \T1/lmtt/m/n/10.95 T\T
 1/lmr/m/n/10.95 (-20) . \T1/lmtt/m/n/10.95 { a + b } -> std::convertible_to<T>
  []
 
-[33{/usr/share/texmf-dist/fonts/enc/dvips/lm/lm-mathsy.enc}] [34] [35] [36]
-Overfull \hbox (6.40588pt too wide) in paragraph at lines 1054--1058
+[47] [48] [49] [50] [51]
+Overfull \hbox (6.40588pt too wide) in paragraph at lines 2146--2150
 \T1/lmr/m/n/10.95 (-20) callable must be \T1/lmr/m/it/10.95 (-20) copy-able\T1/
 lmr/m/n/10.95 (-20) . That ex-cludes lamb-das cap-tur-ing move-only state (\T1/
 lmtt/m/n/10.95 std::unique_ptr\T1/lmr/m/n/10.95 (-20) ,
  []
 
-
-Overfull \hbox (61.43849pt too wide) in paragraph at lines 1097--1100
+[52]
+Overfull \hbox (61.43849pt too wide) in paragraph at lines 2189--2192
 []\T1/lmtt/m/n/10.95 std::ranges \T1/lmr/m/n/10.95 (-20) / \T1/lmtt/m/n/10.95 s
 td::views \T1/lmr/m/n/10.95 (-20) --- lazy, com-pos-able al-go-rithms over se-q
 uences (\T1/lmtt/m/n/10.95 xs | views::transform(...)
  []
 
-[37]
-Overfull \hbox (113.1652pt too wide) in paragraph at lines 1147--1153
+[53]
+Overfull \hbox (113.1652pt too wide) in paragraph at lines 2239--2245
 []\T1/lmtt/m/n/10.95 inline constexpr StyTag<CTStyle::bold()> Bold{};\T1/lmr/m/
 n/10.95 (-20) : a \T1/lmtt/m/n/10.95 constexpr \T1/lmr/m/n/10.95 (-20) vari-abl
 e of type \T1/lmtt/m/n/10.95 StyTag<CTStyle::bold()>\T1/lmr/m/n/10.95 (-20) ,
  []
 
-[38]
-Overfull \hbox (27.50632pt too wide) in paragraph at lines 1187--1191
+[54] [55] [56]
+Overfull \hbox (27.50632pt too wide) in paragraph at lines 2458--2462
 []\T1/lmr/bx/n/10.95 (-20) RAII guard. \T1/lmr/m/n/10.95 (-20) Write a class \T
 1/lmtt/m/n/10.95 Timer \T1/lmr/m/n/10.95 (-20) whose con-struc-tor records \T1/
 lmtt/m/n/10.95 std::chrono::steady_clock::now()
  []
 
-) [39] [40
+) [57] [58
 
 
 
@@ -1171,33 +1190,29 @@ lmtt/m/n/10.95 std::chrono::steady_clock::now()
 
  (./chapters/04-elm.tex
 Chapter 4.
-[41
+[59
 
 
-] [42] [43]
+] [60] [61]
 Overfull \hbox (7.17538pt too wide) in paragraph at lines 213--216
 []\T1/lmr/bx/n/10.95 (-20) Testability with-out mocks. \T1/lmr/m/n/10.95 (-20) 
 You write \T1/lmtt/m/n/10.95 ASSERT(update({5}, Inc{}).first == Model{6})\T1/lm
 r/m/n/10.95 (-20) .
  []
 
-[44]
-Package microtype Info: Character `texttrademark ' is missing
-(microtype)             in font `TS1/lmtt/m/n/9'.
-(microtype)             Ignoring protrusion settings for this character.
- [45]
+[62] [63]
 Overfull \hbox (56.17009pt too wide) in paragraph at lines 350--352
 []\T1/lmr/m/n/10.95 (-20) Add a \T1/lmtt/m/n/10.95 Save \T1/lmr/m/n/10.95 (-20)
  mes-sage that writes the cur-rent count to the clip-board via \T1/lmtt/m/n/10.
 95 Cmd<Msg>::write_clipboard(...)\T1/lmr/m/n/10.95 (-20) . 
  []
 
-) [46]
+) [64]
 \openout2 = `chapters/05-dsl.aux'.
 
  (./chapters/05-dsl.tex
 Chapter 5.
-[47
+[65
 
 
 
@@ -1216,41 +1231,41 @@ Overfull \hbox (15.17659pt too wide) in paragraph at lines 116--121
 _<Round>\T1/lmr/m/n/10.95 (-20) , \T1/lmtt/m/n/10.95 Cfg.has_border
  []
 
-[48]
+[66]
 Overfull \hbox (20.50887pt too wide) in paragraph at lines 167--172
 []\T1/lmr/m/n/10.95 (-20) The re-sult: \T1/lmtt/m/n/10.95 v(t<"a">, t<"b">, t<"
 c">) \T1/lmr/m/n/10.95 (-20) is a sin-gle \T1/lmtt/m/n/10.95 BoxNode<Column, Bo
 xCfg{}, TextNode<"a">,
  []
 
-[49] [50] [51]
+[67] [68] [69]
 Overfull \hbox (5.20482pt too wide) in paragraph at lines 343--347
 []\T1/lmr/m/n/10.95 (-20) Add a run-time counter (an \T1/lmtt/m/n/10.95 int \T1
 /lmr/m/n/10.95 (-20) vari-able) with \T1/lmtt/m/n/10.95 dyn\T1/lmr/m/n/10.95 (-
 20) . In-cre-ment it in a loop with \T1/lmtt/m/n/10.95 maya::live(...)
  []
 
-) [52]
+) [70]
 \openout2 = `chapters/06-elements.aux'.
 
  (./chapters/06-elements.tex
 Chapter 6.
-[53
+[71
 
 
 
 
-] [54] [55] [56]) [57]
+] [72] [73] [74]) [75]
 \openout2 = `chapters/07-layout.aux'.
 
  (./chapters/07-layout.tex
 Chapter 7.
-[58
+[76
 
 
 
 
-] [59] [60] [61]) [62] [63
+] [77] [78] [79]) [80] [81
 
 
 
@@ -1259,10 +1274,10 @@ Chapter 7.
 
  (./chapters/08-canvas.tex
 Chapter 8.
-[64
+[82
 
 
-] [65] [66]
+] [83] [84]
 Overfull \hbox (13.57295pt too wide) in paragraph at lines 197--203
 \T1/lmr/m/n/10.95 (-20) dard's \T1/lmtt/m/n/10.95 EastAsianWidth.txt \T1/lmr/m/
 n/10.95 (-20) and \T1/lmtt/m/n/10.95 emoji-data.txt \T1/lmr/m/n/10.95 (-20) by 
@@ -1270,35 +1285,35 @@ the script \T1/lmss/m/sl/10.95 (-20) maya/scripts/gen_unicode_width.py\T1/lmr/m
 /n/10.95 (-20) . 
  []
 
-[67]) [68]
+[85]) [86]
 \openout2 = `chapters/09-simd.aux'.
 
  (./chapters/09-simd.tex
 Chapter 9.
-[69
+[87
 
 
 
 
-] [70]
+] [88]
 Overfull \hbox (2.20753pt too wide) in paragraph at lines 163--169
 []\T1/lmr/m/n/10.95 (-20) The ren-derer picks the highest-supported ISA de-tect
 ed at build time (via \T1/lmtt/m/n/10.95 #if defined(__AVX2__)
  []
 
-[71] [72]
+[89] [90]
 Overfull \hbox (10.48708pt too wide) in paragraph at lines 267--270
 []\T1/lmr/m/n/10.95 (-20) Read \T1/lmss/m/sl/10.95 (-20) maya/include/maya/plat
 form/simd/avx2.hpp\T1/lmr/m/n/10.95 (-20) . Find the loop that uses \T1/lmtt/m/
 n/10.95 _mm256_cmpeq_epi64\T1/lmr/m/n/10.95 (-20) .
  []
 
-) [73]
+) [91]
 \openout2 = `chapters/10-ansi.aux'.
 
  (./chapters/10-ansi.tex
 Chapter 10.
-[74
+[92
 
 
 
@@ -1309,31 +1324,31 @@ Overfull \hbox (9.55568pt too wide) in paragraph at lines 73--80
 s are usu-ally 8-10 bytes per CUP. \T1/lmtt/m/n/10.95 MAYA_FORCEINLINE
  []
 
-[75]
+[93]
 Overfull \hbox (178.18066pt too wide) in paragraph at lines 148--153
 \T1/lmr/m/n/10.95 (-20) A style change emits an SGR se-quence whose ex-act byte
 s de-pend on the \T1/lmtt/m/n/10.95 Style \T1/lmr/m/n/10.95 (-20) struct: \T1/l
 mtt/m/n/10.95 ESC[0;1;3;38;2;100;180;255;48;2;20;25;35m
  []
 
-[76] [77]) [78]
+[94] [95]) [96]
 \openout2 = `chapters/11-inline.aux'.
 
  (./chapters/11-inline.tex
 Chapter 11.
-[79
+[97
 
 
 
 
-] [80] [81] [82] [83] [84]
+] [98] [99] [100] [101] [102]
 Overfull \hbox (35.33195pt too wide) in paragraph at lines 423--427
 []\T1/lmtt/m/n/10.95 ContentRows \T1/lmr/m/n/10.95 (-20) is an \T1/lmtt/m/n/10.
 95 int\T1/lmr/m/n/10.95 (-20) -wrapper with a pri-vate con-struc-tor. The sole 
 pro-ducer is \T1/lmtt/m/n/10.95 content_rows(canvas)\T1/lmr/m/n/10.95 (-20) ,
  []
 
-[85] [86]
+[103] [104]
 Overfull \hbox (4.8797pt too wide) in paragraph at lines 613--619
 []\T1/lmtt/m/n/10.95 ScrollbackMarker \T1/lmr/m/n/10.95 (-20) is move-only and 
 con-sumed ex-actly once. The re-turned \T1/lmtt/m/n/10.95 InlineFrame<Synced>
@@ -1342,14 +1357,14 @@ con-sumed ex-actly once. The re-turned \T1/lmtt/m/n/10.95 InlineFrame<Synced>
 LaTeX Font Info:    Font shape `T1/lmss/bx/it' in size <12> not available
 (Font)              Font shape `T1/lmss/bx/sl' tried instead on input line 625.
 
-[87] [88]
+[105] [106]
 Overfull \hbox (14.1665pt too wide) in paragraph at lines 723--727
 \T1/lmr/m/n/10.95 (-20) copyability. Imag-ine delet-ing one of the \T1/lmtt/m/n
 /10.95 delete\T1/lmr/m/n/10.95 (-20) d copy con-struc-tors; pre-dict which \T1/
 lmtt/m/n/10.95 static_assert
  []
 
-) [89] [90
+) [107] [108
 
 
 
@@ -1358,53 +1373,53 @@ lmtt/m/n/10.95 static_assert
 
  (./chapters/12-signals.tex
 Chapter 12.
-[91
+[109
 
 
-] [92] [93]
+] [110] [111]
 Overfull \hbox (21.17686pt too wide) in paragraph at lines 244--248
 []\T1/lmr/m/n/10.95 (-20) Write a clock ef-fect that prints the cur-rent time e
 v-ery sec-ond. Drive it with a \T1/lmtt/m/n/10.95 Signal<std::string>
  []
 
-) [94]
+) [112]
 \openout2 = `chapters/13-events.aux'.
 
  (./chapters/13-events.tex
 Chapter 13.
-[95
+[113
 
 
 
 
-] [96] [97]
+] [114] [115]
 Overfull \hbox (20.31432pt too wide) in paragraph at lines 210--215
 \T1/lmr/m/n/10.95 (-20) Windows has no \T1/lmtt/m/n/10.95 poll(2) \T1/lmr/m/n/1
 0.95 (-20) for key-board in-put. The Win-dows im-ple-men-ta-tion uses \T1/lmtt/
 m/n/10.95 ReadConsoleInputW
  []
 
-) [98]
+) [116]
 \openout2 = `chapters/14-cmdsub.aux'.
 
  (./chapters/14-cmdsub.tex
 Chapter 14.
-[99
+[117
 
 
 
 
-] [100] [101] [102]) [103]
+] [118] [119] [120]) [121]
 \openout2 = `chapters/15-widgets.aux'.
 
  (./chapters/15-widgets.tex
 Chapter 15.
-[104
+[122
 
 
 
 
-] [105] [106] [107]) [108]
+] [123] [124] [125]) [126]
 \openout2 = `chapters/16-build.aux'.
 
  (./chapters/16-build.tex
@@ -1416,15 +1431,15 @@ w install gcc \T1/lmr/m/n/10.95 (-20) then ex-plic-itly con-fig-ure with \T1/lm
 tt/m/n/10.95 cmake -DCMAKE_CXX_COMPILER=g++-15\T1/lmr/m/n/10.95 (-20) .
  []
 
-[109
+[127
 
 
 
 
-] [110] [111] [112]) [113]
+] [128] [129] [130]) [131]
 \openout2 = `chapters/99-colophon.aux'.
 
- (./chapters/99-colophon.tex) [114
+ (./chapters/99-colophon.tex) [132
 
 
 
@@ -1444,16 +1459,16 @@ LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
  ***********
 Package rerunfilecheck Info: File `maya-book.out' has not changed.
-(rerunfilecheck)             Checksum: 8CE0D699BBD91145C64394EF2518020F;53486.
+(rerunfilecheck)             Checksum: 0707B2038CE652E7AA46FDE5F58A4DC7;64898.
  ) 
 Here is how much of TeX's memory you used:
- 35927 strings out of 469515
- 662489 string characters out of 5470807
- 1691216 words of memory out of 5000000
- 61386 multiletter control sequences out of 15000+600000
- 788430 words of font info for 370 fonts, out of 8000000 for 9000
+ 36671 strings out of 469515
+ 673323 string characters out of 5470807
+ 1692099 words of memory out of 5000000
+ 61673 multiletter control sequences out of 15000+600000
+ 789050 words of font info for 376 fonts, out of 8000000 for 9000
  14 hyphenation exceptions out of 8191
- 103i,13n,111p,1001b,2158s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 103i,14n,111p,1001b,2158s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/share/texmf-dist/fonts/type1/public/lm/lmbx10.pfb></usr/share/texmf-dis
 t/fonts/type1/public/lm/lmbx12.pfb></usr/share/texmf-dist/fonts/type1/public/lm
 /lmbxi10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmmi10.pfb></usr/shar
@@ -1471,10 +1486,10 @@ ist/fonts/type1/public/lm/lmsy9.pfb></usr/share/texmf-dist/fonts/type1/public/l
 m/lmtk10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmtt10.pfb></usr/shar
 e/texmf-dist/fonts/type1/public/lm/lmtt9.pfb></usr/share/texmf-dist/fonts/type1
 /public/lm/lmtti10.pfb>
-Output written on maya-book.pdf (124 pages, 932900 bytes).
+Output written on maya-book.pdf (144 pages, 1010758 bytes).
 PDF statistics:
- 4152 PDF objects out of 4296 (max. 8388607)
- 3936 compressed objects within 40 object streams
- 2091 named destinations out of 2487 (max. 500000)
- 92149 words of extra memory for PDF output out of 106986 (max. 10000000)
+ 4959 PDF objects out of 5155 (max. 8388607)
+ 4715 compressed objects within 48 object streams
+ 2536 named destinations out of 2984 (max. 500000)
+ 92549 words of extra memory for PDF output out of 106986 (max. 10000000)
 

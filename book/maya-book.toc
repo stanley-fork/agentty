@@ -63,217 +63,267 @@
 \contentsline {paragraph}{The operating system runs the result.}{22}{lstnumber.-14.5}%
 \contentsline {subsection}{\numberline {3.1.1}Headers, source files, and the one-definition rule}{23}{subsection.3.1.1}%
 \contentsline {subsection}{\numberline {3.1.2}\texttt {\#pragma once} and include guards}{23}{subsection.3.1.2}%
-\contentsline {section}{\numberline {3.2}Values, references, pointers, \texttt {const}}{23}{section.3.2}%
-\contentsline {subsection}{\numberline {3.2.1}Values}{24}{subsection.3.2.1}%
-\contentsline {subsection}{\numberline {3.2.2}References}{24}{subsection.3.2.2}%
-\contentsline {subsection}{\numberline {3.2.3}Pointers}{24}{subsection.3.2.3}%
-\contentsline {subsection}{\numberline {3.2.4}\texttt {const} on values and references}{25}{subsection.3.2.4}%
-\contentsline {section}{\numberline {3.3}Functions, overloads, default arguments}{25}{section.3.3}%
-\contentsline {subsection}{\numberline {3.3.1}Parameter passing}{25}{subsection.3.3.1}%
-\contentsline {subsection}{\numberline {3.3.2}Overloading}{26}{subsection.3.3.2}%
-\contentsline {subsection}{\numberline {3.3.3}Default arguments}{26}{subsection.3.3.3}%
-\contentsline {section}{\numberline {3.4}Classes, constructors, destructors}{26}{section.3.4}%
-\contentsline {subsection}{\numberline {3.4.1}Constructors}{27}{subsection.3.4.1}%
-\contentsline {subsection}{\numberline {3.4.2}Member initialiser lists}{27}{subsection.3.4.2}%
-\contentsline {subsection}{\numberline {3.4.3}Destructors}{27}{subsection.3.4.3}%
-\contentsline {section}{\numberline {3.5}RAII --- the central pattern}{28}{section.3.5}%
-\contentsline {subsection}{\numberline {3.5.1}A \texttt {TerminalGuard} for raw mode}{28}{subsection.3.5.1}%
-\contentsline {subsection}{\numberline {3.5.2}The rule of zero, three, five}{29}{subsection.3.5.2}%
-\contentsline {section}{\numberline {3.6}\texttt {auto} and type deduction}{29}{section.3.6}%
-\contentsline {section}{\numberline {3.7}Move semantics}{29}{section.3.7}%
-\contentsline {section}{\numberline {3.8}Templates}{30}{section.3.8}%
-\contentsline {subsection}{\numberline {3.8.1}Function templates}{30}{subsection.3.8.1}%
-\contentsline {subsection}{\numberline {3.8.2}Class templates}{31}{subsection.3.8.2}%
-\contentsline {subsection}{\numberline {3.8.3}Multiple template parameters}{31}{subsection.3.8.3}%
-\contentsline {subsection}{\numberline {3.8.4}Non-type template parameters (NTTPs)}{31}{subsection.3.8.4}%
-\contentsline {subsection}{\numberline {3.8.5}NTTPs of structural type --- the climax}{31}{subsection.3.8.5}%
-\contentsline {subsection}{\numberline {3.8.6}Templates and the \texttt {<>} syntax}{32}{subsection.3.8.6}%
-\contentsline {section}{\numberline {3.9}\texttt {constexpr}, \texttt {consteval}, \texttt {constinit}}{33}{section.3.9}%
-\contentsline {section}{\numberline {3.10}Concepts and \texttt {requires}}{33}{section.3.10}%
-\contentsline {subsection}{\numberline {3.10.1}Maya's concepts}{34}{subsection.3.10.1}%
-\contentsline {section}{\numberline {3.11}\texttt {std::variant} and \texttt {std::visit}}{34}{section.3.11}%
-\contentsline {subsection}{\numberline {3.11.1}Maya's variants}{35}{subsection.3.11.1}%
-\contentsline {section}{\numberline {3.12}\texttt {std::expected<T, E>}}{35}{section.3.12}%
-\contentsline {section}{\numberline {3.13}Lambdas and capture}{36}{section.3.13}%
-\contentsline {subsection}{\numberline {3.13.1}Init-captures and moving into a lambda}{36}{subsection.3.13.1}%
-\contentsline {subsection}{\numberline {3.13.2}Storing lambdas: \texttt {std::function} vs.\ \texttt {std::move\_only\_function}}{37}{subsection.3.13.2}%
-\contentsline {section}{\numberline {3.14}Standard-library bits you will see}{37}{section.3.14}%
-\contentsline {section}{\numberline {3.15}Reading real \textsf {maya}{} code}{38}{section.3.15}%
-\contentsline {part}{II\hspace {1em}Architecture}{40}{part.2}%
-\contentsline {chapter}{\numberline {4}The Elm loop and algebraic effects}{41}{chapter.4}%
-\contentsline {section}{\numberline {4.1}Where state usually lives}{41}{section.4.1}%
-\contentsline {section}{\numberline {4.2}The Elm shape}{41}{section.4.2}%
-\contentsline {section}{\numberline {4.3}But programs need to do things}{42}{section.4.3}%
-\contentsline {section}{\numberline {4.4}Subscriptions: the other half}{43}{section.4.4}%
-\contentsline {section}{\numberline {4.5}Why this is worth the effort}{44}{section.4.5}%
-\contentsline {section}{\numberline {4.6}The runtime loop, sketched}{44}{section.4.6}%
-\contentsline {section}{\numberline {4.7}From single-function to Program: a worked refactor}{45}{section.4.7}%
-\contentsline {chapter}{\numberline {5}The compile-time DSL}{47}{chapter.5}%
-\contentsline {section}{\numberline {5.1}The shape}{47}{section.5.1}%
-\contentsline {section}{\numberline {5.2}\texttt {t<"Hello">} --- string in a type}{47}{section.5.2}%
-\contentsline {section}{\numberline {5.3}Pipes are operator overloads}{48}{section.5.3}%
-\contentsline {section}{\numberline {5.4}\texttt {v()} and \texttt {h()} --- variadic containers}{48}{section.5.4}%
-\contentsline {section}{\numberline {5.5}\texttt {BoxCfg} --- the type-state}{49}{section.5.5}%
-\contentsline {section}{\numberline {5.6}Static, dynamic, and the bridge}{50}{section.5.6}%
-\contentsline {subsection}{\numberline {5.6.1}\texttt {text(...)} --- runtime strings}{50}{subsection.5.6.1}%
-\contentsline {subsection}{\numberline {5.6.2}\texttt {dyn([](){ ... })} --- arbitrary lambdas}{50}{subsection.5.6.2}%
-\contentsline {subsection}{\numberline {5.6.3}\texttt {map(range, projection)} --- list comprehension}{50}{subsection.5.6.3}%
-\contentsline {section}{\numberline {5.7}Reading a real pipeline}{50}{section.5.7}%
-\contentsline {section}{\numberline {5.8}Why compile-time?}{51}{section.5.8}%
-\contentsline {section}{\numberline {5.9}Where the runtime takes over}{51}{section.5.9}%
-\contentsline {chapter}{\numberline {6}Elements, style, colour, border}{53}{chapter.6}%
-\contentsline {section}{\numberline {6.1}\texttt {Element}: a tagged union}{53}{section.6.1}%
-\contentsline {subsection}{\numberline {6.1.1}\texttt {TextElement}}{53}{subsection.6.1.1}%
-\contentsline {subsection}{\numberline {6.1.2}\texttt {BoxElement}}{53}{subsection.6.1.2}%
-\contentsline {subsection}{\numberline {6.1.3}\texttt {ElementList}}{54}{subsection.6.1.3}%
-\contentsline {section}{\numberline {6.2}\texttt {Style}}{54}{section.6.2}%
-\contentsline {subsection}{\numberline {6.2.1}\texttt {Attribute} bitset}{54}{subsection.6.2.1}%
-\contentsline {section}{\numberline {6.3}\texttt {Color}}{55}{section.6.3}%
-\contentsline {subsection}{\numberline {6.3.1}Themes}{55}{subsection.6.3.1}%
-\contentsline {section}{\numberline {6.4}\texttt {Border}}{55}{section.6.4}%
-\contentsline {subsection}{\numberline {6.4.1}\texttt {Sep} and \texttt {VSep}}{56}{subsection.6.4.1}%
-\contentsline {section}{\numberline {6.5}\texttt {BoxBuilder}: runtime construction}{56}{section.6.5}%
-\contentsline {section}{\numberline {6.6}Walking an element tree}{56}{section.6.6}%
-\contentsline {section}{\numberline {6.7}Hyperlinks}{57}{section.6.7}%
-\contentsline {section}{\numberline {6.8}Why so many small structs?}{57}{section.6.8}%
-\contentsline {chapter}{\numberline {7}Flexbox in integers}{58}{chapter.7}%
-\contentsline {section}{\numberline {7.1}The problem layout solves}{58}{section.7.1}%
-\contentsline {section}{\numberline {7.2}Flexbox in one paragraph}{58}{section.7.2}%
-\contentsline {section}{\numberline {7.3}Vocabulary}{58}{section.7.3}%
-\contentsline {section}{\numberline {7.4}The flex properties}{59}{section.7.4}%
-\contentsline {section}{\numberline {7.5}The data structure}{59}{section.7.5}%
-\contentsline {section}{\numberline {7.6}The algorithm, step by step}{60}{section.7.6}%
-\contentsline {subsection}{\numberline {7.6.1}Padding, border, margin}{60}{subsection.7.6.1}%
-\contentsline {section}{\numberline {7.7}Worked example: a status panel}{60}{section.7.7}%
-\contentsline {section}{\numberline {7.8}When layout disagrees with you}{61}{section.7.8}%
-\contentsline {section}{\numberline {7.9}Where the code lives}{61}{section.7.9}%
-\contentsline {part}{III\hspace {1em}Rendering}{63}{part.3}%
-\contentsline {chapter}{\numberline {8}The canvas and packed cells}{64}{chapter.8}%
-\contentsline {section}{\numberline {8.1}What a cell is}{64}{section.8.1}%
-\contentsline {section}{\numberline {8.2}Packing}{64}{section.8.2}%
-\contentsline {section}{\numberline {8.3}The style pool}{65}{section.8.3}%
-\contentsline {section}{\numberline {8.4}The canvas data structure}{66}{section.8.4}%
-\contentsline {subsection}{\numberline {8.4.1}Why 64-byte alignment?}{66}{subsection.8.4.1}%
-\contentsline {section}{\numberline {8.5}Drawing text}{66}{section.8.5}%
-\contentsline {section}{\numberline {8.6}The damage rectangle}{67}{section.8.6}%
-\contentsline {subsection}{\numberline {8.6.1}The clip stack}{67}{subsection.8.6.1}%
-\contentsline {section}{\numberline {8.7}Resize}{67}{section.8.7}%
-\contentsline {subsection}{\numberline {8.7.1}Shrinking after a wide window}{67}{subsection.8.7.1}%
-\contentsline {section}{\numberline {8.8}Putting it together}{68}{section.8.8}%
-\contentsline {chapter}{\numberline {9}SIMD frame diffing}{69}{chapter.9}%
-\contentsline {section}{\numberline {9.1}Why SIMD?}{69}{section.9.1}%
-\contentsline {section}{\numberline {9.2}The algorithm}{69}{section.9.2}%
-\contentsline {subsection}{\numberline {9.2.1}Loading four cells}{70}{subsection.9.2.1}%
-\contentsline {subsection}{\numberline {9.2.2}Comparing them}{70}{subsection.9.2.2}%
-\contentsline {subsection}{\numberline {9.2.3}Reducing to a mask}{70}{subsection.9.2.3}%
-\contentsline {subsection}{\numberline {9.2.4}Detecting any change}{70}{subsection.9.2.4}%
-\contentsline {subsection}{\numberline {9.2.5}Finding the first changed lane}{70}{subsection.9.2.5}%
-\contentsline {subsection}{\numberline {9.2.6}The scalar tail}{71}{subsection.9.2.6}%
-\contentsline {section}{\numberline {9.3}Architecture dispatch}{71}{section.9.3}%
-\contentsline {section}{\numberline {9.4}The other SIMD operations}{71}{section.9.4}%
-\contentsline {section}{\numberline {9.5}Putting it in the renderer}{72}{section.9.5}%
-\contentsline {section}{\numberline {9.6}What about diff algorithms (Myers, etc.)?}{72}{section.9.6}%
-\contentsline {section}{\numberline {9.7}Validation}{72}{section.9.7}%
-\contentsline {chapter}{\numberline {10}ANSI serialization and the writer}{74}{chapter.10}%
-\contentsline {section}{\numberline {10.1}What the renderer must emit}{74}{section.10.1}%
-\contentsline {section}{\numberline {10.2}Zero-allocation building blocks}{74}{section.10.2}%
-\contentsline {subsection}{\numberline {10.2.1}A worked function}{74}{subsection.10.2.1}%
-\contentsline {subsection}{\numberline {10.2.2}Per-cell positioning, faster}{75}{subsection.10.2.2}%
-\contentsline {section}{\numberline {10.3}UTF-8 encoding}{75}{section.10.3}%
-\contentsline {section}{\numberline {10.4}The style cache}{76}{section.10.4}%
-\contentsline {section}{\numberline {10.5}The terminal writer}{76}{section.10.5}%
-\contentsline {subsection}{\numberline {10.5.1}Synchronised output mode}{77}{subsection.10.5.1}%
-\contentsline {section}{\numberline {10.6}Putting it all together}{77}{section.10.6}%
-\contentsline {section}{\numberline {10.7}Cost, measured}{78}{section.10.7}%
-\contentsline {chapter}{\numberline {11}Inline mode and the witness chain}{79}{chapter.11}%
-\contentsline {section}{\numberline {11.1}The two modes, briefly}{79}{section.11.1}%
-\contentsline {section}{\numberline {11.2}Failure mode 1: ghosting from over-tall paint}{79}{section.11.2}%
-\contentsline {subsection}{\numberline {11.2.1}Why}{80}{subsection.11.2.1}%
-\contentsline {subsection}{\numberline {11.2.2}The downstream catastrophe}{80}{subsection.11.2.2}%
-\contentsline {subsection}{\numberline {11.2.3}The fix}{80}{subsection.11.2.3}%
-\contentsline {section}{\numberline {11.3}Failure mode 2: \texttt {commit\_prefix} over-claim}{81}{section.11.3}%
-\contentsline {subsection}{\numberline {11.3.1}Why a guessed row count corrupts everything}{81}{subsection.11.3.1}%
-\contentsline {subsection}{\numberline {11.3.2}The structural fix}{82}{subsection.11.3.2}%
-\contentsline {section}{\numberline {11.4}The theorem: Scrollback Integrity}{82}{section.11.4}%
-\contentsline {subsection}{\numberline {11.4.1}The honest hypotheses}{83}{subsection.11.4.1}%
-\contentsline {section}{\numberline {11.5}The witness chain: five layers}{83}{section.11.5}%
-\contentsline {subsection}{\numberline {11.5.1}Layer 0 --- \texttt {CanvasWitness} (T0)}{83}{subsection.11.5.1}%
-\contentsline {subsection}{\numberline {11.5.2}Layer 1 --- \texttt {WireRow} and \texttt {Viewport} (T1)}{84}{subsection.11.5.2}%
-\contentsline {subsection}{\numberline {11.5.3}Layer 2 --- \texttt {ContentRows} (closes one wrong-source class)}{85}{subsection.11.5.3}%
-\contentsline {subsection}{\numberline {11.5.4}Layer 3 --- \texttt {ShadowWitness} (T2)}{85}{subsection.11.5.4}%
-\contentsline {subsection}{\numberline {11.5.5}Layer 4 --- \texttt {FrameBytes} (atomic state advance)}{86}{subsection.11.5.5}%
-\contentsline {subsection}{\numberline {11.5.6}Layer 5 --- \texttt {InlineFrame<Tag>} (linear chain)}{86}{subsection.11.5.6}%
-\contentsline {subsection}{\numberline {11.5.7}Scrollback commit, formalised (T3)}{87}{subsection.11.5.7}%
-\contentsline {subsection}{\numberline {11.5.8}What the chain does \emph {not} claim}{88}{subsection.11.5.8}%
-\contentsline {section}{\numberline {11.6}Where the code lives}{88}{section.11.6}%
-\contentsline {section}{\numberline {11.7}Why all this matters}{88}{section.11.7}%
-\contentsline {part}{IV\hspace {1em}Reactivity, runtime, and widgets}{90}{part.4}%
-\contentsline {chapter}{\numberline {12}Signals, computeds, effects}{91}{chapter.12}%
-\contentsline {section}{\numberline {12.1}The problem reactivity solves}{91}{section.12.1}%
-\contentsline {section}{\numberline {12.2}The three primitives}{91}{section.12.2}%
-\contentsline {subsection}{\numberline {12.2.1}\texttt {Signal<T>}: a value with subscribers}{91}{subsection.12.2.1}%
-\contentsline {subsection}{\numberline {12.2.2}\texttt {Computed<T>}: a value derived from signals}{91}{subsection.12.2.2}%
-\contentsline {subsection}{\numberline {12.2.3}\texttt {Effect}: run a side effect when signals change}{92}{subsection.12.2.3}%
-\contentsline {section}{\numberline {12.3}How dependency tracking works}{92}{section.12.3}%
-\contentsline {subsection}{\numberline {12.3.1}Batching}{93}{subsection.12.3.1}%
-\contentsline {section}{\numberline {12.4}When to reach for reactivity}{93}{section.12.4}%
-\contentsline {section}{\numberline {12.5}A worked example}{93}{section.12.5}%
-\contentsline {section}{\numberline {12.6}Lifetime and ownership}{94}{section.12.6}%
-\contentsline {section}{\numberline {12.7}Comparison with React, Solid, Leptos}{94}{section.12.7}%
-\contentsline {chapter}{\numberline {13}Events, focus, input parsing}{95}{chapter.13}%
-\contentsline {section}{\numberline {13.1}What the terminal sends}{95}{section.13.1}%
-\contentsline {section}{\numberline {13.2}The \texttt {Event} variant}{95}{section.13.2}%
-\contentsline {subsection}{\numberline {13.2.1}Why types, not strings?}{96}{subsection.13.2.1}%
-\contentsline {section}{\numberline {13.3}Event helpers}{96}{section.13.3}%
-\contentsline {section}{\numberline {13.4}From event to Msg --- \texttt {key\_map}}{96}{section.13.4}%
-\contentsline {section}{\numberline {13.5}Focus}{97}{section.13.5}%
-\contentsline {section}{\numberline {13.6}Resize}{97}{section.13.6}%
-\contentsline {section}{\numberline {13.7}Paste}{97}{section.13.7}%
-\contentsline {section}{\numberline {13.8}The polling loop}{98}{section.13.8}%
-\contentsline {section}{\numberline {13.9}Windows}{98}{section.13.9}%
-\contentsline {chapter}{\numberline {14}Cmd, Sub, and the runtime}{99}{chapter.14}%
-\contentsline {section}{\numberline {14.1}The full \texttt {Cmd<Msg>} variant}{99}{section.14.1}%
-\contentsline {subsection}{\numberline {14.1.1}\texttt {None} --- the identity}{99}{subsection.14.1.1}%
-\contentsline {subsection}{\numberline {14.1.2}\texttt {Quit} --- exit the program}{99}{subsection.14.1.2}%
-\contentsline {subsection}{\numberline {14.1.3}\texttt {Batch} --- multiple effects}{99}{subsection.14.1.3}%
-\contentsline {subsection}{\numberline {14.1.4}\texttt {After} --- one-shot timer}{100}{subsection.14.1.4}%
-\contentsline {subsection}{\numberline {14.1.5}\texttt {SetTitle} --- set the terminal title}{100}{subsection.14.1.5}%
-\contentsline {subsection}{\numberline {14.1.6}\texttt {WriteClipboard} --- OSC-52 clipboard}{100}{subsection.14.1.6}%
-\contentsline {subsection}{\numberline {14.1.7}\texttt {Task} --- async work on a shared pool}{100}{subsection.14.1.7}%
-\contentsline {subsection}{\numberline {14.1.8}\texttt {IsolatedTask} --- async work on a dedicated thread}{100}{subsection.14.1.8}%
-\contentsline {subsection}{\numberline {14.1.9}\texttt {CommitRows} --- inline-mode scrollback commit}{100}{subsection.14.1.9}%
-\contentsline {section}{\numberline {14.2}The \texttt {Cmd} functor}{101}{section.14.2}%
-\contentsline {section}{\numberline {14.3}The full \texttt {Sub<Msg>} variant}{101}{section.14.3}%
-\contentsline {section}{\numberline {14.4}The runtime loop, expanded}{101}{section.14.4}%
-\contentsline {section}{\numberline {14.5}Other entry points}{102}{section.14.5}%
-\contentsline {section}{\numberline {14.6}Testing a Program without a terminal}{103}{section.14.6}%
-\contentsline {chapter}{\numberline {15}The widget catalogue}{104}{chapter.15}%
-\contentsline {section}{\numberline {15.1}The widget contract}{104}{section.15.1}%
-\contentsline {section}{\numberline {15.2}Categories}{104}{section.15.2}%
-\contentsline {subsection}{\numberline {15.2.1}Data display}{104}{subsection.15.2.1}%
-\contentsline {subsection}{\numberline {15.2.2}Input}{105}{subsection.15.2.2}%
-\contentsline {subsection}{\numberline {15.2.3}Layout helpers}{105}{subsection.15.2.3}%
-\contentsline {subsection}{\numberline {15.2.4}Display}{106}{subsection.15.2.4}%
-\contentsline {subsection}{\numberline {15.2.5}Agent UI (the \textsf {agentty}{} family)}{106}{subsection.15.2.5}%
-\contentsline {section}{\numberline {15.3}Anatomy of a widget: \texttt {Input}}{106}{section.15.3}%
-\contentsline {subsection}{\numberline {15.3.1}Configuration}{106}{subsection.15.3.1}%
-\contentsline {subsection}{\numberline {15.3.2}Building the element}{107}{subsection.15.3.2}%
-\contentsline {subsection}{\numberline {15.3.3}Handling input}{107}{subsection.15.3.3}%
-\contentsline {section}{\numberline {15.4}Composing widgets}{107}{section.15.4}%
-\contentsline {section}{\numberline {15.5}Where the polish lives}{108}{section.15.5}%
-\contentsline {chapter}{\numberline {16}Building, packaging, shipping}{109}{chapter.16}%
-\contentsline {section}{\numberline {16.1}Compiler requirements}{109}{section.16.1}%
-\contentsline {section}{\numberline {16.2}Building \textsf {maya}{}}{109}{section.16.2}%
-\contentsline {section}{\numberline {16.3}Linking \textsf {maya}{} into your own program}{110}{section.16.3}%
-\contentsline {subsection}{\numberline {16.3.1}Installing}{110}{subsection.16.3.1}%
-\contentsline {subsection}{\numberline {16.3.2}Depending on it}{110}{subsection.16.3.2}%
-\contentsline {subsection}{\numberline {16.3.3}Vendoring via \texttt {FetchContent}}{110}{subsection.16.3.3}%
-\contentsline {section}{\numberline {16.4}Sandboxing your program (Linux / macOS)}{111}{section.16.4}%
-\contentsline {section}{\numberline {16.5}Producing a static binary}{111}{section.16.5}%
-\contentsline {section}{\numberline {16.6}Packaging}{111}{section.16.6}%
-\contentsline {section}{\numberline {16.7}Debugging}{112}{section.16.7}%
-\contentsline {subsection}{\numberline {16.7.1}Terminal stuck in raw mode}{112}{subsection.16.7.1}%
-\contentsline {subsection}{\numberline {16.7.2}Rendering looks corrupted}{112}{subsection.16.7.2}%
-\contentsline {subsection}{\numberline {16.7.3}Slow rendering}{112}{subsection.16.7.3}%
-\contentsline {section}{\numberline {16.8}Going further}{112}{section.16.8}%
-\contentsline {chapter}{Colophon}{114}{chapter*.2}%
+\contentsline {subsection}{\numberline {3.1.3}How to actually compile and run a C\nolinebreak \hspace {-.05em}\raisebox {.2ex}{\small {++}}{} file}{23}{subsection.3.1.3}%
+\contentsline {section}{\numberline {3.2}Statements, blocks, control flow}{24}{section.3.2}%
+\contentsline {subsection}{\numberline {3.2.1}Statements and blocks}{24}{subsection.3.2.1}%
+\contentsline {subsection}{\numberline {3.2.2}\texttt {if} and \texttt {else}}{25}{subsection.3.2.2}%
+\contentsline {subsection}{\numberline {3.2.3}Loops: \texttt {while}, \texttt {do-while}, \texttt {for}}{25}{subsection.3.2.3}%
+\contentsline {subsection}{\numberline {3.2.4}\texttt {break} and \texttt {continue}}{25}{subsection.3.2.4}%
+\contentsline {subsection}{\numberline {3.2.5}\texttt {switch}}{25}{subsection.3.2.5}%
+\contentsline {subsection}{\numberline {3.2.6}Expressions and statements}{26}{subsection.3.2.6}%
+\contentsline {section}{\numberline {3.3}Built-in types and integer widths}{26}{section.3.3}%
+\contentsline {subsection}{\numberline {3.3.1}Signed vs unsigned}{27}{subsection.3.3.1}%
+\contentsline {subsection}{\numberline {3.3.2}Character types}{27}{subsection.3.3.2}%
+\contentsline {subsection}{\numberline {3.3.3}Literals}{27}{subsection.3.3.3}%
+\contentsline {section}{\numberline {3.4}Namespaces}{27}{section.3.4}%
+\contentsline {subsection}{\numberline {3.4.1}\texttt {using} declarations}{28}{subsection.3.4.1}%
+\contentsline {section}{\numberline {3.5}Initialisation: the many forms}{28}{section.3.5}%
+\contentsline {subsection}{\numberline {3.5.1}Default initialisation can leave garbage}{29}{subsection.3.5.1}%
+\contentsline {subsection}{\numberline {3.5.2}Brace init avoids narrowing}{29}{subsection.3.5.2}%
+\contentsline {subsection}{\numberline {3.5.3}The ``most vexing parse''}{29}{subsection.3.5.3}%
+\contentsline {subsection}{\numberline {3.5.4}The rule}{29}{subsection.3.5.4}%
+\contentsline {section}{\numberline {3.6}Values, references, pointers, \texttt {const}}{29}{section.3.6}%
+\contentsline {subsection}{\numberline {3.6.1}Values}{29}{subsection.3.6.1}%
+\contentsline {subsection}{\numberline {3.6.2}References}{30}{subsection.3.6.2}%
+\contentsline {subsection}{\numberline {3.6.3}Pointers}{30}{subsection.3.6.3}%
+\contentsline {subsection}{\numberline {3.6.4}\texttt {const} on values and references}{31}{subsection.3.6.4}%
+\contentsline {section}{\numberline {3.7}Functions, overloads, default arguments}{31}{section.3.7}%
+\contentsline {subsection}{\numberline {3.7.1}Parameter passing}{31}{subsection.3.7.1}%
+\contentsline {subsection}{\numberline {3.7.2}Overloading}{32}{subsection.3.7.2}%
+\contentsline {subsection}{\numberline {3.7.3}Default arguments}{32}{subsection.3.7.3}%
+\contentsline {section}{\numberline {3.8}\texttt {enum class}: typed enumerations}{32}{section.3.8}%
+\contentsline {section}{\numberline {3.9}Type aliases: \texttt {using}}{33}{section.3.9}%
+\contentsline {section}{\numberline {3.10}Attributes and \texttt {noexcept}}{33}{section.3.10}%
+\contentsline {section}{\numberline {3.11}Classes, constructors, destructors}{34}{section.3.11}%
+\contentsline {subsection}{\numberline {3.11.1}Constructors}{34}{subsection.3.11.1}%
+\contentsline {subsection}{\numberline {3.11.2}Member initialiser lists}{34}{subsection.3.11.2}%
+\contentsline {subsection}{\numberline {3.11.3}Destructors}{35}{subsection.3.11.3}%
+\contentsline {section}{\numberline {3.12}RAII --- the central pattern}{35}{section.3.12}%
+\contentsline {subsection}{\numberline {3.12.1}A \texttt {TerminalGuard} for raw mode}{35}{subsection.3.12.1}%
+\contentsline {subsection}{\numberline {3.12.2}The rule of zero, three, five}{36}{subsection.3.12.2}%
+\contentsline {section}{\numberline {3.13}Inheritance and \texttt {virtual} (and why \textsf {maya}{} avoids them)}{36}{section.3.13}%
+\contentsline {subsection}{\numberline {3.13.1}Why \textsf {maya}{} barely uses it}{37}{subsection.3.13.1}%
+\contentsline {section}{\numberline {3.14}Operator overloading}{38}{section.3.14}%
+\contentsline {subsection}{\numberline {3.14.1}Operators you can overload}{38}{subsection.3.14.1}%
+\contentsline {subsection}{\numberline {3.14.2}Conversion operators}{39}{subsection.3.14.2}%
+\contentsline {section}{\numberline {3.15}Smart pointers}{39}{section.3.15}%
+\contentsline {subsection}{\numberline {3.15.1}\texttt {std::unique\_ptr<T>}}{39}{subsection.3.15.1}%
+\contentsline {subsection}{\numberline {3.15.2}\texttt {std::shared\_ptr<T>}}{40}{subsection.3.15.2}%
+\contentsline {subsection}{\numberline {3.15.3}\texttt {std::weak\_ptr<T>}}{40}{subsection.3.15.3}%
+\contentsline {subsection}{\numberline {3.15.4}When to use raw \texttt {T*}}{40}{subsection.3.15.4}%
+\contentsline {section}{\numberline {3.16}\texttt {auto} and type deduction}{40}{section.3.16}%
+\contentsline {section}{\numberline {3.17}Move semantics}{41}{section.3.17}%
+\contentsline {section}{\numberline {3.18}Exceptions, and why \textsf {maya}{} prefers \texttt {expected}}{42}{section.3.18}%
+\contentsline {subsection}{\numberline {3.18.1}Why \textsf {maya}{} avoids them for ordinary errors}{42}{subsection.3.18.1}%
+\contentsline {section}{\numberline {3.19}Templates}{43}{section.3.19}%
+\contentsline {subsection}{\numberline {3.19.1}Function templates}{43}{subsection.3.19.1}%
+\contentsline {subsection}{\numberline {3.19.2}Class templates}{43}{subsection.3.19.2}%
+\contentsline {subsection}{\numberline {3.19.3}Multiple template parameters}{44}{subsection.3.19.3}%
+\contentsline {subsection}{\numberline {3.19.4}Non-type template parameters (NTTPs)}{44}{subsection.3.19.4}%
+\contentsline {subsection}{\numberline {3.19.5}NTTPs of structural type --- the climax}{44}{subsection.3.19.5}%
+\contentsline {subsection}{\numberline {3.19.6}Templates and the \texttt {<>} syntax}{45}{subsection.3.19.6}%
+\contentsline {section}{\numberline {3.20}Parameter packs and fold expressions}{45}{section.3.20}%
+\contentsline {subsection}{\numberline {3.20.1}Fold expressions}{46}{subsection.3.20.1}%
+\contentsline {subsection}{\numberline {3.20.2}The \texttt {overload} helper, revisited}{46}{subsection.3.20.2}%
+\contentsline {section}{\numberline {3.21}\texttt {constexpr}, \texttt {consteval}, \texttt {constinit}}{46}{section.3.21}%
+\contentsline {section}{\numberline {3.22}Concepts and \texttt {requires}}{47}{section.3.22}%
+\contentsline {subsection}{\numberline {3.22.1}Maya's concepts}{47}{subsection.3.22.1}%
+\contentsline {section}{\numberline {3.23}\texttt {std::variant} and \texttt {std::visit}}{48}{section.3.23}%
+\contentsline {subsection}{\numberline {3.23.1}Maya's variants}{49}{subsection.3.23.1}%
+\contentsline {section}{\numberline {3.24}Modern syntax sugar you will see everywhere}{49}{section.3.24}%
+\contentsline {subsection}{\numberline {3.24.1}Structured bindings}{49}{subsection.3.24.1}%
+\contentsline {subsection}{\numberline {3.24.2}Designated initialisers}{49}{subsection.3.24.2}%
+\contentsline {subsection}{\numberline {3.24.3}Class template argument deduction (CTAD)}{50}{subsection.3.24.3}%
+\contentsline {subsection}{\numberline {3.24.4}\texttt {auto} return types}{50}{subsection.3.24.4}%
+\contentsline {subsection}{\numberline {3.24.5}\texttt {constexpr if}}{50}{subsection.3.24.5}%
+\contentsline {subsection}{\numberline {3.24.6}\texttt {nullptr}, not \texttt {NULL}}{51}{subsection.3.24.6}%
+\contentsline {section}{\numberline {3.25}\texttt {std::expected<T, E>}}{51}{section.3.25}%
+\contentsline {section}{\numberline {3.26}Lambdas and capture}{52}{section.3.26}%
+\contentsline {subsection}{\numberline {3.26.1}Init-captures and moving into a lambda}{52}{subsection.3.26.1}%
+\contentsline {subsection}{\numberline {3.26.2}Storing lambdas: \texttt {std::function} vs.\ \texttt {std::move\_only\_function}}{52}{subsection.3.26.2}%
+\contentsline {section}{\numberline {3.27}Standard-library bits you will see}{53}{section.3.27}%
+\contentsline {section}{\numberline {3.28}Reading real \textsf {maya}{} code}{53}{section.3.28}%
+\contentsline {subsection}{\numberline {3.28.1}A second worked fragment: \texttt {Cmd<Msg>}}{54}{subsection.3.28.1}%
+\contentsline {section}{\numberline {3.29}Reading compiler errors}{56}{section.3.29}%
+\contentsline {subsection}{\numberline {3.29.1}Read the first error first}{56}{subsection.3.29.1}%
+\contentsline {subsection}{\numberline {3.29.2}Look for ``required from'' or ``in instantiation of''}{56}{subsection.3.29.2}%
+\contentsline {subsection}{\numberline {3.29.3}Concepts errors are tractable}{56}{subsection.3.29.3}%
+\contentsline {subsection}{\numberline {3.29.4}Common shapes you will see}{56}{subsection.3.29.4}%
+\contentsline {part}{II\hspace {1em}Architecture}{58}{part.2}%
+\contentsline {chapter}{\numberline {4}The Elm loop and algebraic effects}{59}{chapter.4}%
+\contentsline {section}{\numberline {4.1}Where state usually lives}{59}{section.4.1}%
+\contentsline {section}{\numberline {4.2}The Elm shape}{59}{section.4.2}%
+\contentsline {section}{\numberline {4.3}But programs need to do things}{60}{section.4.3}%
+\contentsline {section}{\numberline {4.4}Subscriptions: the other half}{61}{section.4.4}%
+\contentsline {section}{\numberline {4.5}Why this is worth the effort}{62}{section.4.5}%
+\contentsline {section}{\numberline {4.6}The runtime loop, sketched}{62}{section.4.6}%
+\contentsline {section}{\numberline {4.7}From single-function to Program: a worked refactor}{63}{section.4.7}%
+\contentsline {chapter}{\numberline {5}The compile-time DSL}{65}{chapter.5}%
+\contentsline {section}{\numberline {5.1}The shape}{65}{section.5.1}%
+\contentsline {section}{\numberline {5.2}\texttt {t<"Hello">} --- string in a type}{65}{section.5.2}%
+\contentsline {section}{\numberline {5.3}Pipes are operator overloads}{66}{section.5.3}%
+\contentsline {section}{\numberline {5.4}\texttt {v()} and \texttt {h()} --- variadic containers}{66}{section.5.4}%
+\contentsline {section}{\numberline {5.5}\texttt {BoxCfg} --- the type-state}{67}{section.5.5}%
+\contentsline {section}{\numberline {5.6}Static, dynamic, and the bridge}{68}{section.5.6}%
+\contentsline {subsection}{\numberline {5.6.1}\texttt {text(...)} --- runtime strings}{68}{subsection.5.6.1}%
+\contentsline {subsection}{\numberline {5.6.2}\texttt {dyn([](){ ... })} --- arbitrary lambdas}{68}{subsection.5.6.2}%
+\contentsline {subsection}{\numberline {5.6.3}\texttt {map(range, projection)} --- list comprehension}{68}{subsection.5.6.3}%
+\contentsline {section}{\numberline {5.7}Reading a real pipeline}{68}{section.5.7}%
+\contentsline {section}{\numberline {5.8}Why compile-time?}{69}{section.5.8}%
+\contentsline {section}{\numberline {5.9}Where the runtime takes over}{69}{section.5.9}%
+\contentsline {chapter}{\numberline {6}Elements, style, colour, border}{71}{chapter.6}%
+\contentsline {section}{\numberline {6.1}\texttt {Element}: a tagged union}{71}{section.6.1}%
+\contentsline {subsection}{\numberline {6.1.1}\texttt {TextElement}}{71}{subsection.6.1.1}%
+\contentsline {subsection}{\numberline {6.1.2}\texttt {BoxElement}}{71}{subsection.6.1.2}%
+\contentsline {subsection}{\numberline {6.1.3}\texttt {ElementList}}{72}{subsection.6.1.3}%
+\contentsline {section}{\numberline {6.2}\texttt {Style}}{72}{section.6.2}%
+\contentsline {subsection}{\numberline {6.2.1}\texttt {Attribute} bitset}{72}{subsection.6.2.1}%
+\contentsline {section}{\numberline {6.3}\texttt {Color}}{73}{section.6.3}%
+\contentsline {subsection}{\numberline {6.3.1}Themes}{73}{subsection.6.3.1}%
+\contentsline {section}{\numberline {6.4}\texttt {Border}}{73}{section.6.4}%
+\contentsline {subsection}{\numberline {6.4.1}\texttt {Sep} and \texttt {VSep}}{74}{subsection.6.4.1}%
+\contentsline {section}{\numberline {6.5}\texttt {BoxBuilder}: runtime construction}{74}{section.6.5}%
+\contentsline {section}{\numberline {6.6}Walking an element tree}{74}{section.6.6}%
+\contentsline {section}{\numberline {6.7}Hyperlinks}{75}{section.6.7}%
+\contentsline {section}{\numberline {6.8}Why so many small structs?}{75}{section.6.8}%
+\contentsline {chapter}{\numberline {7}Flexbox in integers}{76}{chapter.7}%
+\contentsline {section}{\numberline {7.1}The problem layout solves}{76}{section.7.1}%
+\contentsline {section}{\numberline {7.2}Flexbox in one paragraph}{76}{section.7.2}%
+\contentsline {section}{\numberline {7.3}Vocabulary}{76}{section.7.3}%
+\contentsline {section}{\numberline {7.4}The flex properties}{77}{section.7.4}%
+\contentsline {section}{\numberline {7.5}The data structure}{77}{section.7.5}%
+\contentsline {section}{\numberline {7.6}The algorithm, step by step}{78}{section.7.6}%
+\contentsline {subsection}{\numberline {7.6.1}Padding, border, margin}{78}{subsection.7.6.1}%
+\contentsline {section}{\numberline {7.7}Worked example: a status panel}{78}{section.7.7}%
+\contentsline {section}{\numberline {7.8}When layout disagrees with you}{79}{section.7.8}%
+\contentsline {section}{\numberline {7.9}Where the code lives}{79}{section.7.9}%
+\contentsline {part}{III\hspace {1em}Rendering}{81}{part.3}%
+\contentsline {chapter}{\numberline {8}The canvas and packed cells}{82}{chapter.8}%
+\contentsline {section}{\numberline {8.1}What a cell is}{82}{section.8.1}%
+\contentsline {section}{\numberline {8.2}Packing}{82}{section.8.2}%
+\contentsline {section}{\numberline {8.3}The style pool}{83}{section.8.3}%
+\contentsline {section}{\numberline {8.4}The canvas data structure}{84}{section.8.4}%
+\contentsline {subsection}{\numberline {8.4.1}Why 64-byte alignment?}{84}{subsection.8.4.1}%
+\contentsline {section}{\numberline {8.5}Drawing text}{84}{section.8.5}%
+\contentsline {section}{\numberline {8.6}The damage rectangle}{85}{section.8.6}%
+\contentsline {subsection}{\numberline {8.6.1}The clip stack}{85}{subsection.8.6.1}%
+\contentsline {section}{\numberline {8.7}Resize}{85}{section.8.7}%
+\contentsline {subsection}{\numberline {8.7.1}Shrinking after a wide window}{85}{subsection.8.7.1}%
+\contentsline {section}{\numberline {8.8}Putting it together}{86}{section.8.8}%
+\contentsline {chapter}{\numberline {9}SIMD frame diffing}{87}{chapter.9}%
+\contentsline {section}{\numberline {9.1}Why SIMD?}{87}{section.9.1}%
+\contentsline {section}{\numberline {9.2}The algorithm}{87}{section.9.2}%
+\contentsline {subsection}{\numberline {9.2.1}Loading four cells}{88}{subsection.9.2.1}%
+\contentsline {subsection}{\numberline {9.2.2}Comparing them}{88}{subsection.9.2.2}%
+\contentsline {subsection}{\numberline {9.2.3}Reducing to a mask}{88}{subsection.9.2.3}%
+\contentsline {subsection}{\numberline {9.2.4}Detecting any change}{88}{subsection.9.2.4}%
+\contentsline {subsection}{\numberline {9.2.5}Finding the first changed lane}{88}{subsection.9.2.5}%
+\contentsline {subsection}{\numberline {9.2.6}The scalar tail}{89}{subsection.9.2.6}%
+\contentsline {section}{\numberline {9.3}Architecture dispatch}{89}{section.9.3}%
+\contentsline {section}{\numberline {9.4}The other SIMD operations}{89}{section.9.4}%
+\contentsline {section}{\numberline {9.5}Putting it in the renderer}{90}{section.9.5}%
+\contentsline {section}{\numberline {9.6}What about diff algorithms (Myers, etc.)?}{90}{section.9.6}%
+\contentsline {section}{\numberline {9.7}Validation}{90}{section.9.7}%
+\contentsline {chapter}{\numberline {10}ANSI serialization and the writer}{92}{chapter.10}%
+\contentsline {section}{\numberline {10.1}What the renderer must emit}{92}{section.10.1}%
+\contentsline {section}{\numberline {10.2}Zero-allocation building blocks}{92}{section.10.2}%
+\contentsline {subsection}{\numberline {10.2.1}A worked function}{92}{subsection.10.2.1}%
+\contentsline {subsection}{\numberline {10.2.2}Per-cell positioning, faster}{93}{subsection.10.2.2}%
+\contentsline {section}{\numberline {10.3}UTF-8 encoding}{93}{section.10.3}%
+\contentsline {section}{\numberline {10.4}The style cache}{94}{section.10.4}%
+\contentsline {section}{\numberline {10.5}The terminal writer}{94}{section.10.5}%
+\contentsline {subsection}{\numberline {10.5.1}Synchronised output mode}{95}{subsection.10.5.1}%
+\contentsline {section}{\numberline {10.6}Putting it all together}{95}{section.10.6}%
+\contentsline {section}{\numberline {10.7}Cost, measured}{96}{section.10.7}%
+\contentsline {chapter}{\numberline {11}Inline mode and the witness chain}{97}{chapter.11}%
+\contentsline {section}{\numberline {11.1}The two modes, briefly}{97}{section.11.1}%
+\contentsline {section}{\numberline {11.2}Failure mode 1: ghosting from over-tall paint}{97}{section.11.2}%
+\contentsline {subsection}{\numberline {11.2.1}Why}{98}{subsection.11.2.1}%
+\contentsline {subsection}{\numberline {11.2.2}The downstream catastrophe}{98}{subsection.11.2.2}%
+\contentsline {subsection}{\numberline {11.2.3}The fix}{98}{subsection.11.2.3}%
+\contentsline {section}{\numberline {11.3}Failure mode 2: \texttt {commit\_prefix} over-claim}{99}{section.11.3}%
+\contentsline {subsection}{\numberline {11.3.1}Why a guessed row count corrupts everything}{99}{subsection.11.3.1}%
+\contentsline {subsection}{\numberline {11.3.2}The structural fix}{100}{subsection.11.3.2}%
+\contentsline {section}{\numberline {11.4}The theorem: Scrollback Integrity}{100}{section.11.4}%
+\contentsline {subsection}{\numberline {11.4.1}The honest hypotheses}{101}{subsection.11.4.1}%
+\contentsline {section}{\numberline {11.5}The witness chain: five layers}{101}{section.11.5}%
+\contentsline {subsection}{\numberline {11.5.1}Layer 0 --- \texttt {CanvasWitness} (T0)}{101}{subsection.11.5.1}%
+\contentsline {subsection}{\numberline {11.5.2}Layer 1 --- \texttt {WireRow} and \texttt {Viewport} (T1)}{102}{subsection.11.5.2}%
+\contentsline {subsection}{\numberline {11.5.3}Layer 2 --- \texttt {ContentRows} (closes one wrong-source class)}{103}{subsection.11.5.3}%
+\contentsline {subsection}{\numberline {11.5.4}Layer 3 --- \texttt {ShadowWitness} (T2)}{103}{subsection.11.5.4}%
+\contentsline {subsection}{\numberline {11.5.5}Layer 4 --- \texttt {FrameBytes} (atomic state advance)}{104}{subsection.11.5.5}%
+\contentsline {subsection}{\numberline {11.5.6}Layer 5 --- \texttt {InlineFrame<Tag>} (linear chain)}{104}{subsection.11.5.6}%
+\contentsline {subsection}{\numberline {11.5.7}Scrollback commit, formalised (T3)}{105}{subsection.11.5.7}%
+\contentsline {subsection}{\numberline {11.5.8}What the chain does \emph {not} claim}{106}{subsection.11.5.8}%
+\contentsline {section}{\numberline {11.6}Where the code lives}{106}{section.11.6}%
+\contentsline {section}{\numberline {11.7}Why all this matters}{106}{section.11.7}%
+\contentsline {part}{IV\hspace {1em}Reactivity, runtime, and widgets}{108}{part.4}%
+\contentsline {chapter}{\numberline {12}Signals, computeds, effects}{109}{chapter.12}%
+\contentsline {section}{\numberline {12.1}The problem reactivity solves}{109}{section.12.1}%
+\contentsline {section}{\numberline {12.2}The three primitives}{109}{section.12.2}%
+\contentsline {subsection}{\numberline {12.2.1}\texttt {Signal<T>}: a value with subscribers}{109}{subsection.12.2.1}%
+\contentsline {subsection}{\numberline {12.2.2}\texttt {Computed<T>}: a value derived from signals}{109}{subsection.12.2.2}%
+\contentsline {subsection}{\numberline {12.2.3}\texttt {Effect}: run a side effect when signals change}{110}{subsection.12.2.3}%
+\contentsline {section}{\numberline {12.3}How dependency tracking works}{110}{section.12.3}%
+\contentsline {subsection}{\numberline {12.3.1}Batching}{111}{subsection.12.3.1}%
+\contentsline {section}{\numberline {12.4}When to reach for reactivity}{111}{section.12.4}%
+\contentsline {section}{\numberline {12.5}A worked example}{111}{section.12.5}%
+\contentsline {section}{\numberline {12.6}Lifetime and ownership}{112}{section.12.6}%
+\contentsline {section}{\numberline {12.7}Comparison with React, Solid, Leptos}{112}{section.12.7}%
+\contentsline {chapter}{\numberline {13}Events, focus, input parsing}{113}{chapter.13}%
+\contentsline {section}{\numberline {13.1}What the terminal sends}{113}{section.13.1}%
+\contentsline {section}{\numberline {13.2}The \texttt {Event} variant}{113}{section.13.2}%
+\contentsline {subsection}{\numberline {13.2.1}Why types, not strings?}{114}{subsection.13.2.1}%
+\contentsline {section}{\numberline {13.3}Event helpers}{114}{section.13.3}%
+\contentsline {section}{\numberline {13.4}From event to Msg --- \texttt {key\_map}}{114}{section.13.4}%
+\contentsline {section}{\numberline {13.5}Focus}{115}{section.13.5}%
+\contentsline {section}{\numberline {13.6}Resize}{115}{section.13.6}%
+\contentsline {section}{\numberline {13.7}Paste}{115}{section.13.7}%
+\contentsline {section}{\numberline {13.8}The polling loop}{116}{section.13.8}%
+\contentsline {section}{\numberline {13.9}Windows}{116}{section.13.9}%
+\contentsline {chapter}{\numberline {14}Cmd, Sub, and the runtime}{117}{chapter.14}%
+\contentsline {section}{\numberline {14.1}The full \texttt {Cmd<Msg>} variant}{117}{section.14.1}%
+\contentsline {subsection}{\numberline {14.1.1}\texttt {None} --- the identity}{117}{subsection.14.1.1}%
+\contentsline {subsection}{\numberline {14.1.2}\texttt {Quit} --- exit the program}{117}{subsection.14.1.2}%
+\contentsline {subsection}{\numberline {14.1.3}\texttt {Batch} --- multiple effects}{117}{subsection.14.1.3}%
+\contentsline {subsection}{\numberline {14.1.4}\texttt {After} --- one-shot timer}{118}{subsection.14.1.4}%
+\contentsline {subsection}{\numberline {14.1.5}\texttt {SetTitle} --- set the terminal title}{118}{subsection.14.1.5}%
+\contentsline {subsection}{\numberline {14.1.6}\texttt {WriteClipboard} --- OSC-52 clipboard}{118}{subsection.14.1.6}%
+\contentsline {subsection}{\numberline {14.1.7}\texttt {Task} --- async work on a shared pool}{118}{subsection.14.1.7}%
+\contentsline {subsection}{\numberline {14.1.8}\texttt {IsolatedTask} --- async work on a dedicated thread}{118}{subsection.14.1.8}%
+\contentsline {subsection}{\numberline {14.1.9}\texttt {CommitRows} --- inline-mode scrollback commit}{118}{subsection.14.1.9}%
+\contentsline {section}{\numberline {14.2}The \texttt {Cmd} functor}{119}{section.14.2}%
+\contentsline {section}{\numberline {14.3}The full \texttt {Sub<Msg>} variant}{119}{section.14.3}%
+\contentsline {section}{\numberline {14.4}The runtime loop, expanded}{119}{section.14.4}%
+\contentsline {section}{\numberline {14.5}Other entry points}{120}{section.14.5}%
+\contentsline {section}{\numberline {14.6}Testing a Program without a terminal}{121}{section.14.6}%
+\contentsline {chapter}{\numberline {15}The widget catalogue}{122}{chapter.15}%
+\contentsline {section}{\numberline {15.1}The widget contract}{122}{section.15.1}%
+\contentsline {section}{\numberline {15.2}Categories}{122}{section.15.2}%
+\contentsline {subsection}{\numberline {15.2.1}Data display}{122}{subsection.15.2.1}%
+\contentsline {subsection}{\numberline {15.2.2}Input}{123}{subsection.15.2.2}%
+\contentsline {subsection}{\numberline {15.2.3}Layout helpers}{123}{subsection.15.2.3}%
+\contentsline {subsection}{\numberline {15.2.4}Display}{124}{subsection.15.2.4}%
+\contentsline {subsection}{\numberline {15.2.5}Agent UI (the \textsf {agentty}{} family)}{124}{subsection.15.2.5}%
+\contentsline {section}{\numberline {15.3}Anatomy of a widget: \texttt {Input}}{124}{section.15.3}%
+\contentsline {subsection}{\numberline {15.3.1}Configuration}{124}{subsection.15.3.1}%
+\contentsline {subsection}{\numberline {15.3.2}Building the element}{125}{subsection.15.3.2}%
+\contentsline {subsection}{\numberline {15.3.3}Handling input}{125}{subsection.15.3.3}%
+\contentsline {section}{\numberline {15.4}Composing widgets}{125}{section.15.4}%
+\contentsline {section}{\numberline {15.5}Where the polish lives}{126}{section.15.5}%
+\contentsline {chapter}{\numberline {16}Building, packaging, shipping}{127}{chapter.16}%
+\contentsline {section}{\numberline {16.1}Compiler requirements}{127}{section.16.1}%
+\contentsline {section}{\numberline {16.2}Building \textsf {maya}{}}{127}{section.16.2}%
+\contentsline {section}{\numberline {16.3}Linking \textsf {maya}{} into your own program}{128}{section.16.3}%
+\contentsline {subsection}{\numberline {16.3.1}Installing}{128}{subsection.16.3.1}%
+\contentsline {subsection}{\numberline {16.3.2}Depending on it}{128}{subsection.16.3.2}%
+\contentsline {subsection}{\numberline {16.3.3}Vendoring via \texttt {FetchContent}}{128}{subsection.16.3.3}%
+\contentsline {section}{\numberline {16.4}Sandboxing your program (Linux / macOS)}{129}{section.16.4}%
+\contentsline {section}{\numberline {16.5}Producing a static binary}{129}{section.16.5}%
+\contentsline {section}{\numberline {16.6}Packaging}{129}{section.16.6}%
+\contentsline {section}{\numberline {16.7}Debugging}{130}{section.16.7}%
+\contentsline {subsection}{\numberline {16.7.1}Terminal stuck in raw mode}{130}{subsection.16.7.1}%
+\contentsline {subsection}{\numberline {16.7.2}Rendering looks corrupted}{130}{subsection.16.7.2}%
+\contentsline {subsection}{\numberline {16.7.3}Slow rendering}{130}{subsection.16.7.3}%
+\contentsline {section}{\numberline {16.8}Going further}{130}{section.16.8}%
+\contentsline {chapter}{Colophon}{132}{chapter*.2}%
