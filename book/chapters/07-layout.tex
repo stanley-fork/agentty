@@ -1,0 +1,756 @@
+\chapter{Flexbox in integers}
+\label{ch:layout}
+
+Given an element tree, \maya{} must decide where every text run, every
+box, every border goes --- in cells, not pixels. The algorithm it uses
+is a tailored re-implementation of CSS Flexbox. This chapter explains
+flexbox from scratch (no web background assumed) and then walks
+\maya{}'s implementation.
+
+\begin{aside}
+Layout is the unglamorous middle of every UI library. Nobody talks
+about it; the algorithm runs hundreds of times a second, makes
+thousands of small decisions, and disappears the moment it gets the
+rectangle right. Bad layout is instantly noticeable; good layout is
+invisible. This chapter is a guided tour of \maya{}'s ten kilobytes
+of layout code, because once you understand it you can stop guessing
+at why a panel is one cell off and start reading the cause out of
+the configuration.
+\end{aside}
+
+\section{The problem layout solves}
+
+You have a rectangular area --- the terminal --- and a tree of
+elements each with constraints (\emph{this one wants to be 20 cells
+wide; this row should pack its children with a 1-cell gap; this panel
+must grow to fill leftover space}). Layout is the function that
+assigns concrete \code{(x, y, w, h)} rectangles to each node such that
+all the constraints are satisfied.
+
+There are many possible algorithms (table layout, constraint solving,
+grid layout). Flexbox is the most appropriate for terminal UIs:
+predictable, single-pass, no surprises, no solver.
+
+\subsection{Why not the obvious algorithms?}
+
+A brief tour of the alternatives \maya{} did not choose:
+
+\paragraph{Table layout (HTML \code{<table>}).} A rectangular grid
+of rows and columns. Each cell's size is determined by the largest
+content in its row and column. Beautiful for tabular data; awkward
+for anything else --- two unrelated cells affecting each other's
+size is a constant surprise. Used in early web design; abandoned
+as a general-purpose layout in the mid-2000s.
+
+\paragraph{Constraint solving (Cassowary, Auto Layout).} Each
+position is a variable; each layout rule is a linear constraint.
+A simplex-like solver finds an assignment. Powerful (it can express
+``these two are always equal'', ``this is between 10 and 30
+cells''), but expensive and prone to producing surprising answers
+when constraints conflict. Apple's Auto Layout works this way.
+
+\paragraph{Grid (CSS Grid).} A two-dimensional placement model:
+you declare a grid of named rows and columns, then place children
+in specific cells. Excellent for page-level layout; overkill for
+the nested-row-and-column shape most TUIs take.
+
+\paragraph{Flow / line-box (HTML inline text).} Children are
+packed left-to-right, top-to-bottom, like words in a paragraph.
+Good for prose; bad for everything else.
+
+Flexbox is the simplest model that handles the common cases ---
+rows of widgets, columns of panels, a sidebar plus content, a
+status bar pinned to the bottom --- without ceremony. It is also
+linear-time and predictable, both crucial for a sixty-frames-per-second
+renderer.
+
+\begin{funfact}
+Flexbox went through several names and standards before it stuck.
+The original CSS3 ``flexible box'' module was proposed in 2009;
+the syntax changed twice (the \code{display: box} from 2009, then
+\code{display: flexbox} in 2011, then \code{display: flex} in 2012)
+before browsers settled. Mosaic's table-based layouts and
+Netscape's \code{<center>} tag ran the web for a decade because
+nothing nicer was standardised. The model \maya{} uses --- main
+axis, grow, shrink, basis, gap --- is the 2012 design, late enough
+that the rough edges had been filed off, simple enough to fit in
+800 lines of \cpp{}.
+\end{funfact}
+
+\section{Flexbox in one paragraph}
+
+Flexbox arranges children along a \textbf{main axis} (row or column).
+Children may \emph{grow} to fill leftover space and \emph{shrink} when
+oversized; they may \emph{wrap} onto new lines when they don't fit;
+they may be \emph{aligned} along the cross axis and \emph{justified}
+along the main axis. Each container picks an axis (row or column);
+each child carries a few numbers (basis, grow, shrink, gap, alignment
+override).
+
+\section{Vocabulary}
+
+A worked example will be clearest. Take a horizontal row of three
+children inside a 30-cell-wide box:
+
+\begin{lstlisting}
+h(
+    panel_a,   // wants 10 cells
+    panel_b,   // grow=1
+    panel_c    // wants 8 cells
+) | gap_<1>
+\end{lstlisting}
+
+\maya{} reasons about it like this:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Sum the basis sizes.} A=10, B=0 (no fixed size,
+    grows), C=8. Plus 2 gap cells. Total committed: 20.
+  \item \textbf{Leftover space.} 30 - 20 = 10 cells.
+  \item \textbf{Distribute by grow.} Only B has \code{grow > 0}, so
+    B receives all 10 cells. New size: B = 10.
+  \item \textbf{Place.} A at column 0, gap, B at column 11, gap, C
+    at column 22.
+\end{enumerate}
+
+The cross axis (vertical, in this example) is handled by
+\code{Align}: children stretch to the parent height by default, but
+they can be \code{Start}, \code{Center}, \code{End}, or
+\code{Stretch}.
+
+\section{The flex properties}
+
+A node in \maya{}'s layout engine carries the following style:
+
+\begin{lstlisting}
+struct FlexStyle {
+    FlexDirection direction = FlexDirection::Column;
+    FlexWrap      wrap      = FlexWrap::NoWrap;
+
+    Align   align_items   = Align::Auto;
+    Align   align_self    = Align::Auto;
+    Justify justify       = Justify::Auto;
+
+    int     gap           = 0;
+
+    int     pad_top    = 0, pad_right = 0,
+            pad_bottom = 0, pad_left  = 0;
+    int     mar_top    = 0, mar_right = 0,
+            mar_bottom = 0, mar_left  = 0;
+
+    int     width       = -1;   // -1 = auto
+    int     height      = -1;
+    int     min_width   = 0, max_width  = INT_MAX;
+    int     min_height  = 0, max_height = INT_MAX;
+
+    int     basis       = -1;   // preferred main-axis size, -1 = auto
+    float   grow        = 0.0f;
+    float   shrink      = 1.0f;
+
+    Display display     = Display::Flex;
+    Overflow overflow   = Overflow::Visible;
+    bool    has_border  = false;
+};
+\end{lstlisting}
+
+These mirror CSS flexbox almost exactly. The differences:
+
+\begin{itemize}[leftmargin=*]
+  \item Every quantity is an \emph{integer} number of cells. No
+    \code{em}, no \code{px}, no fractional pixels. Sub-cell positions
+    don't exist in a terminal.
+  \item \code{display: Flex} and \code{display: None} are the only
+    options. There is no block, no inline.
+  \item Percentages are limited; most sizes are explicit integers.
+\end{itemize}
+
+\section{The data structure}
+
+A layout tree is a flat \code{std::vector<LayoutNode>} indexed by
+\code{int}. Each node has a list of child indices.
+
+\begin{lstlisting}
+struct LayoutNode {
+    FlexStyle           style;
+    std::vector<int>    children;     // indices into the same vector
+    layout::Rect        computed;     // output: x, y, w, h
+};
+\end{lstlisting}
+
+Why a flat vector and not a pointer tree? Three reasons:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Cache locality.} Walking siblings is a stride of
+    \code{sizeof(LayoutNode)}; the prefetcher loves it.
+  \item \textbf{No allocation in the hot path.} A
+    \code{vector<int>} for children is cheaper than a \code{vector
+    <unique\_ptr<LayoutNode>>}.
+  \item \textbf{Easier reasoning.} Indices cannot dangle; an index
+    is either in range or out of range. Pointer trees create
+    aliasing puzzles.
+\end{itemize}
+
+\begin{idea}
+``Make it an index, not a pointer'' is a recurring optimisation in
+\maya{}. The same idea drives the style pool (a 16-bit ID into a
+table) and the hyperlink interning (a 32-bit ID).
+\end{idea}
+
+\section{The algorithm, step by step}
+
+\code{layout::compute(nodes, root, available\_width)} runs in three
+phases per box:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Measure.} Walk children recursively and compute their
+    intrinsic main-axis size (the basis if specified, else the
+    content's measured size).
+  \item \textbf{Distribute.} Add up basis sizes plus gaps. Compare
+    to the parent's main-axis size. If there is leftover space and
+    any child has \code{grow > 0}, distribute the leftover
+    proportionally; if there is overflow and any child has
+    \code{shrink > 0}, shrink proportionally.
+  \item \textbf{Place.} Compute final \code{(x, y, w, h)} for each
+    child given the resolved main-axis sizes and the cross-axis
+    alignment.
+\end{enumerate}
+
+Wrapping (when \code{wrap = Wrap}) re-enters the algorithm per line.
+Justify and align use simple integer division: \code{SpaceBetween}
+puts the leftover between children, \code{SpaceAround} puts it on
+both sides, \code{Center} halves it.
+
+\subsection{Padding, border, margin}
+
+Three rectangles concentric:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\textbf{margin} & cells \emph{outside} the box (sibling spacing) \\
+\textbf{border} & one cell thick if present (drawn glyphs) \\
+\textbf{padding} & cells \emph{inside} the border (content inset) \\
+\textbf{content} & where children are laid out \\
+\end{tabular}
+\end{center}
+
+The available width for children is \code{w - left\_pad - right\_pad -
+border\_l - border\_r}. The available height is the same on the
+vertical. \maya{}'s renderer paints the border in the one-cell ring
+around the padded content.
+
+\section{Worked example: a status panel}
+
+\begin{lstlisting}
+auto panel = v(
+    t<"Status"> | Bold,
+    sep,
+    h(t<"CPU:"> | Dim, space, t<"42%"> | Bold) | gap_<1>,
+    h(t<"Mem:"> | Dim, space, t<"8.2G"> | Bold) | gap_<1>
+) | border_<Round> | pad<1, 2> | gap_<1>;
+\end{lstlisting}
+
+Suppose the parent box gives us 24 cells wide. The layout proceeds:
+
+\begin{enumerate}[leftmargin=*]
+  \item Outer box: border (1 cell each side) + padding (2 on each
+    side) leaves 24 - 2 - 4 = \textbf{18 cells} of inner width.
+  \item Inner column has four children: title (1 row), separator (1
+    row), CPU line (1 row), Mem line (1 row), with gap 1 between
+    them. Total height 4 + 3 = 7 rows of content. Plus the border
+    pads (1 + 1) and padding (1 + 1) makes the outer box 11 rows.
+  \item Inside each \code{h(...)} line, the children are: a static
+    label, a \code{space} (grow=1), and a value text. Total fixed
+    width: maybe 4 + 3 + gap 1 = 8 cells. Leftover 10 goes entirely
+    to the spacer. The value text is pushed to column 8 + 10 = 18,
+    i.e. the right edge.
+\end{enumerate}
+
+The renderer then walks the resulting rectangles and writes glyphs.
+
+\section{When layout disagrees with you}
+
+Two situations confuse newcomers:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Nothing happens when I set \code{grow}.} The parent
+    must have a fixed (or grow-controlled) size for the leftover
+    space to be meaningful. A \code{grow=1} child of a parent that
+    sizes itself to its content has nothing to grow into.
+  \item \textbf{Text wraps inside a column unexpectedly.} A
+    \code{TextElement}'s width is its content. If you put a long
+    string inside a column, it tries to take its natural width; the
+    parent box constrains it to its own width, which causes wrap.
+    Set \code{TextWrap::Truncate} or \code{Ellipsize} if that is
+    wrong.
+\end{itemize}
+
+\section{Where the code lives}
+
+\file{maya/include/maya/layout/yoga.hpp} and
+\file{maya/src/layout/yoga.cpp}. Despite the name, this is not a
+binding to Facebook's Yoga library --- it is an independent
+implementation that follows the same flexbox spec. ``Yoga'' here is a
+nickname for the algorithm. The implementation is around 800 lines
+and has no external dependencies.
+
+\section{Justify and Align, every value}
+\label{sec:layout:justify-align}
+
+The two enums \code{Justify} and \code{Align} control how leftover
+space is distributed and how children line up across the cross axis.
+Both share a value list: \code{Start}, \code{End}, \code{Center},
+\code{Stretch}, \code{SpaceBetween}, \code{SpaceAround},
+\code{SpaceEvenly}, \code{Auto}. Worth walking each.
+
+Imagine a row 30 cells wide, holding three children each 4 cells
+wide. Leftover space: $30 - 12 = 18$ cells.
+
+\paragraph{\code{Start} (default).} Pack children to the start.
+No space inserted between them; all 18 leftover cells go to the
+end.
+
+\begin{terminalbox}
+AAAA BBBB CCCC..................
+\end{terminalbox}
+
+\paragraph{\code{End}.} Pack children to the end. All leftover
+space at the start.
+
+\begin{terminalbox}
+..................AAAA BBBB CCCC
+\end{terminalbox}
+
+\paragraph{\code{Center}.} Half the leftover before, half after.
+With odd leftover (rare in cells but possible), the extra cell
+goes to the start.
+
+\begin{terminalbox}
+.........AAAA BBBB CCCC.........
+\end{terminalbox}
+
+\paragraph{\code{SpaceBetween}.} Leftover divided into
+$n - 1$ equal gaps between children. First child at start, last at
+end. With 18 cells divided into 2 gaps: 9 each.
+
+\begin{terminalbox}
+AAAA.........BBBB.........CCCC
+\end{terminalbox}
+
+\paragraph{\code{SpaceAround}.} Leftover divided into $n$ equal
+segments, half a segment on each end, full segments between.
+With 18 cells over 3 children: 6 per segment, 3 on each end.
+
+\begin{terminalbox}
+...AAAA......BBBB......CCCC...
+\end{terminalbox}
+
+\paragraph{\code{SpaceEvenly}.} Leftover divided into $n + 1$
+equal gaps. Same gap on each end as between children. With 18
+cells over 4 gaps: 4 or 5 each (integer division leaves a remainder).
+
+\begin{terminalbox}
+....AAAA....BBBB....CCCC...
+\end{terminalbox}
+
+\paragraph{\code{Stretch}.} Cross-axis only. Children are sized to
+the parent's cross-axis size. The default for cross-axis alignment
+on boxes (so children fill the height of a row by default).
+
+\paragraph{\code{Auto}.} The default. For \code{align\_items}
+resolves to \code{Stretch}; for \code{align\_self} means ``inherit
+from parent's \code{align\_items}''.
+
+\subsection{Integer division and the remainder}
+
+A wrinkle of cell-based layout: leftover space rarely divides
+evenly. With \code{SpaceBetween} of three children in 30 cells
+(leftover 18, two gaps), each gap is 9. With four children in 30
+cells (leftover 14, three gaps), each gap is 4 and the integer
+division leaves 2 cells unaccounted for.
+
+\maya{}'s strategy: the first $k$ gaps get one extra cell, where
+$k$ is the remainder. Children later in the list see a slightly
+tighter gap. The alternative would be to round each gap and
+accept that the total drifts by a cell or two, but accumulating
+rounding errors quickly produces visible misalignment.
+
+\begin{idea}
+In integer cell-based layout, leftover space rarely divides
+evenly. The convention is to give the remainder to the early gaps,
+so the off-by-one shows up at one edge rather than accumulating.
+This is a recurring theme in pixel-free graphics; the same
+problem appears in audio sample rate conversion and frame-rate
+remapping.
+\end{idea}
+
+\section{Grow and shrink, mechanically}
+\label{sec:layout:grow-shrink}
+
+The \code{grow} and \code{shrink} floats are the most subtle part
+of flexbox. Worth walking through their full mechanics, with
+worked examples.
+
+\subsection{The setup}
+
+Given children with basis sizes $b_1, b_2, \dots, b_n$ and an
+available main-axis size $W$:
+
+\begin{enumerate}[leftmargin=*]
+  \item Sum the basis sizes and gaps: $B = \sum b_i + \text{gaps}$.
+  \item If $B = W$, you are done. Place children at their basis
+    sizes.
+  \item If $B < W$: there is leftover space, and \textbf{grow}
+    distributes it. If no child has \code{grow > 0}, leftover stays
+    leftover (handled by \code{justify}).
+  \item If $B > W$: children overflow, and \textbf{shrink}
+    distributes the negative. If no child has \code{shrink > 0},
+    the overflow stays (visible as content escaping the box, or
+    clipped depending on \code{overflow}).
+\end{enumerate}
+
+\subsection{Distributing leftover by \code{grow}}
+
+Let $G = \sum g_i$ be the total grow factor of all children. If
+$G > 0$ and $L = W - B > 0$, each child $i$ with grow $g_i$ receives
+an additional $\lfloor L \cdot g_i / G \rfloor$ cells.
+
+A worked example. Three children, basis sizes 10, 5, 5 (total 20),
+grow factors 1, 0, 2 (total 3), available 32 cells. Leftover
+$L = 12$. Distribute:
+
+\begin{itemize}[leftmargin=*]
+  \item Child 1: $\lfloor 12 \cdot 1 / 3 \rfloor = 4$ extra cells.
+    Final size 14.
+  \item Child 2: grow 0, no extra. Final size 5.
+  \item Child 3: $\lfloor 12 \cdot 2 / 3 \rfloor = 8$ extra cells.
+    Final size 13.
+\end{itemize}
+
+Total: $14 + 5 + 13 = 32$, exactly $W$. The remainders from
+division sum to zero in this case; when they don't, the first child
+in the list absorbs the difference (so the total comes out exact).
+
+\subsection{Distributing overflow by \code{shrink}}
+
+The symmetric case. If $B > W$ and total shrink $S > 0$, each child
+loses $\lfloor (B - W) \cdot s_i / S \rfloor$ cells. The defaults
+are important: \code{shrink = 1.0f} means every child shrinks
+equally; \code{shrink = 0.0f} means the child refuses to shrink and
+overflow goes elsewhere.
+
+A child whose basis is already at its \code{min\_width} cannot
+shrink further; the algorithm marks it ineligible and redistributes
+over the remaining children. This is one of two places \maya{}'s
+flexbox implementation does a second pass.
+
+\subsection{Common patterns}
+
+The spinner of common grow/shrink configurations:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\textbf{Effect} & \textbf{Setting} \\
+\hline
+Fixed size, never resizes        & \code{grow=0, shrink=0, basis=N} \\
+Fills leftover space              & \code{grow=1, shrink=1} (defaults) \\
+Fills, never overflows            & \code{grow=1, shrink=1, min\_width=0} \\
+Fills proportionally (2:1 split)  & two siblings with \code{grow=2} and \code{grow=1} \\
+Never shrinks below content       & \code{shrink=0} \\
+Doesn't grow, will shrink         & \code{grow=0, shrink=1} \\
+\end{tabular}
+\end{center}
+
+\code{space} in the DSL is a node with \code{grow=1, basis=0,
+shrink=0}: it eagerly absorbs every leftover cell and refuses to be
+shrunk if there isn't enough space.
+
+\section{Why integer cells, not floats}
+\label{sec:layout:integer-math}
+
+Web flexbox uses floating-point pixels because the visual unit ---
+a pixel --- can effectively be subdivided in CSS (sub-pixel
+antialiasing, fractional positions, transforms). The terminal has
+no such unit: a cell is a cell, you cannot draw half a character.
+Layout has to terminate on whole cells.
+
+Using \code{int} for every quantity has consequences worth
+being explicit about:
+
+\paragraph{No rounding surprises during composition.} Two layouts
+computed independently and then combined have exactly the same
+geometry as if computed together. With floats, rounding error
+compounds: a panel that is 12.499... cells wide at one level
+becomes 12 at the next, then 11.998... in the parent, and so on.
+Integer math avoids the question.
+
+\paragraph{Diff is bitwise comparable.} Frame-to-frame layout
+diffs (Chapter~\ref{ch:simd}) can compare integer rectangles
+with a single \code{==}; with floats the question of ``did this
+position change'' becomes ``did this position change by more than
+epsilon'', and the epsilon has to be chosen.
+
+\paragraph{Constraints are exact.} ``This box is at least 10 cells
+wide and at most 30'' is bit-exact; the solver never needs to
+worry about a width that is mathematically 10.0001 cells.
+
+\paragraph{The cost: integer division does not preserve totals.}
+The technique from the previous section --- give remainders to the
+earliest gaps --- is what we pay for using integers. It is much
+less work than the floating-point sorrows we avoid.
+
+\section{The three phases, expanded}
+\label{sec:layout:phases}
+
+The summary said ``measure, distribute, place''. The full version
+for a single box:
+
+\paragraph{Phase 1: measure.}
+For each child, recursively compute its \emph{intrinsic} main-axis
+size --- the size it wants to be if given no extra space.
+\code{TextElement}'s intrinsic main-axis size is the width of its
+content (for a row container) or the height after wrapping (for a
+column). \code{BoxElement}'s intrinsic is its own measured size,
+computed by recursing into its children.
+
+The result is each child's \textbf{basis} --- either the explicit
+\code{basis} field if set, or the measured intrinsic.
+
+\paragraph{Phase 2: distribute.}
+Compare $B = \sum b_i + \text{gaps}$ to $W$, the available
+main-axis size. Distribute leftover or overflow per
+Section~\ref{sec:layout:grow-shrink}. After this phase every
+child has a final main-axis size.
+
+\paragraph{Phase 3: place.}
+Walk children, assigning each one an $(x, y)$. The cursor advances
+by the child's final main-axis size plus the gap; the cross-axis
+position is determined by \code{align}. If \code{justify} is
+non-trivial, the gap is enlarged or padding inserted at the ends.
+
+Each child's final \code{computed} rectangle is written into the
+\code{LayoutNode} struct, and the algorithm recurses into the
+child to lay out \emph{its} children, with the child's resolved
+size as the new available area.
+
+\subsection{Wrapping}
+
+When \code{wrap = Wrap} and the children don't fit on one line,
+phase 2 partitions them into lines greedily: pack until the next
+child would overflow, start a new line. Each line is then
+independently laid out and placed at increasing cross-axis offsets.
+
+For a wrapping column (rare), the lines are columns and the cross
+axis is horizontal. Symmetric.
+
+\section{Debugging layout: the four-step ritual}
+\label{sec:layout:debugging}
+
+When something is one cell off, two cells over, or in the wrong
+place entirely, the cause is almost always one of four things.
+Worth checking each in order before opening a debugger.
+
+\paragraph{1. Check the available size.} The terminal's columns
+and rows are passed in at the top of the layout. Print them. A
+resize between frames will sometimes lag a frame, and you might be
+laying out into the wrong rectangle.
+
+\paragraph{2. Check padding and border on every ancestor.} A box
+with padding 1 and a border eats 4 cells of width before its
+children see anything. Inside a $24$-column terminal, after a
+bordered-padded panel and another bordered-padded inner box,
+children get 24 - 4 - 4 = 16 cells. The defect is rarely the layout;
+it is usually an extra padding nobody remembered.
+
+\paragraph{3. Print the layout tree.} A small helper:
+
+\begin{lstlisting}
+void dump(const LayoutNode& n, int depth = 0) {
+    std::string indent(depth * 2, ' ');
+    std::println("{}{}: ({},{}) {}x{} basis={} grow={}",
+        indent, kind_name(n),
+        n.computed.x, n.computed.y,
+        n.computed.w, n.computed.h,
+        n.style.basis, n.style.grow);
+    for (int c : n.children) dump(nodes[c], depth + 1);
+}
+\end{lstlisting}
+
+The answer is almost always visible in the first three lines of
+output.
+
+\paragraph{4. Use the DSL's debug border.} Wrap the suspicious
+node in a border (\code{| border\_<Single>}); the corner glyphs
+show you where its rectangle actually is. If the border is one
+cell off, the layout is one cell off.
+
+\begin{tryit}
+Run any \maya{} sample and resize your terminal slowly. The
+layout reflows on every \code{SIGWINCH}; you should see boxes
+rearrange in cell steps, never half a cell. Try narrowing until
+your status bar wraps; the wrap point is where total basis +
+gaps exceeds the new available width.
+\end{tryit}
+
+\section{Layout recipes}
+\label{sec:layout:recipes}
+
+A handful of common shapes and how to spell them in the DSL.
+
+\paragraph{Sidebar + content.}
+
+\begin{lstlisting}
+h(
+    sidebar  | w_<24>,
+    content  | grow_<1>
+)
+\end{lstlisting}
+
+Sidebar fixed at 24; content takes everything else.
+
+\paragraph{Header + body + footer.}
+
+\begin{lstlisting}
+v(
+    header,
+    body | grow_<1>,
+    footer
+)
+\end{lstlisting}
+
+Header and footer take their natural height; body fills the
+leftover vertical space.
+
+\paragraph{Three-pane equal split.}
+
+\begin{lstlisting}
+h(
+    pane_a | grow_<1>,
+    pane_b | grow_<1>,
+    pane_c | grow_<1>
+) | gap_<1>
+\end{lstlisting}
+
+Three equal-width panes with one-cell gaps. Each gets
+$(W - 2) / 3$ cells.
+
+\paragraph{Status bar on the right.}
+
+\begin{lstlisting}
+h(
+    text(left),
+    space,                  // spacer (grow=1, basis=0)
+    text(right) | Dim
+)
+\end{lstlisting}
+
+The spacer absorbs all leftover space, pushing the right text to
+the edge.
+
+\paragraph{Centred dialog.}
+
+\begin{lstlisting}
+h(
+    space,
+    v(
+        space,
+        dialog | w_<60>,
+        space
+    ),
+    space
+)
+\end{lstlisting}
+
+Four spacers form a cross-shaped frame around a 60-column dialog,
+centring it horizontally and vertically.
+
+\paragraph{A list with a fixed header.}
+
+\begin{lstlisting}
+v(
+    header_row | Bold,
+    sep,
+    map(items, render_row) | grow_<1>
+)
+\end{lstlisting}
+
+Header takes its row, separator one row, the body takes the rest.
+When the list overflows, the \code{| grow\_<1>} on the mapped
+content makes its container scrollable (Chapter~\ref{ch:widgets}
+covers scroll surfaces).
+
+\section{Performance notes}
+\label{sec:layout:perf}
+
+Layout is $O(n)$ in the number of nodes for an unwrapped tree.
+With wrap, the worst case is $O(n^2)$ (every child triggers a
+re-evaluation of remaining line capacity), but typical trees do
+not wrap and the constant factor is small.
+
+Numbers from the maya benchmark suite, on a typical desktop CPU:
+
+\begin{itemize}[leftmargin=*]
+  \item A 50-node tree (typical small app): under 5\,\textmu{}s.
+  \item A 500-node tree (a long list of items): around
+    30\,\textmu{}s.
+  \item A 5000-node tree (pathological --- a maximalist
+    dashboard): around 300\,\textmu{}s.
+\end{itemize}
+
+Layout is rarely the bottleneck. If it shows up in your profiler,
+the usual cause is rebuilding too many DSL nodes per frame, not
+the solver itself. Flatten where you can; cache \code{constexpr}
+subtrees that do not change.
+
+\section{Pitfalls and anti-patterns}
+\label{sec:layout:pitfalls}
+
+\begin{warning}
+\textbf{Negative space from over-applied padding.} If parent and
+child both apply padding, the visible insets compound. Decide which
+layer owns the padding and keep it there.
+\end{warning}
+
+\begin{warning}
+\textbf{A grow child inside a non-growing parent.} The parent sizes
+itself to content, so there is no leftover space to distribute, and
+the child does not grow. To get a growing layout, every ancestor up
+to the root must be growing or explicitly sized.
+\end{warning}
+
+\begin{warning}
+\textbf{Mixing \code{shrink=0} children with insufficient width.}
+If every child refuses to shrink and they collectively exceed the
+parent's width, content overflows. The renderer clips; the user
+sees text cut off mid-glyph. Allow at least the variable-content
+child to shrink.
+\end{warning}
+
+\begin{warning}
+\textbf{Forgetting that text has intrinsic width.} A
+\code{TextElement} in a row sizes to its content width by default.
+Long strings push siblings off the edge. Wrap them in a fixed-width
+box (\code{| w\_<30>}) or set their wrap mode to
+\code{TextWrap::Truncate}.
+\end{warning}
+
+\begin{recap}
+Layout decides where things go. \maya{} uses an integer-cell flexbox
+solver over a flat \code{vector<LayoutNode>} addressed by index.
+Three phases: measure, distribute, place. The same model handles
+rows, columns, wrapping, alignment, justification, and nested boxes.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a row that displays your name on the left and the date
+    on the right, with the space between them growing to fill the
+    terminal width.
+  \item Build a 3-column dashboard: three boxes, each with
+    \code{grow=1}, separated by 1-cell gaps. Resize your terminal
+    --- watch the boxes split the new width.
+  \item Read \file{maya/src/layout/yoga.cpp}. Identify the three
+    phases (measure, distribute, place). Note where the available
+    width is subdivided.
+\end{enumerate}

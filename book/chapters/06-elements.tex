@@ -1,0 +1,890 @@
+\chapter{Elements, style, colour, border}
+\label{ch:elements}
+
+\code{.build()} converts the compile-time tree from
+Chapter~\ref{ch:dsl} into an \code{Element}. That \code{Element} is
+the input to the layout engine, the renderer, and every widget. This
+chapter dissects \code{Element} and the value types it depends on.
+
+\begin{aside}
+Chapter~\ref{ch:dsl} was about the compile-time side --- the
+elaborate type machinery that makes \code{t<"hi"> | Bold} legal and
+\code{v(\dots) | bcol<\dots>} (without a border) illegal. This
+chapter is about the runtime side: the small, boring, fast data
+structure the renderer actually consumes. The contrast is part of
+the trick. The compile-time DSL is intricate because we want the
+compiler to do interesting work; the runtime representation is
+plain because we want the renderer to be fast.
+\end{aside}
+
+\section{The runtime tree, in one sentence}
+\label{sec:elem:sentence}
+
+Everything in this chapter rotates around one idea: an
+\textbf{element tree} is a tree where every node is one of three
+things.
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Text} --- a leaf, holding bytes and styling.
+  \item \textbf{Box} --- a container, holding a layout configuration
+    and a list of child elements.
+  \item \textbf{List} --- a transparent grouping, ``these elements
+    belong to my parent's children'', used for splicing.
+\end{itemize}
+
+Nothing more. Every shape you have seen \maya{} produce ---
+dashboards, list views, scrolling chats, modal dialogs --- is built
+out of those three nodes nested arbitrarily.
+
+\section{What is a tagged union?}
+\label{sec:elem:tagged-union}
+
+Before we go into the variant: a small piece of language theory you
+will use over and over in this book.
+
+A \textbf{tagged union} (also called a \emph{sum type} or
+\emph{discriminated union}) is a value that is \emph{one of} a fixed
+set of alternatives, with a tag indicating which one. The phrase
+``one of'' matters: at any moment, the value is exactly one
+alternative, never two, never zero. The compiler can check that you
+have handled every case.
+
+Contrast with the other big composite type:
+
+\begin{itemize}[leftmargin=*]
+  \item A \textbf{product type} (a struct, class, tuple) is
+    \emph{this and this and this}. A \code{Point\{int x, int y\}}
+    has both an \code{x} \emph{and} a \code{y}, always.
+  \item A \textbf{sum type} (a tagged union, variant) is
+    \emph{this or this or this}. A \code{Result} is either an
+    \code{Ok} or an \code{Error}, never both at once.
+\end{itemize}
+
+Natural-language analogies break almost immediately when you push
+them, but here is a small one: a parking space's state is a sum
+type (\emph{Empty} or \emph{Occupied}, never both); a car's state
+is a product type (\emph{has colour} \textbf{and} \emph{has
+licence plate}, both at once).
+
+In modern \cpp{} the sum-type primitive is \code{std::variant<A, B,
+C>}, which holds exactly one of \code{A}, \code{B}, or \code{C} and
+remembers which. You inspect it with \code{std::visit}, which calls
+your visitor with the actual stored alternative. The compiler
+verifies that your visitor handles every case --- forget one and
+you get an error.
+
+\begin{lstlisting}
+#include <variant>
+using Pet = std::variant<Dog, Cat, Hamster>;
+
+std::string describe(const Pet& p) {
+    return std::visit(overload{
+        [](const Dog& d)     { return "a good boy named " + d.name; },
+        [](const Cat& c)     { return c.name + " who is judging you"; },
+        [](const Hamster& h) { return "a hamster named " + h.name; },
+    }, p);
+}
+\end{lstlisting}
+
+Three branches, three alternatives. Add a fourth alternative
+(\code{Goldfish}) and the visitor stops compiling --- the compiler
+lists the missing branch by name.
+
+\begin{idea}
+A sum type is the data-structures version of an \code{if}/\code{else}
+chain. It is \emph{closed} (the alternatives are listed in the
+type), \emph{exhaustive} (the compiler nags you about missing
+cases), and \emph{cheap} (one word for the tag, plus enough storage
+for the largest alternative).
+\end{idea}
+
+\subsection{Why \maya{} uses sum types everywhere}
+
+Look through the source and you will find sum types in almost every
+file:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Element = variant<BoxElement, TextElement, ElementList>}
+    --- this chapter.
+  \item \code{Cmd<Msg>::Variant} --- algebra of effects
+    (Chapter~\ref{ch:elm}).
+  \item \code{Sub<Msg>::Variant} --- algebra of subscriptions
+    (Chapter~\ref{ch:elm}).
+  \item \code{Event = variant<KeyEvent, MouseEvent, ResizeEvent, PasteEvent>}
+    --- input events (Chapter~\ref{ch:events}).
+  \item \code{RenderOp = variant<EmitText, MoveCursor, SetStyle, ...>}
+    --- renderer output (Chapter~\ref{ch:ansi}).
+  \item \code{expected<T, E>} = \code{variant<T, E>} essentially ---
+    success or failure (Chapter~\ref{ch:cpp}).
+\end{itemize}
+
+The reason is uniform: each of these is a finite, named set of
+possibilities. Encoding them as sum types gives you exhaustiveness
+checking and removes whole classes of \code{nullptr}-ish bugs. When
+you learn to recognise the pattern, you start seeing it everywhere
+in well-designed C++ codebases.
+
+\section{\code{Element}: a tagged union}
+
+\code{Element} is a \code{std::variant} of three alternatives:
+
+\begin{lstlisting}
+using Element = std::variant<BoxElement, TextElement, ElementList>;
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{TextElement} --- a piece of styled text, possibly with
+    a wrap policy.
+  \item \code{BoxElement} --- a container with flex layout, padding,
+    border, gap, etc., and a vector of child elements.
+  \item \code{ElementList} --- a flat sequence of elements that
+    should be inlined into the parent's children (used by \code{map}).
+\end{itemize}
+
+Three alternatives, a closed set. Every algorithm in \maya{} that
+walks an element tree (layout, render, hit-testing, search) ends up
+in a \code{std::visit} on this variant. Add a fourth alternative
+tomorrow and the compiler tells you all the places to update.
+
+\subsection{\code{TextElement}}
+
+\begin{lstlisting}
+struct TextElement {
+    std::string text;        // the bytes (UTF-8)
+    Style       style;       // colours + attributes
+    TextWrap    wrap = TextWrap::Wrap;
+    HyperlinkId link{};      // optional OSC-8 link
+};
+\end{lstlisting}
+
+A leaf in the tree. The string is owned (so the source data can be a
+temporary). Styling lives in a \code{Style} struct (next section).
+\code{TextWrap} is one of \code{Wrap}, \code{NoWrap}, \code{Truncate},
+\code{Ellipsize}.
+
+\subsection{\code{BoxElement}}
+
+\begin{lstlisting}
+struct BoxElement {
+    layout::FlexStyle    style;     // direction, padding, gap, ...
+    std::optional<Border> border;
+    std::vector<Element>  children;
+    std::optional<std::string> title;  // border title
+    // ... a few more renderer hints
+};
+\end{lstlisting}
+
+The composite. \code{style} carries every layout property as integer
+cell counts; \code{border} is set when the DSL chain included
+\code{border\_<...>}. \code{title} is set when a border title was
+piped on.
+
+\subsection{\code{ElementList}}
+
+\begin{lstlisting}
+struct ElementList { std::vector<Element> items; };
+\end{lstlisting}
+
+A pseudo-element. The renderer treats it as ``these children belong
+to my parent.'' It is the runtime equivalent of a parameter pack
+expansion.
+
+\section{\code{Style}}
+
+\code{Style} is a small POD struct describing the appearance of a run
+of text:
+
+\begin{lstlisting}
+struct Style {
+    Color     fg{};
+    Color     bg{};
+    Attribute attrs{};   // bold | italic | underline | dim | ...
+
+    constexpr Style with_bold()      const noexcept;
+    constexpr Style with_italic()    const noexcept;
+    constexpr Style with_fg(Color c) const noexcept;
+    constexpr Style with_bg(Color c) const noexcept;
+    constexpr Style merge(Style other) const noexcept;
+    // ...
+};
+\end{lstlisting}
+
+Two flavours exist:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Style} (runtime), used in \code{TextElement}.
+  \item \code{CTStyle} (compile-time), used as an NTTP in
+    \code{TextNode}. It is structurally identical but lives in
+    template parameters and is constructed with \code{constexpr}
+    factory functions (\code{CTStyle::bold()},
+    \code{CTStyle::fg(R, G, B)}, etc.).
+\end{itemize}
+
+The DSL pipes operate on \code{CTStyle}; \code{.build()} calls
+\code{CTStyle.runtime()} to project back to a \code{Style}. The
+distinction matters because NTTPs require structural types whose
+fields are compared by value, while runtime \code{Style} can have
+fancier constructors.
+
+\subsection{\code{Attribute} bitset}
+
+Attributes (bold, dim, italic, underline, strikethrough, inverse,
+blink) are a bitset:
+
+\begin{lstlisting}
+enum class Attribute : std::uint8_t {
+    None       = 0,
+    Bold       = 1 << 0,
+    Dim        = 1 << 1,
+    Italic     = 1 << 2,
+    Underline  = 1 << 3,
+    Strike     = 1 << 4,
+    Inverse    = 1 << 5,
+    Blink      = 1 << 6,
+};
+
+constexpr Attribute operator|(Attribute a, Attribute b) noexcept;
+constexpr bool      has(Attribute set, Attribute bit) noexcept;
+\end{lstlisting}
+
+Combining attributes is bitwise OR. Checking is bitwise AND. The
+renderer translates each bit to its SGR parameter (1 for bold, 2 for
+dim, 3 for italic, etc.) when serialising.
+
+\section{\code{Color}}
+
+A \code{Color} is a 24-bit RGB triple plus a tag for ``default''
+(unspecified, inherit from terminal):
+
+\begin{lstlisting}
+struct Color {
+    std::uint8_t r = 0, g = 0, b = 0;
+    bool         is_default = true;   // means "use terminal default"
+};
+
+constexpr Color rgb(uint8_t r, uint8_t g, uint8_t b) noexcept {
+    return {r, g, b, false};
+}
+\end{lstlisting}
+
+\maya{} only deals in 24-bit truecolour internally. The 256-colour and
+16-colour palettes were popular when terminals had limited support;
+modern terminals all do truecolour. If you really need 256-colour
+output (because you are targeting a niche emulator), the writer can
+quantise on the way out.
+
+\subsection{Themes}
+
+A \textbf{theme} is a 24-slot palette of colours --- one for primary,
+secondary, success, warning, error, plus background tiers and text
+tiers. \maya{}'s built-in themes (\code{dark}, \code{light},
+\code{terminal}) are \code{constexpr} aggregates; you can derive your
+own and pass it in \code{RunConfig}.
+
+\begin{lstlisting}
+struct Theme {
+    Color bg_primary;
+    Color bg_secondary;
+    Color text_primary;
+    Color text_secondary;
+    Color accent;
+    Color success;
+    Color warning;
+    Color error;
+    // ... 24 slots total
+};
+\end{lstlisting}
+
+The \code{Ctx} parameter to a render function (in the quick-tool
+\code{run(...)}) carries the active theme. Widgets read it instead of
+hard-coding colours --- so the same widget tree looks right under
+dark and light themes.
+
+\section{\code{Border}}
+
+A border is described by its style (single, double, round, thick,
+classic, arrow), its colour (or default), and which sides are drawn:
+
+\begin{lstlisting}
+enum class BorderStyle : std::uint8_t {
+    None, Single, Double, Round, Bold, Classic, Arrow,
+};
+
+struct BorderSides {
+    bool top = true, right = true, bottom = true, left = true;
+
+    static constexpr BorderSides all()        { return {true, true, true, true}; }
+    static constexpr BorderSides none()       { return {false,false,false,false}; }
+    static constexpr BorderSides horizontal() { return {true,false,true,false}; }
+    static constexpr BorderSides vertical()   { return {false,true,false,true}; }
+};
+
+struct Border {
+    BorderStyle style = BorderStyle::Single;
+    Color       colour{};
+    BorderSides sides = BorderSides::all();
+};
+\end{lstlisting}
+
+Each \code{BorderStyle} maps to a set of eight glyphs (corners + edges)
+that the renderer paints. The mapping is a \code{constexpr}
+\code{std::array} in \file{maya/style/border.hpp}.
+
+\subsection{\code{Sep} and \code{VSep}}
+
+The DSL's \code{sep} and \code{vsep} nodes are syntactic sugar for a
+box with a one-side-only border --- horizontal or vertical. The same
+machinery; the renderer treats them identically.
+
+\section{\code{BoxBuilder}: runtime construction}
+
+The DSL \code{.build()} fans out into a \code{BoxBuilder} which
+assembles a \code{BoxElement}:
+
+\begin{lstlisting}
+class BoxBuilder {
+public:
+    BoxBuilder(FlexDirection dir, BoxCfg cfg)
+      : dir_(dir), cfg_(cfg) {}
+
+    void add(Element child) { children_.push_back(std::move(child)); }
+    void add(ElementList list) {
+        children_.insert(children_.end(),
+                         std::make_move_iterator(list.items.begin()),
+                         std::make_move_iterator(list.items.end()));
+    }
+
+    Element finalize() &&;
+private:
+    FlexDirection         dir_;
+    BoxCfg                cfg_;
+    std::vector<Element>  children_;
+};
+\end{lstlisting}
+
+Two overloads of \code{add}: one for ordinary children, one for an
+\code{ElementList} which is spliced. \code{finalize()} translates
+\code{BoxCfg} into a \code{layout::FlexStyle}, attaches a \code{Border}
+if requested, wraps it in a \code{BoxElement}, and returns the
+variant.
+
+\section{Walking an element tree}
+
+Every algorithm that processes an element tree is a recursive
+\code{std::visit}. Here is the shape of a pretty-printer:
+
+\begin{lstlisting}
+void print(const Element& e, int depth = 0) {
+    std::string indent(depth * 2, ' ');
+    std::visit(overload{
+        [&](const TextElement& t) {
+            std::println("{}TEXT  : \"{}\"", indent, t.text);
+        },
+        [&](const BoxElement& b) {
+            std::println("{}BOX   : dir={}, {} children",
+                         indent, int(b.style.direction), b.children.size());
+            for (const auto& c : b.children) print(c, depth + 1);
+        },
+        [&](const ElementList& l) {
+            for (const auto& c : l.items) print(c, depth);
+        }
+    }, e);
+}
+\end{lstlisting}
+
+This is the template every renderer-side pass follows: visit, branch
+on alternative, recurse on children.
+
+\section{Hyperlinks}
+
+A small but neat feature: text elements can carry a hyperlink. The
+renderer emits an OSC-8 sequence around the run:
+
+\begin{lstlisting}
+ESC ] 8 ; ; URL ESC \  text  ESC ] 8 ; ; ESC \
+\end{lstlisting}
+
+Modern emulators turn that into a clickable link. \maya{} interns the
+URL into a \code{HyperlinkId} so the per-cell representation stays
+compact (more on that in Chapter~\ref{ch:canvas}).
+
+\section{Why so many small structs?}
+
+A reasonable question: why isn't \code{Element} a class with virtual
+methods? \maya{}'s answer: virtual dispatch precludes a packed cell
+representation, prevents \code{constexpr} construction, and makes
+serialization harder. The variant + visitor pattern gives you
+polymorphism without the overhead --- \code{std::visit} compiles to a
+jump table or a chain of branches, both faster than a virtual call,
+and the data layout stays cache-friendly.
+
+\section{The forward-declaration dance}
+\label{sec:elem:forward-decl}
+
+If you open \file{maya/include/maya/element/element.hpp} you will see
+an unusual little ritual: \code{Element} is forward-declared,
+\code{box.hpp} and \code{text.hpp} are then included, and only after
+that is \code{Element} actually defined. The comments in the file
+explain why; the explanation is worth understanding because the same
+problem will come up in your own code.
+
+The shape is:
+
+\begin{lstlisting}
+// Step 1: forward-declare Element
+struct Element;
+struct ElementList;
+
+// Step 2: include the concrete element headers
+#include "box.hpp"      // BoxElement, which has std::vector<Element>
+#include "text.hpp"     // TextElement
+
+// Step 3-4: now define Element and ElementList
+struct ElementList { std::vector<Element> items; ... };
+struct Element     { /* the variant */ };
+\end{lstlisting}
+
+Why this order? Because \code{BoxElement} contains
+\code{std::vector<Element>}, which means \code{BoxElement}'s
+definition needs to know about \code{Element}. But \code{Element} is
+the variant of \code{BoxElement}, \code{TextElement}, and
+\code{ElementList}, so its definition needs to know about
+\code{BoxElement} --- a circular dependency.
+
+\cpp{} resolves this with \textbf{forward declarations}: a
+forward-declared type is enough for the compiler to know
+``\code{Element} is a type, you can have pointers and references to
+it, and \code{std::vector<Element>} works because the vector holds
+an indirect pointer to its element type internally''. The full
+definition is supplied later, after the dependent pieces are in
+place.
+
+The technique generalises: any time you have a tree where a node's
+field holds a vector / optional / pointer of the same type, you
+use forward declaration to break the cycle.
+
+\begin{idea}
+A tree type that contains itself in a field is a circular type
+definition. \cpp{} breaks the circle with a forward declaration:
+the outer type is named first, the indirect field can then refer to
+it, and the full definition follows.
+\end{idea}
+
+\section{Constructing an \code{Element} by hand}
+\label{sec:elem:by-hand}
+
+The DSL hides almost all element construction. For tests,
+diagnostics, and writing widget primitives that work below the DSL
+layer, you sometimes need to make an \code{Element} directly.
+
+The direct way:
+
+\begin{lstlisting}
+#include <maya/element/element.hpp>
+
+using namespace maya;
+
+// A leaf text element
+Element title = TextElement{
+    .text  = "Hello",
+    .style = Style{}.with_bold().with_fg(Color::rgb(100, 180, 255)),
+};
+
+// A box containing two children
+Element panel = BoxElement{
+    .style    = layout::FlexStyle{ .direction = FlexDirection::Column,
+                                   .padding   = {.top=1, .right=2,
+                                                 .bottom=1, .left=2} },
+    .border   = Border{.style = BorderStyle::Round},
+    .children = {
+        std::move(title),
+        Element{TextElement{.text = "world"}}
+    },
+};
+\end{lstlisting}
+
+The braces in the field initialisers are designated initialisers
+(\cpp{}20); they make the field names explicit so the code reads
+like data. The whole construction is value-based: no \code{new},
+no \code{shared\_ptr}, just nested structs.
+
+The more idiomatic way uses the \code{box()} builder:
+
+\begin{lstlisting}
+#include <maya/element/builder.hpp>
+
+Element panel = maya::detail::box()
+    .direction(FlexDirection::Column)
+    .padding(1, 2, 1, 2)
+    .border(BorderStyle::Round)
+    .border_color(Color::rgb(60, 65, 80))
+    (text_el("Hello").bold().fg(100, 180, 255),
+     text_el("world"));
+\end{lstlisting}
+
+The builder is a fluent chain that mirrors the DSL pipes; its final
+\code{operator()} takes the children. This is what the DSL's
+\code{.build()} ultimately calls --- the builder lives in
+\file{maya/include/maya/element/builder.hpp}.
+
+\section{The colour model up close}
+\label{sec:elem:color}
+
+We established that \code{Color} is a 24-bit RGB triple plus an
+``is default'' bit. Worth pausing on what that bit costs and what it
+gains.
+
+Without it, you would need a sentinel: \code{Color\{0, 0, 0\}}
+meaning either ``actual black'' or ``unset''. The runtime would
+have no way to tell ``the user explicitly chose black'' from ``the
+user hasn't specified'' --- and the renderer needs to know, because
+the terminal's default foreground colour may not be black (it is
+white-on-black for dark themes, dark-on-white for light themes).
+
+With \code{is\_default = true}, the renderer can emit
+\code{ESC[39m} (\emph{reset foreground to terminal default}) rather
+than a specific colour. The cell inherits whatever the user's
+terminal preferences say.
+
+\begin{lstlisting}
+Color c1 = Color::rgb(0, 0, 0);                // explicit black
+Color c2 = Color::default_();                  // terminal default
+Color c3{};                                    // also terminal default
+// c1.is_default == false, c2.is_default == true
+\end{lstlisting}
+
+The difference matters when a \maya{} program runs in someone
+else's terminal: their carefully-chosen colour scheme is preserved
+for anything you did not explicitly style.
+
+\subsection{The hex shorthand}
+
+Designers think in hex; the runtime has a constructor for that:
+
+\begin{lstlisting}
+Color accent = Color::hex(0x64B4FF);    // = rgb(100, 180, 255)
+Color danger = Color::hex(0xFF4444);    // = rgb(255, 68, 68)
+\end{lstlisting}
+
+The DSL has matching \code{fg<0x\dots>} and \code{bg<0x\dots>}
+pipes (Chapter~\ref{ch:dsl}) which call the same constructor at
+compile time.
+
+\subsection{Truecolour, 256-colour, 16-colour}
+
+A brief detour. The terminal world has three historical colour
+palettes:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{8 / 16 colours.} The classic ANSI palette. SGR codes
+    30--37 (foreground), 40--47 (background), 90--97 (bright
+    foreground), 100--107 (bright background). Universally
+    supported.
+  \item \textbf{256 colours.} An xterm extension; a 6×6×6 colour
+    cube plus 24 greys plus the original 16. Encoded as
+    \code{ESC[38;5;<n>m}. Most emulators support it.
+  \item \textbf{Truecolour (24-bit).} Three bytes per channel.
+    Encoded as \code{ESC[38;2;<R>;<G>;<B>m}. Modern emulators ---
+    every one made in the last decade --- support this.
+\end{itemize}
+
+\maya{} stores colours internally as truecolour and lets the
+renderer worry about quantisation if the target terminal does not
+support it. In practice, ``the target terminal does not support
+it'' is so rare you can ignore it; if you really need to target a
+2003 emulator over a hardened serial link, set
+\code{RunConfig::color\_mode = ColorMode::ANSI16} and a quantiser
+will snap each truecolour to the nearest ANSI colour on the wire.
+
+\begin{funfact}
+24-bit truecolour over a terminal was proposed in the early 2000s
+and snuck into emulators piecemeal over the next decade. The
+official standard governing it (\code{ITU-T T.416}) was published
+in 1993 but ignored for fifteen years. Today, your
+\code{printf '\textbackslash{}e[38;2;255;128;0mhi'} works in every
+mainstream emulator without anyone needing to think about it. The
+gap between a feature existing and it being usable is sometimes
+decades long.
+\end{funfact}
+
+\section{The border gallery}
+\label{sec:elem:border-gallery}
+
+Each \code{BorderStyle} maps to a set of glyphs the renderer paints
+at the cells immediately inside the box's bounding rectangle. The
+styles are not interchangeable; the glyph choice signals affect.
+
+\paragraph{\code{None}.} No border, no glyphs. The box's content
+fills its rectangle.
+
+\paragraph{\code{Single}.} The default. Light-weight box-drawing
+characters from Unicode's \code{U+2500}--\code{U+257F} block:
+horizontal bar (\code{U+2500}), vertical bar (\code{U+2502}),
+top-left corner (\code{U+250C}), and so on.
+
+\paragraph{\code{Round}.} Same edges as \code{Single}, but the four
+corners use the rounded variants (\code{U+256D}, \code{U+256E},
+\code{U+256F}, \code{U+2570}). Looks friendlier on most fonts.
+
+\paragraph{\code{Double}.} Double-line glyphs (\code{U+2550} for
+horizontal, \code{U+2551} for vertical, \code{U+2554} for top-left).
+The classic \emph{IBM} look from DOS-era applications.
+
+\paragraph{\code{Bold} (alias \code{Thick}).} Heavy box-drawing
+glyphs (\code{U+2501}, \code{U+2503}, \code{U+250F}). Useful for
+emphasis or selected state.
+
+\paragraph{\code{Classic}.} ASCII-only fallback using \code{+},
+\code{-}, \code{|}. Use for legacy terminals that do not render
+Unicode box-drawing characters.
+
+\paragraph{\code{Arrow}.} A novelty style with arrow heads pointing
+into the corners. Good for ``selected'' or ``focus'' indicators on a
+subpanel.
+
+The glyph table for every style lives in
+\file{maya/include/maya/style/border.hpp} as a \code{constexpr}
+\code{std::array}, one row per style. You can read all of it in one
+minute.
+
+\subsection{Partial-side borders}
+
+\code{BorderSides} controls which of the four edges actually paint.
+The defaults are all four; the helpers \code{horizontal()} and
+\code{vertical()} pick top+bottom or left+right respectively. This
+is how \code{sep} and \code{vsep} are implemented --- they are
+boxes with one side worth of border, drawn as a thin separator.
+
+\begin{lstlisting}
+// A separator under a heading
+auto heading = v(
+    t<"Section"> | Bold,
+    sep,                       // = a row with .border.sides = horizontal()
+    body
+);
+\end{lstlisting}
+
+A separator costs one row of height. Vertical separators (\code{vsep})
+cost one column of width and appear inside row layouts.
+
+\section{Patterns for walking the tree}
+\label{sec:elem:walk-patterns}
+
+The pretty-printer earlier was the simplest possible tree walk. Real
+algorithms in \maya{} have a few additional patterns; learning them
+lets you build your own analyses (linters, accessibility checks,
+layout debuggers).
+
+\subsection{Counting nodes}
+
+\begin{lstlisting}
+int count(const Element& e) {
+    return std::visit(overload{
+        [](const TextElement&)    { return 1; },
+        [&](const BoxElement& b)  {
+            int n = 1;
+            for (const auto& c : b.children) n += count(c);
+            return n;
+        },
+        [&](const ElementList& l) {
+            int n = 0;
+            for (const auto& c : l.items) n += count(c);
+            return n;
+        },
+    }, e);
+}
+\end{lstlisting}
+
+\code{ElementList} does not count itself (it is a transparent
+fragment), but its items do. \code{BoxElement} counts itself plus
+its children.
+
+\subsection{Finding all text}
+
+Flatten an \code{Element} into a vector of strings (useful for
+testing, search, screen readers):
+
+\begin{lstlisting}
+void texts(const Element& e, std::vector<std::string>& out) {
+    std::visit(overload{
+        [&](const TextElement& t) { out.push_back(t.text); },
+        [&](const BoxElement& b)  {
+            for (const auto& c : b.children) texts(c, out);
+        },
+        [&](const ElementList& l) {
+            for (const auto& c : l.items) texts(c, out);
+        },
+    }, e);
+}
+\end{lstlisting}
+
+The same scaffold; the only thing that changes is what you do at
+each node.
+
+\subsection{Transforming the tree}
+
+What if you want to return a \emph{new} tree, with every text node
+uppercased?
+
+\begin{lstlisting}
+Element upper(const Element& e) {
+    return std::visit(overload{
+        [](const TextElement& t) -> Element {
+            auto copy = t;
+            std::transform(copy.text.begin(), copy.text.end(),
+                           copy.text.begin(), ::toupper);
+            return copy;
+        },
+        [&](const BoxElement& b) -> Element {
+            BoxElement nb = b;
+            for (auto& c : nb.children) c = upper(c);
+            return nb;
+        },
+        [&](const ElementList& l) -> Element {
+            ElementList nl = l;
+            for (auto& c : nl.items) c = upper(c);
+            return nl;
+        },
+    }, e);
+}
+\end{lstlisting}
+
+The shape is the same again --- visit, recurse on children, build
+the new node. With trees of plain values, transformation is
+non-destructive and trivially correct: the original tree is
+untouched.
+
+\subsection{Hit testing}
+
+Given a screen coordinate, which \code{Element} is at that position?
+The layout engine (Chapter~\ref{ch:layout}) assigns each node a
+rectangle; hit testing walks the tree picking the deepest node
+whose rectangle contains the point. The pattern is identical:
+\code{std::visit}, recurse, return.
+
+\begin{idea}
+Every tree pass in \maya{} is \code{std::visit} + recursion. The
+variant is closed, the visitor is exhaustive, and adding a new node
+kind would force every visitor in the codebase to add a branch ---
+in one compiler error message, with one source location each. This
+is why the variant pattern scales.
+\end{idea}
+
+\section{The \code{Style} merge rule}
+\label{sec:elem:style-merge}
+
+A detail that catches people out: how does \code{Style} composition
+actually work? Two styles, one inheriting from a parent and one
+applied locally, must combine somehow.
+
+The rule, implemented by \code{Style::merge}:
+
+\begin{itemize}[leftmargin=*]
+  \item Colours: the second style's \code{fg} / \code{bg} replace
+    the first's \emph{only if they are not default}. The default
+    sentinel acts as ``do not override''.
+  \item Attributes: a bitwise OR. Bold can be added on top of dim;
+    underline can be added on top of bold. There is no ``unbold''
+    attribute in the merged form --- styles only accumulate.
+\end{itemize}
+
+In practice this means:
+
+\begin{lstlisting}
+Style base = Style{}.with_fg(Color::rgb(100, 100, 100));
+Style bold = Style{}.with_bold();
+Style merged = base.merge(bold);
+// merged.fg    == rgb(100, 100, 100)
+// merged.attrs == Bold
+\end{lstlisting}
+
+The parent's grey foreground is preserved (bold did not specify a
+colour), and the bold attribute is added. If you later wanted to
+actively reset bold, you would do it by constructing a fresh style,
+not by ``negating'' in the merge.
+
+\section{Hyperlinks}
+
+A small but neat feature: text elements can carry a hyperlink. The
+renderer emits an OSC-8 sequence around the run:
+
+\begin{lstlisting}
+ESC ] 8 ; ; URL ESC \  text  ESC ] 8 ; ; ESC \
+\end{lstlisting}
+
+Modern emulators turn that into a clickable link. \maya{} interns the
+URL into a \code{HyperlinkId} so the per-cell representation stays
+compact (more on that in Chapter~\ref{ch:canvas}).
+
+\begin{lstlisting}
+Element docs = TextElement{
+    .text = "see docs",
+    .style = Style{}.with_underline(),
+    .link  = intern_hyperlink("https://example.org/docs"),
+};
+\end{lstlisting}
+
+The \code{intern\_hyperlink} call returns a small integer; the URL
+string lives in a per-frame interning table, freed at end of frame.
+This keeps the per-cell representation a small fixed-size struct
+rather than a string.
+
+\section{Pitfalls and anti-patterns}
+\label{sec:elem:pitfalls}
+
+\begin{warning}
+\textbf{Storing an \code{Element} across frames.} The element tree is
+built fresh on every frame; storing a node from frame \code{N} for
+use in frame \code{N+1} is not catastrophic, but it defeats the
+rebuild-from-model discipline and is usually a sign your model is
+missing a field. Put the data in the model, build the element from
+it.
+\end{warning}
+
+\begin{warning}
+\textbf{Mutating an \code{Element} after construction.} The runtime
+may assume the element you returned from \code{view()} is
+immutable for the duration of the frame. Modifying it after the
+fact (from a background thread, say) is undefined behaviour. If you
+need to ``change the UI'' from a background thread, send a
+\code{Msg} through \code{Cmd::task}'s dispatch; \code{view} will be
+re-invoked with the new model.
+\end{warning}
+
+\begin{warning}
+\textbf{Using raw heap allocation.} \code{new BoxElement\{\dots\}}
+and returning a pointer breaks the value-semantics invariant the
+rest of the library assumes. The \code{Element} variant is meant to
+be constructed by value and moved; mixing pointer ownership in
+will break copy / move semantics in confusing ways.
+\end{warning}
+
+\begin{warning}
+\textbf{Building deeply nested boxes when a flat list would do.}
+Layout time grows roughly linearly with node count. A list of 100
+rows nested inside a vertical box is fine; a list of 100 rows where
+each row is a box containing a box containing a box of cells is
+slow. Keep the tree as flat as you can.
+\end{warning}
+
+\begin{recap}
+The runtime tree is \code{Element = variant<BoxElement, TextElement,
+ElementList>}. Style, Color, and Border are small POD structs;
+attributes are a bitset; themes are 24-slot palettes. Every
+algorithm in \maya{} walks the tree with \code{std::visit}.
+\code{BoxBuilder} bridges the compile-time DSL to the runtime tree.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Open \file{maya/include/maya/element/element.hpp} and find
+    the \code{Element} alias. Note that it is exactly the variant
+    described in this chapter.
+  \item Write a function
+    \code{int count\_text\_nodes(const Element\&)} using
+    \code{std::visit}. Test it on a panel from
+    Chapter~\ref{ch:dsl}.
+  \item Construct an \code{Element} by hand --- not via the DSL ---
+    using \code{BoxBuilder}. Render it with \code{print(...)}.
+\end{enumerate}

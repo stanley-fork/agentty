@@ -1,0 +1,1214 @@
+\chapter{The compile-time DSL}
+\label{ch:dsl}
+
+\maya{}'s most distinctive feature is its DSL --- a tiny embedded
+language inside \cpp{} for describing UI trees. The DSL is unusual
+because it lives entirely at the type level: an expression like
+
+\begin{lstlisting}
+t<"Hello"> | Bold | Fg<100, 180, 255>
+\end{lstlisting}
+
+is a \emph{single value} whose type encodes every choice you made
+(\emph{the string}, \emph{bold}, \emph{the colour}). This chapter
+shows how that works, why the compiler refuses certain expressions,
+and how to escape into the runtime when you need to.
+
+\begin{aside}
+If you have written HTML or React, you have written a DSL: a small,
+specialised vocabulary for the one thing you are doing (describing
+UI). \maya{}'s DSL is the same idea, but it sits inside \cpp{}, runs
+at compile time, and refuses to compile if you build an illegal
+tree. The bottom-up explanation in this chapter is long, but the
+payoff is being able to read any expression in any \maya{} program
+and know what every token contributes to the type.
+\end{aside}
+
+\section{From scratch: what a DSL even is}
+\label{sec:dsl:what}
+
+The phrase ``Domain-Specific Language'' has two flavours in
+programming.
+
+An \textbf{external DSL} is a language with its own parser, lexer,
+and often its own interpreter: SQL, regular expressions, JSON, CSS,
+the shell. You write it in a different syntax from the host
+language, and a separate engine reads it.
+
+An \textbf{embedded} (or \emph{internal}) DSL is a sub-vocabulary
+within the host language. It looks like normal code, but the
+operators and identifiers have been overloaded to express a different
+domain. JavaScript's \code{describe("thing", () => \dots)} from
+Mocha is an embedded DSL for testing. \cpp{}'s \code{std::cout <<
+thing} is the world's most ubiquitous embedded DSL --- the \code{<<}
+operator does \emph{stream insertion} when applied to streams, not
+bit-shift.
+
+The \maya{} DSL is the embedded kind. Every piece of it is legal
+\cpp{}; the magic is in operator overloads, variable templates, and
+the fact that we have made the result types interesting enough that
+the compiler can reason about them.
+
+Four properties define a good embedded DSL:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{It reads like the thing it describes.}
+    \code{v(t<"a">, t<"b">)} looks vertical because we picked
+    \code{v} for that role.
+  \item \textbf{It composes with the rest of the language.} You can
+    pass a DSL fragment to a function, return one from a function,
+    store one in a variable.
+  \item \textbf{The host's type checker still works.} A mistake in
+    the DSL is a host-language error, not a runtime ``DSL
+    interpreter blew up''.
+  \item \textbf{There is an escape hatch back to the host
+    language.} \maya{}'s \code{dyn([]{...})} is exactly this.
+\end{enumerate}
+
+In the rest of the chapter we will see how \maya{} achieves all four.
+
+\section{Non-type template parameters, properly}
+\label{sec:dsl:nttp}
+
+The foundation of the entire DSL is the \cpp{}20 / 26 ability to use
+structured values as template parameters. We touched on this in
+Chapter~\ref{ch:cpp}; here is the longer version, because the DSL
+leans on it constantly.
+
+A \textbf{template parameter} can be a type (\code{typename T}), but
+it can also be a \emph{value}:
+
+\begin{lstlisting}
+template <int N> struct Array { int data[N]; };
+Array<8>  a;   // N = 8
+Array<16> b;   // N = 16, different type from a
+\end{lstlisting}
+
+The parameter \code{N} is an integer, not a type. The template is
+instantiated once per distinct value of \code{N}, and each
+instantiation is a separate type. \code{Array<8>} and \code{Array<16>}
+do not interconvert.
+
+\subsection{Why integers are not enough}
+
+Integers, pointers, and enum values have always been allowed as
+non-type template parameters (NTTPs). What you could \emph{not} do,
+until \cpp{}20, was use a class type as an NTTP. There was no way to
+write
+
+\begin{lstlisting}
+struct Point { int x; int y; };
+template <Point P> struct Thing { /* ... */ };
+Thing<Point{3, 4}> t;     // illegal in C++17
+\end{lstlisting}
+
+This matters for us because a UI description involves not just
+numbers but \emph{compound data}: a string is a class type, a style
+is a class type, a colour is three bytes. If we cannot put those in
+template parameters, the DSL is severely limited.
+
+\cpp{}20 lifted the restriction for \textbf{structural} class types:
+any literal type whose members are all public, with no user-defined
+oddities, can be an NTTP. \cpp{}26 extended it further. The
+consequence is that \code{maya::dsl::Str}, \code{maya::dsl::CTStyle},
+and \code{maya::dsl::BoxCfg} can all appear as template parameters,
+and the DSL works.
+
+\subsection{\code{Str}: the building block}
+
+The simplest structural NTTP in \maya{} is \code{Str} ---
+a fixed-size string class:
+
+\begin{lstlisting}
+template <std::size_t N>
+struct Str {
+    char data[N]{};
+    consteval Str(const char (&s)[N]) {
+        for (std::size_t i = 0; i < N; ++i) data[i] = s[i];
+    }
+    consteval std::size_t size() const { return N - 1; }
+    constexpr operator std::string_view() const { return {data, N - 1}; }
+};
+\end{lstlisting}
+
+Line by line:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{template <std::size\_t N> struct Str}: parameterised
+    by the length \code{N}.
+  \item \code{char data[N]\{\}}: a fixed array of \code{N}
+    characters, zero-initialised.
+  \item \code{consteval Str(const char (\&s)[N])}: constructor that
+    \emph{must} run at compile time, taking a reference to a
+    \code{char} literal of length \code{N}. The compiler deduces
+    \code{N} from the literal's size.
+  \item The loop copies the literal into \code{data}.
+\end{itemize}
+
+Now you can write \code{Str{"Hello"}} as a constant expression. The
+resulting value has a \emph{type} that depends on the length and a
+\emph{value} that contains the bytes --- and crucially, both are
+available to other templates.
+
+\subsection{Putting \code{Str} into the type system}
+
+\begin{lstlisting}
+template <Str S>
+struct TextNode {
+    static constexpr std::string_view text() { return {S.data, S.size()}; }
+};
+
+TextNode<"Hello"> a;
+TextNode<"World"> b;
+// decltype(a) and decltype(b) are different types,
+// even though both store no data per-instance.
+\end{lstlisting}
+
+\code{TextNode<"Hello">} and \code{TextNode<"World">} are distinct
+types. The string contents are part of the \emph{type identity},
+not a field. Two instances of \code{TextNode<"Hello">} occupy zero
+bytes and are interchangeable.
+
+Why does this matter? Because the compiler can now reason about your
+strings: it can choose overloads based on which string was used, it
+can refuse to mix incompatible strings, and it can fold the string's
+length into compile-time arithmetic --- without you writing any of
+that by hand.
+
+\subsection{\code{CTStyle}: a structural style}
+
+The second key NTTP type:
+
+\begin{lstlisting}
+struct CTStyle {
+    bool has_fg = false, has_bg = false;
+    uint8_t fg_r = 0, fg_g = 0, fg_b = 0;
+    uint8_t bg_r = 0, bg_g = 0, bg_b = 0;
+    bool bold_ = false, dim_ = false, italic_ = false;
+    bool underline_ = false, strike_ = false, inverse_ = false;
+
+    consteval CTStyle merge(CTStyle o) const { /* combine fields */ }
+    [[nodiscard]] Style runtime() const       { /* materialise */ }
+};
+\end{lstlisting}
+
+A \code{CTStyle} value is a \textbf{bag of compile-time style
+flags}: bold yes/no, foreground colour yes/no plus three RGB bytes,
+and so on. The struct is structural (all-public fields, no virtuals,
+no custom comparison), so it qualifies as an NTTP. The
+\code{merge} method is \code{consteval} --- it can be called inside
+template arguments to compute new \code{CTStyle}s from old ones.
+
+A style tag exists for every bool field:
+
+\begin{lstlisting}
+template <CTStyle V>
+struct StyTag {
+    static constexpr CTStyle value = V;
+};
+
+inline constexpr StyTag<CTStyle{.bold_ = true}>      Bold{};
+inline constexpr StyTag<CTStyle{.dim_ = true}>       Dim{};
+inline constexpr StyTag<CTStyle{.italic_ = true}>    Italic{};
+inline constexpr StyTag<CTStyle{.underline_ = true}> Underline{};
+\end{lstlisting}
+
+\code{Bold} is a \code{StyTag} whose template argument is a
+\code{CTStyle} with one field set. The variable \code{Bold} itself
+is a zero-size instance --- the \code{CTStyle} lives in the type.
+
+\subsection{\code{Fg<R,G,B>}: colours in the type system}
+
+Colours are encoded the same way: a \code{CTStyle} with the
+foreground fields set, exposed through a variable template:
+
+\begin{lstlisting}
+namespace detail_rgb {
+    template <uint8_t R, uint8_t G, uint8_t B>
+    consteval CTStyle make_fg() {
+        return CTStyle{.has_fg=true, .fg_r=R, .fg_g=G, .fg_b=B};
+    }
+}
+
+template <uint8_t R, uint8_t G, uint8_t B>
+inline constexpr StyTag<detail_rgb::make_fg<R, G, B>()> Fg{};
+\end{lstlisting}
+
+\code{Fg<100, 180, 255>} is a zero-size value whose type is a
+\code{StyTag} whose template parameter is a \code{CTStyle} whose
+fields are exactly the RGB you asked for. The numbers fed in become
+part of the type. Nothing about colour leaks into runtime data
+until \code{.build()}.
+
+\begin{funfact}
+The MSVC compiler had (and partly still has) a long-standing bug
+around \code{constexpr} evaluation of designated-initialised NTTPs.
+If you look in \file{dsl.hpp} you will see a small namespace
+\code{detail\_rgb} with \code{make\_fg} / \code{make\_bg} helpers ---
+that existence-of-helpers is the workaround. The compiler bug ticket
+is cited in a comment. Real libraries are full of small monuments
+like this; each is a story of someone who hit the same wall before
+you.
+\end{funfact}
+
+\begin{idea}
+NTTPs let you put \emph{values} into the type system. \maya{} uses
+that to encode strings (\code{Str}), styles (\code{CTStyle}),
+colours (RGB triples), borders, paddings, and growth factors. Once a
+value lives in a type, the compiler can check rules between values
+at compile time --- which is the whole point.
+\end{idea}
+
+\section{The shape}
+
+The DSL has six kinds of node:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\code{TextNode<Str, CTStyle>}     & compile-time text \\
+\code{RuntimeTextNode<S>}         & runtime text (from a string or number) \\
+\code{BoxNode<Dir, Cfg, Cs...>}   & vertical or horizontal container \\
+\code{DynNode<F>}                 & lambda escape hatch \\
+\code{MapNode<R, P>}              & project a range to elements \\
+\code{SpacerNode}                 & a flexible gap \\
+\end{tabular}
+\end{center}
+
+Every node satisfies the \code{Node} concept:
+
+\begin{lstlisting}
+template <typename T>
+concept Node = requires(const T& n) {
+    { n.build() } -> std::convertible_to<Element>;
+};
+\end{lstlisting}
+
+A \code{Node} is anything with a \code{.build()} that yields a runtime
+\code{Element}. That is the only contract; the rest is how nodes
+combine.
+
+\section{\code{t<"Hello">} --- string in a type}
+
+The simplest node is the compile-time text node:
+
+\begin{lstlisting}
+template <Str S, CTStyle Sty = CTStyle{}>
+struct TextNode {
+    static constexpr Str  str   = S;
+    static constexpr CTStyle style = Sty;
+
+    Element build() const {
+        return TextElement{std::string{S.view()}, Sty.runtime()};
+    }
+    operator Element() const { return build(); }
+};
+
+template <Str S>
+inline constexpr TextNode<S> t{};
+\end{lstlisting}
+
+The template parameters are: an \code{Str} (the string contents, an
+NTTP from Chapter~\ref{ch:cpp}) and a \code{CTStyle} (a structural
+type holding the compile-time style). \code{t<"Hello">} is the
+variable template: \code{TextNode<"Hello", CTStyle\{\}>\{\}}.
+
+Two facts to internalise:
+\begin{itemize}[leftmargin=*]
+  \item \code{t<"a">} and \code{t<"b">} have \emph{different types}.
+    Their string contents live in the type system, not in a field.
+  \item \code{TextNode} has no nonstatic data members. It is a zero-size
+    type. Two instances of \code{TextNode<"a">} are
+    indistinguishable; the compiler treats them as the same value.
+\end{itemize}
+
+\section{Pipes are operator overloads}
+
+The DSL's pipe (\code{|}) is just \code{operator|}. \maya{} defines
+overloads that match \code{(Node, StyTag)} and return a new node with
+the style merged in:
+
+\begin{lstlisting}
+template <Str S, CTStyle Sty, CTStyle V>
+constexpr auto operator|(TextNode<S, Sty>, StyTag<V>) {
+    return TextNode<S, Sty.merge(V)>{};   // new type, same instance shape
+}
+\end{lstlisting}
+
+Read the return type: the merged style is computed by \code{Sty.merge(V)},
+which is \code{constexpr}, so the result is a brand-new
+\code{TextNode<S, Sty'>}. Apply two style tags and you get yet another
+type. The pipeline is sequential type rewriting at compile time.
+
+\begin{idea}
+Because the result of each pipe is a new type, the compiler can
+enforce \emph{type-state} rules: a method is only available on a node
+that has reached a particular state.
+\end{idea}
+
+This is the trick behind the border colour example. The pipe overload
+for \code{BColTag} (a border colour tag) has a \code{requires} clause:
+
+\begin{lstlisting}
+template <FlexDirection Dir, BoxCfg Cfg, typename... Cs,
+          uint8_t R, uint8_t G, uint8_t B>
+    requires (Cfg.has_border)
+constexpr auto operator|(BoxNode<Dir, Cfg, Cs...> n, BColTag<R, G, B>) {
+    /* return a new BoxNode with border colour set */
+}
+\end{lstlisting}
+
+If you call \code{v(...) | bcol<60, 65, 80>} without first applying
+\code{border\_<Round>}, \code{Cfg.has\_border} is \code{false}, the
+\code{requires} clause fails, no overload matches, and the compiler
+prints an error. It is the same mechanism a Rust crate would use with
+typestate traits.
+
+\section{\code{v()} and \code{h()} --- variadic containers}
+
+A box takes any number of children and a direction:
+
+\begin{lstlisting}
+template <FlexDirection Dir, BoxCfg Cfg, typename... Cs>
+struct BoxNode {
+    std::tuple<Cs...> children;
+
+    Element build() const {
+        BoxBuilder b{Dir, Cfg};
+        std::apply([&](const auto&... cs) {
+            (b.add(cs.build()), ...);   // fold-expression over children
+        }, children);
+        return b.finalize();
+    }
+};
+
+template <typename... Cs>
+constexpr auto v(Cs... cs) {
+    return BoxNode<FlexDirection::Column, BoxCfg{}, Cs...>{
+        std::tuple{std::move(cs)...}
+    };
+}
+
+template <typename... Cs>
+constexpr auto h(Cs... cs) {
+    return BoxNode<FlexDirection::Row, BoxCfg{}, Cs...>{
+        std::tuple{std::move(cs)...}
+    };
+}
+\end{lstlisting}
+
+Two \cpp{} features worth pausing on:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Variadic templates} (\code{typename... Cs}): you can
+    declare ``zero or more types''. \code{Cs...} is a \emph{parameter
+    pack}; you expand it with \code{...}.
+  \item \textbf{Fold expressions} (\code{(b.add(cs.build()), ...)}):
+    short for ``apply this expression to every element of the
+    pack''. The comma is the \emph{fold operator} --- evaluate each,
+    discard intermediate results.
+\end{itemize}
+
+The result: \code{v(t<"a">, t<"b">, t<"c">)} is a single
+\code{BoxNode<Column, BoxCfg\{\}, TextNode<"a">, TextNode<"b">,
+TextNode<"c">>}, holding a \code{tuple} of three zero-size text
+nodes. Total runtime cost: zero bytes (the tuple of empty types is
+empty).
+
+\section{\code{BoxCfg} --- the type-state}
+
+\code{BoxCfg} is a \code{constexpr} struct that records every layout
+decision applied to a box:
+
+\begin{lstlisting}
+struct BoxCfg {
+    int pad_top    = 0, pad_right = 0, pad_bottom = 0, pad_left = 0;
+    int gap        = 0;
+    int grow_num   = 0;
+    bool has_border       = false;
+    BorderStyle border    = BorderStyle::None;
+    bool has_border_color = false;
+    Color border_color{};
+    Align align_items    = Align::Auto;
+    Justify justify      = Justify::Auto;
+    // ... etc.
+
+    constexpr BoxCfg with_padding(int t, int r, int b, int l) const {
+        BoxCfg c = *this;
+        c.pad_top = t; c.pad_right = r; c.pad_bottom = b; c.pad_left = l;
+        return c;
+    }
+    constexpr BoxCfg with_border(BorderStyle bs) const {
+        BoxCfg c = *this; c.has_border = true; c.border = bs; return c;
+    }
+    // ...
+};
+\end{lstlisting}
+
+Every layout pipe (\code{pad<1>}, \code{gap\_<1>}, \code{border\_<Round>},
+\code{grow\_<2>}) returns a new \code{BoxNode} whose \code{BoxCfg}
+template parameter has been replaced via the corresponding
+\code{with\_*} method. The type carries the full configuration; the
+final \code{.build()} reads the type and produces the runtime
+\code{BoxElement}.
+
+\section{Static, dynamic, and the bridge}
+
+A pure-compile-time tree is fine for a banner but useless for a real
+app: the count, the file list, the current time are all known only at
+runtime. \maya{} provides three bridge nodes.
+
+\subsection{\code{text(...)} --- runtime strings}
+
+\begin{lstlisting}
+text("hello")                // wraps a string_view
+text(std::to_string(n))      // wraps a string
+text(42)                     // wraps an int, formatted at build time
+text(3.14)                   // wraps a double
+\end{lstlisting}
+
+\code{text} returns a \code{RuntimeTextNode<S>} --- a node whose
+content is a runtime value but which still supports the DSL pipes.
+Its \code{build()} formats the value and produces a
+\code{TextElement}.
+
+\subsection{\code{dyn([](){ ... })} --- arbitrary lambdas}
+
+\begin{lstlisting}
+dyn([&] {
+    return loading ? text("Loading...") | Dim
+                   : text("Ready")     | Bold | Fg<80, 220, 120>;
+})
+\end{lstlisting}
+
+\code{dyn} wraps a lambda that returns anything convertible to
+\code{Element}. \code{build()} just calls the lambda. This is the
+universal escape hatch: when you cannot express something in the DSL
+itself, write a lambda.
+
+\subsection{\code{map(range, projection)} --- list comprehension}
+
+\begin{lstlisting}
+std::vector<File> files = ...;
+
+auto list = v(
+    t<"Files:"> | Bold,
+    map(files, [](const File& f) {
+        return h(text(f.name) | Bold, space, text(f.size) | Dim);
+    })
+);
+\end{lstlisting}
+
+\code{map} produces a \code{MapNode<R, P>}. At \code{build()} time it
+walks the range, applies the projection, and produces an
+\code{ElementList} that is spliced into the parent's children.
+
+\section{Reading a real pipeline}
+
+Put it all together. Here is a typical maya panel:
+
+\begin{lstlisting}
+auto panel = v(
+    t<"Dashboard"> | Bold | Fg<100, 180, 255>,
+    sep,
+    dyn([&] { return text("Active users: " + std::to_string(state.users)); }),
+    map(state.items, [](const auto& it) {
+        return h(text(it.name) | Bold, space, text(it.value) | Dim);
+    }),
+    space,
+    t<"[q] quit"> | Dim
+) | border_<Round> | bcol<60, 65, 80> | pad<1, 2> | gap_<1>;
+\end{lstlisting}
+
+What is the type of \code{panel}? Approximately:
+
+\begin{lstlisting}
+BoxNode<
+    FlexDirection::Column,
+    BoxCfg{ /* round border, colour, pad 1/2, gap 1 */ },
+    TextNode<"Dashboard", { bold, fg=(100,180,255) }>,
+    SepNode,
+    DynNode<lambda1>,
+    MapNode<vector<Item>, lambda2>,
+    SpacerNode,
+    TextNode<"[q] quit", { dim }>
+>
+\end{lstlisting}
+
+The compiler holds every choice you made --- the strings, the styles,
+the border, the padding --- in this one large type. \code{panel.build()}
+then walks it once, recursively, and produces an \code{Element} tree
+that the layout engine and renderer take from there.
+
+\section{Why compile-time?}
+
+You could write this DSL with runtime polymorphism (each node a
+\code{shared\_ptr<Node>}, each pipe a method that mutates fields). It
+would work. But:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Allocations vanish.} A purely compile-time tree of
+    zero-size types has no heap traffic.
+  \item \textbf{Errors are at compile time.} Border colour without a
+    border, negative padding (template parameter constraint
+    \code{N >= 0}), wrong type of child --- all rejected before the
+    program runs.
+  \item \textbf{The compiler can fold.} A \code{constexpr} tree can
+    be assigned to a \code{constexpr} variable and rendered at startup
+    with no parsing.
+\end{itemize}
+
+The trade-off: error messages can be long. The first time you see a
+500-line template error, breathe. The bottom of the message --- the
+\code{required from here} line and the constraint that failed --- is
+usually the actionable bit.
+
+\section{Where the runtime takes over}
+
+\code{.build()} is the boundary. Above it: types, NTTPs, fold
+expressions, the world the compiler sees. Below it: \code{Element}, a
+runtime value the layout and renderer understand. The next chapter
+goes through that runtime side.
+
+\begin{recap}
+\maya{}'s DSL is a set of node types that compose with \code{|} into
+larger node types. Strings, styles, borders, paddings, and tree
+structure all live as template parameters. Type-state constraints
+make invalid trees uncompilable. Runtime content enters through
+\code{text}, \code{dyn}, and \code{map}. \code{.build()} converts the
+compile-time tree into a runtime \code{Element}.
+\end{recap}
+
+\section{Every pipe, named and explained}
+\label{sec:dsl:pipes-tour}
+
+The DSL has roughly twenty overloads of \code{operator|}. Reading
+the source for each takes ten seconds; reading them together is
+useful, because the table makes it obvious which kinds of node
+accept which kinds of modifier. Here is the full list, grouped by
+the left-hand side.
+
+\subsection{Pipes that take a \code{TextNode}}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\textbf{Pipe} & \textbf{Effect} & \textbf{Result type} \\
+\hline
+\code{TextNode | StyTag<V>}    & merge style V       & \code{TextNode<S, Sty.merge(V)>} \\
+\code{TextNode | WidthTag<W>}  & wrap in fixed box   & \code{BoxNode<Row, ct\_width=W>} \\
+\code{TextNode | HeightTag<H>} & wrap in fixed box   & \code{BoxNode<Row, ct\_height=H>} \\
+\end{tabular}
+\end{center}
+
+Text nodes accept any style modifier and nothing else. Adding
+\code{pad<1>} to a bare text node is a compile error --- padding is
+a container property; text has no notion of inset space.
+
+\subsection{Pipes that take a \code{RuntimeTextNode}}
+
+The runtime text node (built by \code{text(...)}) gets the same
+style pipes plus two wrap-mode pipes:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\textbf{Pipe} & \textbf{Effect} \\
+\hline
+\code{| StyTag<V>}    & merge style into the runtime node \\
+\code{| clip}         & truncate with ellipsis on overflow \\
+\code{| nowrap}       & never break the line, may overflow \\
+\end{tabular}
+\end{center}
+
+The wrap-mode pipes do not exist on compile-time \code{TextNode}
+because compile-time text is meant to be short and known; the
+ellipsis case only matters when you wrap a runtime value of unknown
+length.
+
+\subsection{Pipes that take a \code{BoxNode}}
+
+This is where the real type-state machine lives. A box accepts every
+kind of modifier:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\textbf{Pipe} & \textbf{Effect} & \textbf{Notes} \\
+\hline
+\code{| StyTag<V>}        & merge style on the box itself      & all boxes \\
+\code{| PadTag<T,R,B,L>}  & set inner padding                  & all boxes \\
+\code{| GapTag<G>}        & set gap between children           & all boxes \\
+\code{| BorderTag<BS>}    & set border style                   & enables \code{bcol} pipe \\
+\code{| BColTag<R,G,B>}   & set border colour                  & \textbf{requires} \code{has\_border} \\
+\code{| GrowTag<G>}       & set flex grow factor               & all boxes \\
+\code{| WidthTag<W>}      & set fixed width                    & all boxes \\
+\code{| HeightTag<H>}     & set fixed height                   & all boxes \\
+\end{tabular}
+\end{center}
+
+Four of the modifier types have a \code{static\_assert} on the
+template parameter to reject obvious nonsense at compile time:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{PadTag}: every value must be \code{>= 0}. Negative
+    padding is a category error.
+  \item \code{GapTag}: \code{G >= 0}.
+  \item \code{GrowTag}: \code{G >= 0}.
+  \item \code{WidthTag}, \code{HeightTag}: \code{> 0}. A width of
+    zero is a hidden box, which we have a different way to express
+    (\code{visible(false)}).
+\end{itemize}
+
+The one with the named requires-clause is \code{BColTag}:
+
+\begin{lstlisting}
+template <FlexDirection Dir, BoxCfg Cfg, typename... Cs,
+          uint8_t R, uint8_t G, uint8_t B>
+    requires (Cfg.has_border)
+constexpr auto operator|(BoxNode<Dir, Cfg, Cs...> n, BColTag<R, G, B>);
+\end{lstlisting}
+
+The constraint \code{requires (Cfg.has\_border)} forbids the
+overload when the box has no border yet. We will look at the error
+message in section~\ref{sec:dsl:errors}.
+
+\subsection{The style-merging pipe}
+
+A quietly powerful one: two style tags combine into one.
+
+\begin{lstlisting}
+template <CTStyle A, CTStyle B>
+constexpr auto operator|(StyTag<A>, StyTag<B>) {
+    return StyTag<A.merge(B)>{};
+}
+\end{lstlisting}
+
+This is the foundation of building reusable style presets:
+
+\begin{lstlisting}
+constexpr auto heading = Bold | fg<0xFFFFFF>;
+constexpr auto error   = Bold | fg<0xFF4444>;
+constexpr auto subtle  = Dim  | Italic;
+
+t<"Title">     | heading
+text(msg)      | error
+t<"caption">   | subtle
+\end{lstlisting}
+
+The combined tag is itself a \code{StyTag<...>}, so it composes
+further: \code{heading | Underline} is legal. Compose your design
+system this way and applying it is a single token.
+
+\subsection{The hex-colour shorthand}
+
+\code{Fg<R, G, B>} is verbose for designers, who think in hex. The
+DSL provides \code{fg<Hex>} and \code{bg<Hex>}:
+
+\begin{lstlisting}
+t<"warn">  | fg<0xFFAA00>
+t<"error"> | fg<0xFF4444>
+v(...)     | bg<0x1A1A2E>
+\end{lstlisting}
+
+The \code{consteval} helper that decodes the hex into RGB also
+validates it: \code{fg<0xFFFFFFFF>} (32 bits) throws a string
+literal from inside \code{consteval}, which the compiler reports as
+a constant-expression failure --- ``\code{fg<>: hex value exceeds
+0xFFFFFF}''. Compile-time error, not a silent black box.
+
+\section{The type-state machine, drawn out}
+\label{sec:dsl:state-machine}
+
+The phrase \textbf{type-state} comes from research on programming
+languages: encode the legal sequence of operations on an object into
+its type, so that calling a method at the wrong stage is a type
+error. Rust's \code{Builder} idioms are typical: the constructor
+returns a \code{Builder<Empty>}, the \code{name(\dots)} method
+returns a \code{Builder<Named>}, and \code{build()} is only defined
+on \code{Builder<Named>}.
+
+\maya{}'s \code{BoxNode} works the same way, with \code{BoxCfg} as
+the state.
+
+\paragraph{Initial state.} \code{v(\dots)} returns a
+\code{BoxNode<Column, BoxCfg\{\}, \dots>}: every flag in
+\code{BoxCfg} is false / zero. From this state:
+
+\begin{itemize}[leftmargin=*]
+  \item Padding, gap, grow, width, height, raw style: all available.
+    Each returns a new \code{BoxNode} whose \code{BoxCfg} has the
+    corresponding field updated.
+  \item Border: available. Returns a \code{BoxNode} with
+    \code{has\_border = true}.
+  \item Border colour: \emph{not} available; the requires-clause
+    fails because \code{has\_border} is false.
+\end{itemize}
+
+\paragraph{After \code{| border\_<Round>}.} \code{has\_border}
+becomes true. Border colour becomes available.
+
+\paragraph{Drawn as a state diagram.}
+
+\begin{center}
+\small
+\begin{tabular}{rcl}
+ \code{BoxNode<Cfg(has\_border=false)>}
+  & $\xrightarrow{\;\;|\;\code{border\_<R>}\;\;}$
+  & \code{BoxNode<Cfg(has\_border=true)>} \\
+ \code{BoxNode<Cfg(has\_border=false)>}
+  & $\xrightarrow{\;\;|\;\code{bcol<\dots>}\;\;}$
+  & \textsc{compile error} \\
+ \code{BoxNode<Cfg(has\_border=true)>}
+  & $\xrightarrow{\;\;|\;\code{bcol<\dots>}\;\;}$
+  & \code{BoxNode<\dots, has\_border\_color=true>} \\
+\end{tabular}
+\end{center}
+
+The state machine is tiny --- two states for the border flag --- but
+the pattern scales. Any rule of the form ``\emph{X} is only legal
+after \emph{Y}'' can be encoded the same way, by toggling a field in
+the \code{BoxCfg} on the \emph{Y} operation and adding a
+\code{requires (Cfg.\emph{field})} to the \emph{X} overload.
+
+\begin{idea}
+Type-state in a DSL means: the legal sequence of pipes is encoded
+into the chain of types. The compiler refuses pipes the current type
+does not permit. The error has a name (a \code{requires} clause) and
+a single source line.
+\end{idea}
+
+\section{Decoding the compile errors}
+\label{sec:dsl:errors}
+
+A powerful type system gets you powerful errors. The first time you
+see a 200-line template error, the impulse is to scroll up and
+panic; the trick is knowing where to look.
+
+The shape of every constraint-failure error from the DSL is:
+
+\begin{enumerate}[leftmargin=*]
+  \item A line saying \emph{no viable overload of \code{operator|}}.
+  \item One or more notes saying \emph{candidate template ignored:
+    constraints not satisfied}.
+  \item For each candidate, the constraint that did not hold:
+    \code{Cfg.has\_border} was \code{false}, \code{T >= 0} did not
+    hold for \code{T = -1}, and so on.
+  \item Finally, the line in \emph{your} code that triggered it.
+\end{enumerate}
+
+\subsection{The border-colour error}
+
+The source mistake:
+
+\begin{lstlisting}
+auto ui = v(t<"hi">) | bcol<60, 65, 80>;     // forgot border first
+\end{lstlisting}
+
+The heart of the error from a modern \code{g++}:
+
+\begin{lstlisting}[style=shell]
+error: no match for 'operator|' (operand types are
+    'maya::dsl::BoxNode<maya::FlexDirection::Column,
+      maya::dsl::BoxCfg{...has_border=false...}, ...>'
+    and 'const maya::dsl::BColTag<60, 65, 80>')
+note: candidate: 'template<...> constexpr auto
+    maya::dsl::operator|(BoxNode<Dir, Cfg, Cs...>, BColTag<R, G, B>)
+        requires (Cfg.has_border)'
+note: constraints not satisfied
+note:   the expression 'Cfg.has_border' evaluated to 'false'
+\end{lstlisting}
+
+The relevant fact is in the last note: \code{Cfg.has\_border}
+evaluated to false. Fix:
+
+\begin{lstlisting}
+auto ui = v(t<"hi">) | border_<Round> | bcol<60, 65, 80>;
+\end{lstlisting}
+
+\subsection{The negative-padding error}
+
+The source mistake:
+
+\begin{lstlisting}
+auto ui = v(t<"hi">) | pad<-1>;
+\end{lstlisting}
+
+The error:
+
+\begin{lstlisting}[style=shell]
+error: static assertion failed: Padding values must be non-negative
+  in instantiation of 'struct maya::dsl::PadTag<-1, -1, -1, -1>'
+\end{lstlisting}
+
+A \code{static\_assert} caught it before any pipe overload was
+even considered. The error names exactly what is wrong.
+
+\subsection{The wrong-child-type error}
+
+The DSL's \code{v} and \code{h} take children that satisfy the
+\code{DslChild} concept --- either a \code{Node} (anything with
+\code{.build()}) or a \code{std::ranges::range} of \code{Element}.
+Passing something else fails the concept check:
+
+\begin{lstlisting}
+auto bad = v(42);                       // int is not a DslChild
+\end{lstlisting}
+
+The error roughly:
+
+\begin{lstlisting}[style=shell]
+error: no matching function for call to 'v(int)'
+note: candidate template ignored: constraints not satisfied [with Cs = {int}]
+note: because 'int' does not satisfy 'DslChild'
+\end{lstlisting}
+
+The fix is to wrap the value in \code{text(\dots)} or its appropriate
+constructor: \code{v(text(42))}.
+
+\subsection{Strategy for reading a template error}
+
+Three rules that hold for every \maya{} compile failure:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Read the bottom first.} The line that says
+    \emph{required from here} or \emph{in the expansion of \dots}
+    is closer to your source than the wall of template-instantiation
+    backtrace above it.
+  \item \textbf{Look for ``constraints not satisfied'' / ``static
+    assertion failed''.} Those are the human-readable handles. The
+    text after them names the rule that broke.
+  \item \textbf{Identify the offending NTTP value.} The compiler
+    will print the \code{BoxCfg} or \code{CTStyle} with its fields;
+    the field whose value is wrong (\code{has\_border=false},
+    \code{pad\_t=-1}) is the actionable bit.
+\end{enumerate}
+
+Most of the wall of text is irrelevant; you are looking for two or
+three lines.
+
+\begin{warning}
+Do \emph{not} \code{\#include <maya/maya.hpp>} into a translation
+unit that you then refuse to use because the error is intimidating.
+The errors are intimidating because they are precise. The fix is
+usually one token away; scrolling past the error makes finding it
+harder.
+\end{warning}
+
+\section{What \code{.build()} actually does}
+\label{sec:dsl:build}
+
+The boundary between compile time and runtime is the \code{.build()}
+method. Every node provides it; the implementation depends on the
+kind of node.
+
+\paragraph{\code{TextNode<S, Sty>::build()}.}
+
+\begin{lstlisting}
+Element build() const {
+    return Element{TextElement{
+        .content = std::string{std::string_view{S}},
+        .style   = Sty.runtime(),
+    }};
+}
+\end{lstlisting}
+
+The compile-time string \code{S} and style \code{Sty} are read out
+of the type. \code{S} becomes a \code{std::string} (heap-allocated
+if the small-string optimisation does not apply; for short banners
+it usually does). \code{Sty.runtime()} converts the
+\code{CTStyle} bag into a runtime \code{Style} object (Chapter~\ref{ch:elements}).
+The result is a \code{TextElement} wrapped in the \code{Element}
+variant.
+
+\paragraph{\code{RuntimeTextNode<S>::build()}.}
+
+\begin{lstlisting}
+Element build() const {
+    if constexpr (std::integral<S> && !std::same_as<S, bool>) {
+        // format integer via std::to_chars
+    } else if constexpr (std::floating_point<S>) {
+        // format float via std::to_chars, 2 fractional digits
+    } else {
+        // S is a string-like: copy into a std::string
+    }
+}
+\end{lstlisting}
+
+The \code{if constexpr} picks the right path at compile time, so
+there is no per-call branching. \code{text(42)} formats with no
+heap allocation (uses a 32-byte stack buffer); \code{text("hi")}
+allocates a \code{std::string}.
+
+\paragraph{\code{BoxNode<Dir, Cfg, Cs...>::build()}.} The most
+involved:
+
+\begin{lstlisting}
+Element build() const {
+    return std::apply([](const auto&... cs) {
+        auto b = maya::detail::box().direction(Dir);
+        if constexpr (Cfg.pad_t || Cfg.pad_r || ...)
+            b = std::move(b).padding(Cfg.pad_t, ...);
+        if constexpr (Cfg.gap > 0)
+            b = std::move(b).gap(Cfg.gap);
+        if constexpr (Cfg.has_border)
+            b = std::move(b).border(Cfg.bstyle);
+        if constexpr (Cfg.has_border_color)
+            b = std::move(b).border_color(Color::rgb(Cfg.bc_r, Cfg.bc_g, Cfg.bc_b));
+        // ... style, dimensions, etc.
+        return b(cs.build()...);   // fold-expression: build each child
+    }, children);
+}
+\end{lstlisting}
+
+Notice the \code{if constexpr} on every \code{BoxCfg} field. A box
+with no border generates \emph{no} call to \code{.border()}; the
+branch does not exist in the resulting binary. The compiler
+specialises one \code{build()} per distinct \code{BoxCfg} and
+throws out everything irrelevant.
+
+The trailing \code{b(cs.build()...)} expands the children pack:
+every child's \code{.build()} is invoked, and the resulting
+\code{Element}s are handed to the runtime box builder via its
+function-call operator (Chapter~\ref{ch:elements}).
+
+\paragraph{\code{DynNode<F>::build()}.}
+
+\begin{lstlisting}
+Element build() const { return fn(); }
+\end{lstlisting}
+
+Literal one-liner. The lambda is invoked; whatever it returns is
+converted to \code{Element}.
+
+\paragraph{\code{MapNode<R, Proj>::build()}.}
+
+\begin{lstlisting}
+Element build() const {
+    std::vector<Element> items;
+    if constexpr (std::ranges::sized_range<R>) items.reserve(range.size());
+    for (auto&& val : range) items.emplace_back(proj(val).build());
+    return Element{ElementList{std::move(items)}};
+}
+\end{lstlisting}
+
+The range is walked, the projection applied, and the results
+gathered into an \code{ElementList}. Because \code{MapNode} produces
+an \code{ElementList} (not a single \code{Element}), the parent
+\code{v}/\code{h} splices its children into the parent's child list
+--- the moral equivalent of a JSX fragment.
+
+\subsection{The cost of \code{.build()}}
+
+A pure compile-time tree (\code{t<"\dots">} and \code{v}/\code{h}
+with no runtime children) does \code{.build()} in:
+
+\begin{itemize}[leftmargin=*]
+  \item One \code{std::string} construction per text node
+    (small-string optimisation often makes this free).
+  \item One \code{BoxElement} construction per box node, which holds
+    a \code{std::vector<Element>} of children. The vector is
+    reserved to the right size.
+  \item Some \code{Style} field assignments.
+\end{itemize}
+
+No virtual dispatch, no template-method indirection. The whole tree
+is built in a single recursive sweep that the compiler often inlines
+completely for small trees. For a typical panel with twenty nodes,
+\code{.build()} runs in tens of microseconds.
+
+The \code{Element} tree is then dropped on the floor at the end of
+the frame (after rasterisation into the canvas), and the next frame
+builds a fresh one. This is the rebuild-every-frame discipline from
+Chapter~\ref{ch:elm}.
+
+\begin{recap}
+\code{.build()} is the bridge from the compile-time tree to the
+runtime \code{Element}. It is a one-shot recursive walk: every
+node's \code{build()} produces an \code{Element}, children are
+gathered into the parent's \code{Element}, and a runtime tree comes
+out the bottom. Then it is the runtime side's problem.
+\end{recap}
+
+\section{Recipe gallery}
+\label{sec:dsl:recipes}
+
+A collection of patterns you will use constantly. Each is a small,
+composable fragment; the goal is to make them feel familiar before
+you need them.
+
+\subsection{A titled panel with a border}
+
+\begin{lstlisting}
+constexpr auto title_panel = v(
+    t<"Status"> | Bold | Underline,
+    sep,
+    t<"all systems nominal"> | Fg<80, 220, 120>
+) | pad<1, 2> | border_<Round> | bcol<60, 65, 80>;
+\end{lstlisting}
+
+\code{sep} is a horizontal separator (a one-row box with a top
+border); \code{pad<1, 2>} is one row of vertical padding, two
+columns of horizontal.
+
+\subsection{A two-column layout that grows to fit}
+
+\begin{lstlisting}
+auto split = h(
+    sidebar  | w_<24>,
+    content  | grow_<1>
+) | grow_<1>;
+\end{lstlisting}
+
+The sidebar has fixed width 24; the content gets every remaining
+column. The outer box grows to fill whatever vertical container is
+holding it.
+
+\subsection{A list of items from a runtime collection}
+
+\begin{lstlisting}
+auto list = v(
+    t<"Files"> | Bold,
+    map(files, [](const File& f) {
+        return h(text(f.name) | w_<30>,
+                 text(f.size) | Dim);
+    })
+);
+\end{lstlisting}
+
+The lambda is called once per file; each call produces an
+\code{Element}. \code{map} gathers them into an \code{ElementList}
+that \code{v} splices in.
+
+\subsection{A conditional region}
+
+Two forms, both common:
+
+\begin{lstlisting}
+// when(cond, then) --- hidden if cond is false
+auto top = v(
+    title,
+    when(show_advanced, advanced_panel)
+);
+
+// when(cond, then, else) --- one or the other
+auto status = when(loading,
+    text("loading\dots") | Dim,
+    text("ready")        | Fg<80, 220, 120>);
+\end{lstlisting}
+
+The one-argument form falls back to \code{BlankNode\{\}} (a
+zero-cell empty text). The two-argument form picks one of two
+branches; both branches must satisfy \code{Node}.
+
+\subsection{A reusable style preset}
+
+\begin{lstlisting}
+constexpr auto heading = Bold | fg<0xFFFFFF>;
+constexpr auto error   = Bold | fg<0xFF4444>;
+constexpr auto subtle  = Dim  | Italic;
+
+auto ui = v(
+    t<"Welcome"> | heading,
+    text(err)    | error,
+    t<"v0.1">    | subtle
+);
+\end{lstlisting}
+
+The presets are themselves \code{StyTag}s, computed at compile time.
+Applying one is a single token; defining your design system this
+way is the path to consistency.
+
+\subsection{Inline width hints on text}
+
+\begin{lstlisting}
+text(very_long_string) | clip | w_<30>
+\end{lstlisting}
+
+\code{clip} switches the text node into truncate-with-ellipsis
+mode. \code{w\_<30>} wraps the result in a fixed-width box, so the
+text is forced to 30 columns regardless of available space.
+
+\subsection{An animated spinner}
+
+\begin{lstlisting}
+dyn([&] {
+    constexpr std::array frames = {"top", "upper-right", "lower-right", "lower-left"};
+    return text(frames[(tick / 100) % frames.size()]);
+}) | Fg<140, 220, 255>
+\end{lstlisting}
+
+The lambda picks a frame from the array based on the current tick
+count. Combine with \code{Sub<Msg>::on\_animation\_frame(Tick\{\})}
+from Chapter~\ref{ch:elm} for a 60\,Hz spinner.
+
+\subsection{A right-aligned status bar}
+
+\begin{lstlisting}
+auto status_bar = h(
+    text(left_text),
+    space,                          // SpacerNode: grows to fill
+    text(right_text) | Dim
+);
+\end{lstlisting}
+
+\code{space} is the spacer node: a zero-content box with
+\code{grow=1}. Between two non-growing siblings it stretches to
+push them to opposite ends of the row.
+
+\section{Why all of this, again?}
+\label{sec:dsl:why-again}
+
+At the end of a long chapter on templates, fold expressions, and
+type-state machines, it is worth stepping back. What did all that
+machinery buy us?
+
+At build time:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{No allocation for the tree shape.} The structure of
+    your UI lives in types; only the leaf values (runtime strings,
+    runtime children) allocate.
+  \item \textbf{Errors are catch-able before the program runs.}
+    Border colour without border, negative padding, wrong child
+    type, hex overflow --- all rejected by the compiler.
+  \item \textbf{The DSL composes with the host language.} Helper
+    functions, lambdas, ranges --- all work without special
+    integration.
+\end{itemize}
+
+At runtime:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{\code{.build()} is one linear walk}, specialised by
+    the compiler per distinct configuration. No virtual dispatch.
+  \item \textbf{The runtime side is simple.} It receives a plain
+    tree of \code{Element} values and lays it out; it does not
+    care that the tree was generated by a compile-time DSL.
+\end{itemize}
+
+For build time. For correctness. For speed. Three things at once,
+because we paid the cost in the DSL design.
+
+\begin{idea}
+The \maya{} DSL is what you get when you take ``the compiler should
+catch this'' seriously and follow it all the way down. Strings,
+styles, sizes, structure: in the types. Mistakes: caught at build.
+Runtime: cheap and uniform. The trade is some up-front complexity in
+the DSL itself; the payoff is every \maya{} program you ever write.
+\end{idea}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a panel that shows your name in bold, an underlined
+    tagline, and a divided list of three hobbies. Use only the
+    compile-time pipes.
+  \item Add a runtime counter (an \code{int} variable) with
+    \code{dyn}. Increment it in a loop with
+    \code{maya::live(...)} (covered in Chapter~\ref{ch:cmdsub}) and
+    watch the panel refresh.
+  \item Try \code{bcol<60, 65, 80>} on a box without a border. Read
+    the compiler error. Find the line that says \code{constraints
+    not satisfied} and the \code{Cfg.has\_border} that triggered it.
+\end{enumerate}
