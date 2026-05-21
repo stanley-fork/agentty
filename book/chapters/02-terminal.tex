@@ -1,0 +1,720 @@
+\chapter{The terminal, byte by byte}
+\label{ch:terminal}
+
+Chapter~\ref{ch:intro} described a terminal in plain words. This
+chapter looks underneath. We will see exactly what bytes travel
+between your program and the terminal emulator, what those bytes mean,
+and why the protocol is the way it is. By the end you will be able to
+read raw terminal output, write ``Hello'' in red without any library,
+and trust your mental model of what \maya{} is doing one floor below
+the API.
+
+There is nothing magical here. The terminal is one of the simplest
+abstract machines in computing. It has a small alphabet and a small
+list of rules; we will learn both.
+
+\section{Three things called ``terminal''}
+
+The word \emph{terminal} is overloaded. Pinning down which one we mean
+is half the battle. There are three distinct things, often confused.
+
+\paragraph{The hardware terminal.}
+A physical device with a keyboard and a screen that connected to a
+mainframe over a serial cable. Digital Equipment Corporation's
+\textbf{VT100} (released 1978) is the famous one. Nobody owns one
+today, but the byte protocol it spoke survives essentially unchanged
+on every modern system. When we say a modern emulator ``speaks
+ANSI'', we mean it speaks VT100's grandchildren.
+
+\paragraph{The terminal emulator.}
+A program on your machine --- iTerm2, kitty, Alacritty, GNOME
+Terminal, Konsole, Windows Terminal, xterm --- that pretends to be a
+VT100 (or a richer descendant). It owns a window on your desktop,
+draws characters into it, and forwards your keystrokes to whatever
+program is running ``inside'' it.
+
+\paragraph{The pseudo-terminal, or \emph{pty}.}
+A pair of file descriptors in the operating-system kernel that hooks
+the emulator up to the program. We will look at it in a moment. The
+pty is the part most people never hear named, and yet it is the part
+doing the actual work of being a terminal.
+
+When this book says ``\maya{} writes ANSI to the terminal'', it means:
+\maya{} calls the operating-system primitive \code{write} on the file
+descriptor numbered $1$ (called \code{stdout}); the bytes flow through
+the pty; the emulator on the other end reads them and updates the
+window.
+
+\subsection{What is a file descriptor?}
+
+If you have not run into the word before: in Unix, every open ``thing
+you can read from or write to'' is named by a small integer called a
+\textbf{file descriptor}. Three are conventional:
+
+\begin{center}
+\small
+\begin{tabular}{rl}
+\textbf{0} & \code{stdin}  -- bytes the program reads as input. \\
+\textbf{1} & \code{stdout} -- bytes the program writes as ordinary output. \\
+\textbf{2} & \code{stderr} -- bytes the program writes as error output. \\
+\end{tabular}
+\end{center}
+
+When you run a program inside a terminal, all three are wired to the
+pty. When you write \code{ls > out.txt}, the shell rewires the
+program's file descriptor $1$ to a freshly opened file before starting
+it. The program is none the wiser: it calls \code{write(1, ...)} as
+always, and bytes happen to land in a file. This is the famous Unix
+``everything is a file'' design, and it is what makes terminal
+programs so flexible.
+
+\section{The pseudo-terminal: a kitchen-pass-through}
+
+A useful mental model for the pty: imagine a kitchen with a
+pass-through window. The cook (your program) puts plates of bytes on
+the counter; the server (the terminal emulator) picks them up and
+delivers them to the diner (the window on your screen). When the
+diner says something to the server, the server sets a slip of paper
+(keystrokes) on the counter for the cook to pick up. The cook and the
+server never see each other; they only exchange bytes via the
+counter.
+
+In reality the ``counter'' is a chunk of kernel memory --- a buffer
+with two ends. The cook (your program) sees one end as a normal file:
+\code{write} to send bytes into it, \code{read} to take bytes out of
+it. The server (the emulator) sees the other end the same way. The
+kernel shuffles bytes between the two ends, with a few useful
+behaviours layered on (input modes, signal handling --- we will get to
+those).
+
+\begin{center}
+\small
+\begin{verbatim}
+   +----------+        write(1)         +-----+      read     +----------+
+   | program  | ----------------------> |     | ------------> | emulator |
+   |          | <---------------------- | pty | <------------ |          |
+   +----------+        read(0)          +-----+      write    +----------+
+\end{verbatim}
+\end{center}
+
+This picture is enough for the rest of the chapter. We do not need to
+look at the implementation of the pty itself.
+
+\begin{idea}
+The pty is a two-way byte pipe between your program and the terminal
+emulator. \code{stdout} goes \emph{to} the emulator; \code{stdin}
+comes \emph{from} it.
+\end{idea}
+
+\section{The byte language: ASCII plus ANSI}
+
+Now the central question: what bytes does the program send, and what
+do they do?
+
+\subsection{Ordinary bytes: ASCII}
+
+Most bytes you write are interpreted literally. The byte \code{0x48}
+is the letter \code{H}; \code{0x69} is \code{i}; writing the two-byte
+sequence \code{0x48 0x69} prints \code{Hi}. This mapping is
+\textbf{ASCII}, a standard from 1963 covering the bytes from $0$ to
+$127$. Every English letter, every digit, every common punctuation
+mark has a fixed ASCII byte.
+
+Characters outside ASCII (accented letters, CJK, emoji) are sent as
+\textbf{UTF-8} sequences of two-to-four bytes per character. Modern
+terminals all understand UTF-8; \maya{} produces UTF-8 throughout. We
+will return to the question of \emph{cell width} for non-ASCII
+characters in the canvas chapter.
+
+\subsection{Control bytes}
+
+A handful of bytes in the range $0$--$31$ have \emph{control}
+meanings: they do not print a glyph, they tell the terminal to do
+something. The interesting ones:
+
+\begin{center}
+\small
+\begin{tabular}{rll}
+\textbf{Byte (hex)} & \textbf{Name} & \textbf{Effect} \\
+\hline
+\code{0x07} & BEL & beep / bell \\
+\code{0x08} & BS  & backspace --- cursor left one cell \\
+\code{0x09} & HT  & horizontal tab --- advance to next tab stop \\
+\code{0x0A} & LF  & line feed --- cursor down one row \\
+\code{0x0D} & CR  & carriage return --- cursor to column $1$ \\
+\code{0x1B} & ESC & escape --- start of an escape sequence \\
+\code{0x7F} & DEL & delete --- treated as backspace on input \\
+\end{tabular}
+\end{center}
+
+You have met most of these. \code{LF} is the newline. \code{CR} is
+why old-school progress bars work --- print \code{CR}, then a fresh
+line of text, and you overwrite the previous one in place.
+
+The interesting byte is \code{ESC}, hex \code{0x1B}, decimal $27$. It
+is the door into the ANSI escape sequence language.
+
+\subsection{Anatomy of an escape sequence}
+
+An ANSI escape sequence has a strict shape:
+
+\begin{center}
+\small
+\begin{tabular}{l}
+\code{ESC} \, \code{[} \, \emph{parameters} \, \emph{final-byte} \\
+\end{tabular}
+\end{center}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ESC} is the single byte \code{0x1B}.
+  \item \code{[} is the literal ASCII byte \code{0x5B}. Together,
+    \code{ESC [} (two bytes) form the \textbf{Control Sequence
+    Introducer}, abbreviated \textbf{CSI}.
+  \item \emph{parameters} is a list of decimal numbers separated by
+    semicolons. Each number is written as its ASCII digits ---
+    so the number $31$ is two bytes, \code{0x33 0x31}, not the binary
+    value $31$.
+  \item \emph{final-byte} is a single ASCII letter that says which
+    command this sequence is. The letter chooses which family the
+    command belongs to.
+\end{itemize}
+
+Here is a complete example, byte by byte. Suppose we want to apply
+the colour ``bold red'':
+
+\begin{terminalbox}
+ESC  [   1   ;   3   1   m
+0x1b 0x5b 0x31 0x3b 0x33 0x31 0x6d
+\end{terminalbox}
+
+Seven bytes. The first two are CSI. \code{1 ; 3 1} is the parameter
+list ``$1$, $31$''. The final byte \code{m} says ``this is an
+\textbf{SGR} command --- Select Graphic Rendition''. Parameter $1$
+within SGR means ``bold''; $31$ means ``red foreground''. The terminal
+emulator parses the seven bytes, updates its internal style for
+\emph{future} text, and waits. The next ordinary bytes you send are
+drawn bold and red.
+
+If we now write \code{Hi}, then send \code{ESC [ 0 m} to reset, the
+full transcript is:
+
+\begin{terminalbox}
+\textbackslash x1b[1;31mHi\textbackslash x1b[0m
+\end{terminalbox}
+
+This is what \maya{} ultimately produces. Every layer of the library
+exists to spare you from writing those bytes by hand.
+
+\begin{idea}
+An escape sequence is \code{ESC [}, then a few numbers with
+semicolons, then one letter. The letter picks the family; the numbers
+parameterise it.
+\end{idea}
+
+\subsection{The families}
+
+The final byte categorises the command. The families you will see in
+\maya{}'s output, in rough order of frequency:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\textbf{Family} & \textbf{Final byte} & \textbf{Purpose} \\
+\hline
+SGR             & \code{m} & graphic rendition: colour, bold, italic, etc. \\
+CUP             & \code{H} or \code{f} & move cursor to (row, column) \\
+CUU / CUD       & \code{A} / \code{B} & cursor up / down by $n$ \\
+CUF / CUB       & \code{C} / \code{D} & cursor forward / back by $n$ \\
+CHA             & \code{G} & cursor to absolute column \\
+ED              & \code{J} & erase part of the display \\
+EL              & \code{K} & erase part of the line \\
+DECSET / DECRST & \code{h} / \code{l} & set / reset private modes (with \code{?}) \\
+\end{tabular}
+\end{center}
+
+Three additional things to know.
+
+\paragraph{ANSI columns and rows are 1-based.}
+\code{ESC [ 5 ; 12 H} moves the cursor to row $5$, column $12$, where
+the top-left cell of the screen is $(1, 1)$, \emph{not} $(0, 0)$. This
+is a constant source of off-by-one bugs; \maya{} converts to/from
+$0$-based internally and \code{move\_to}'s signature is documented as
+1-based at the boundary.
+
+\paragraph{Private modes use \code{?}.}
+DEC's extensions to ANSI use a question mark inside the parameter list
+to distinguish ``private'' parameters that only DEC-style terminals
+understand. \code{ESC [ ? 25 h} (show cursor) and
+\code{ESC [ ? 1049 h} (enter alternate screen) are private; the plain
+SGR \code{ESC [ 1 m} is not.
+
+\paragraph{Numbers default to $1$.}
+If you write \code{ESC [ A} (just the family with no parameter), the
+parameter is implicitly $1$ --- ``cursor up one row''. Most families
+follow this convention; \maya{} explicitly emits the number anyway,
+because being explicit avoids surprises across emulators.
+
+\subsection{SGR: colours and attributes}
+
+SGR is the family you will see most. It composes: \code{ESC [ 1 ; 31
+; 4 m} applies bold, red, and underline together. Then ordinary text
+is drawn with all three until another SGR command changes them.
+
+The parameters you will care about:
+
+\begin{lstlisting}
+ESC [ 0 m              // reset every attribute
+ESC [ 1 m              // bold
+ESC [ 2 m              // dim
+ESC [ 3 m              // italic
+ESC [ 4 m              // underline
+ESC [ 7 m              // inverse (swap fg / bg)
+ESC [ 9 m              // strikethrough
+
+ESC [ 22 m             // bold + dim off
+ESC [ 23 m             // italic off
+ESC [ 24 m             // underline off
+ESC [ 27 m             // inverse off
+ESC [ 29 m             // strikethrough off
+
+ESC [ 30..37 m         // 3-bit foreground (black..white)
+ESC [ 40..47 m         // 3-bit background
+ESC [ 90..97 m         // bright fg
+ESC [ 100..107 m       // bright bg
+ESC [ 39 m             // default fg
+ESC [ 49 m             // default bg
+
+ESC [ 38 ; 5 ; N m     // 256-colour fg, palette index N
+ESC [ 38 ; 2 ; R ; G ; B m   // 24-bit truecolour fg
+ESC [ 48 ; 2 ; R ; G ; B m   // 24-bit truecolour bg
+\end{lstlisting}
+
+Modern terminals all support truecolour (24 bits = 16,777,216 colours).
+\maya{}'s \code{Fg<R, G, B>} compiles to exactly \code{ESC [ 38 ; 2 ;
+R ; G ; B m}. If you read \file{maya/include/maya/terminal/ansi.hpp}
+you will find these as \code{constexpr std::string\_view} constants:
+
+\begin{lstlisting}
+inline constexpr std::string_view bold      = "\x1b[1m";
+inline constexpr std::string_view italic    = "\x1b[3m";
+inline constexpr std::string_view underline = "\x1b[4m";
+inline constexpr std::string_view reset     = "\x1b[0m";
+\end{lstlisting}
+
+\code{constexpr} means the string literally lives in the binary; no
+allocation, no construction at startup. We will explain
+\code{string\_view} and \code{constexpr} properly in
+Chapter~\ref{ch:cpp}.
+
+\subsection{Cursor movement and erasing}
+
+A short worked example: print ``A'' at row $3$, column $5$, then
+``B'' at row $3$, column $20$:
+
+\begin{terminalbox}
+ESC [ 3 ; 5 H A ESC [ 3 ; 20 H B
+\end{terminalbox}
+
+Two CUP sequences sandwich the printable letters. Each is six bytes
+(seven, with the two-digit column): the cost of cursor positioning is
+exactly the length of the decimal numbers plus four (\code{ESC},
+\code{[}, \code{;}, \code{H}). This is why diff-based rendering is so
+effective: most cursor moves are tiny.
+
+For erasing, the three useful ED forms:
+
+\begin{lstlisting}
+ESC [ 0 J     // erase from cursor to end of screen
+ESC [ 1 J     // erase from start of screen to cursor
+ESC [ 2 J     // erase entire screen
+\end{lstlisting}
+
+And EL, line-erasing:
+
+\begin{lstlisting}
+ESC [ 0 K     // erase from cursor to end of line
+ESC [ 1 K     // erase from start of line to cursor
+ESC [ 2 K     // erase entire line
+\end{lstlisting}
+
+The cursor itself does not move when you erase --- the cells under the
+cursor change to blank but the position stays. If you want the
+classic \emph{clear-screen-and-home} effect, you send both:
+\code{ESC [ 2 J ESC [ H} (the \code{H} with no parameters means ``move
+to row $1$, column $1$'').
+
+\begin{warning}
+Erasing does not reset the colour. A cell ``erased'' to blank keeps
+its background colour. If you erased after setting a red background,
+you get a red rectangle. To truly blank the screen to the default,
+send \code{ESC [ 0 m} (reset colours) \emph{before} erasing.
+\end{warning}
+
+\subsection{Modes: cursor, alt-screen, mouse, paste}
+
+A different style of command toggles \emph{modes}: terminal-wide flags
+the emulator carries between sequences. These use the DEC private form
+with a \code{?}:
+
+\begin{lstlisting}
+ESC [ ? 25 l           // hide the cursor
+ESC [ ? 25 h           // show the cursor
+ESC [ ? 1049 h         // enter alternate screen
+ESC [ ? 1049 l         // leave alternate screen
+ESC [ ? 1000 h         // mouse press/release events
+ESC [ ? 1002 h         // mouse + drag motion events
+ESC [ ? 1006 h         // SGR-encoded mouse coordinates (no 223-col limit)
+ESC [ ? 2004 h         // bracketed paste (paste arrives wrapped)
+ESC [ ? 2026 h         // begin synchronised update
+ESC [ ? 2026 l         // end synchronised update
+\end{lstlisting}
+
+A few of these deserve names of their own.
+
+\paragraph{The alternate screen.}
+When you run \code{vim} or \code{less}, you notice that quitting
+restores whatever you had on screen \emph{before} the editor started
+--- the editor's contents do not pollute your scrollback. This is the
+alternate screen. The emulator keeps two screen buffers; \code{?1049
+h} switches to the secondary one (saving the primary), \code{?1049 l}
+switches back. \maya{} programs in fullscreen mode emit the enter
+sequence at startup and the leave sequence at exit, which is why they
+behave the same way.
+
+\paragraph{Bracketed paste.}
+When the user pastes a chunk of text, the emulator wraps it with the
+sentinels \code{ESC [ 200 \~{}} (before) and \code{ESC [ 201 \~{}}
+(after). Without this, a pasted multi-line block looks identical to
+the user typing very fast, and a TUI editor cannot tell the
+difference. With it, the editor sees: ``a paste begins, here are the
+bytes, the paste ends'' --- and can treat the whole block atomically
+(no auto-indent per line, for example). \maya{} surfaces this as a
+\code{Paste} variant of its \code{Event} type.
+
+\paragraph{Synchronised update.}
+A new and very useful mode. When \code{?2026 h} is sent, the terminal
+buffers all output until \code{?2026 l}. The frame is then drawn
+atomically --- no tearing, no half-painted UI even on a slow connection.
+Modern terminals (kitty, WezTerm, foot, Ghostty, recent xterm)
+support this; older ones ignore the sequence harmlessly. \maya{}'s
+\code{env\_supports\_synchronized\_output} in
+\file{terminal/ansi.hpp} detects this from environment variables and
+decides whether to wrap each frame in sync brackets.
+
+\subsection{Encoding non-ASCII keys: the Kitty Keyboard Protocol}
+
+Plain ANSI cannot tell \code{Ctrl+M} from \code{Enter} (both arrive as
+byte $0x0D$), or \code{Shift+Tab} from a regular escape sequence. This
+has been a chronic source of bugs in TUI editors for thirty years.
+The \textbf{Kitty Keyboard Protocol} (KKP) and the older
+\code{modifyOtherKeys=2} extension fix this by sending fully
+disambiguated key reports.
+
+\maya{} opts in on startup with two sequences:
+
+\begin{lstlisting}
+ESC [ > 1 u            // push KKP flag 1 ("disambiguate")
+ESC [ > 4 ; 2 m        // xterm modifyOtherKeys=2
+\end{lstlisting}
+
+and opts out on exit with \code{ESC [ < u} and \code{ESC [ > 4 m}.
+Terminals that do not understand the sequences ignore them silently;
+the worst case is the older behaviour. We discuss the input side
+of this in Chapter~\ref{ch:events}.
+
+\section{Cooked mode, raw mode, and \code{termios}}
+
+Now we turn from output to input. In a normal shell, what happens
+when you type a line of text?
+
+The kernel sits between your keyboard and any program reading
+\code{stdin}. By default it is in \textbf{canonical} (cooked) mode:
+
+\begin{itemize}[leftmargin=*]
+  \item Keystrokes are buffered until you press \code{Enter}, then
+    delivered as a whole line.
+  \item Backspace edits the buffer in place (the program never sees
+    the deletion).
+  \item \code{Ctrl-C} is intercepted and sent as a \emph{signal}
+    (\code{SIGINT}) rather than as data.
+  \item \code{Ctrl-D} on an empty line is interpreted as
+    end-of-input.
+  \item Each typed character is also \emph{echoed} back to the
+    screen automatically.
+\end{itemize}
+
+This is exactly the behaviour you want at a shell prompt. It is
+exactly the wrong behaviour for a TUI. A TUI wants every keystroke
+delivered immediately, byte for byte, with no automatic echo and no
+special handling of control characters.
+
+The opposite mode is \textbf{raw mode}, configured via the
+\code{termios} structure --- a C \code{struct} the kernel exposes
+through \code{tcgetattr} and \code{tcsetattr}.
+
+\subsection{The \code{termios} struct}
+
+\code{termios} has four flag fields plus a small array of special
+characters. Each flag field is a bitmask: bits enabled mean different
+behaviours active.
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\textbf{Field} & \textbf{Meaning} \\
+\hline
+\code{c\_iflag} & input-processing flags \\
+\code{c\_oflag} & output-processing flags \\
+\code{c\_cflag} & control flags (baud rate, parity --- mostly serial relics) \\
+\code{c\_lflag} & local flags (canonical mode, echo, signals) \\
+\code{c\_cc[]}  & special characters (which byte is INTR? EOF? \dots) \\
+\end{tabular}
+\end{center}
+
+To enter raw mode, you turn off a specific list of bits:
+
+\begin{lstlisting}[language=C]
+#include <termios.h>
+#include <unistd.h>
+
+termios cooked, raw;
+tcgetattr(STDIN_FILENO, &cooked);   // save the current settings
+raw = cooked;                       // copy, mutate the copy
+
+raw.c_lflag &= ~(ICANON | ECHO | ISIG | IEXTEN);
+raw.c_iflag &= ~(IXON | ICRNL | INPCK | ISTRIP);
+raw.c_oflag &= ~(OPOST);
+raw.c_cc[VMIN]  = 0;     // non-blocking reads
+raw.c_cc[VTIME] = 0;
+tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+
+// ... TUI runs here ...
+
+tcsetattr(STDIN_FILENO, TCSAFLUSH, &cooked);   // restore
+\end{lstlisting}
+
+The bits, decoded:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ICANON} --- canonical mode (line buffering). Off means
+    every keystroke comes through immediately.
+  \item \code{ECHO} --- echo input. Off means typed characters do not
+    appear on screen automatically; the program decides.
+  \item \code{ISIG} --- signal generation on \code{Ctrl-C} /
+    \code{Ctrl-Z}. Off means those become normal bytes ($0x03$,
+    $0x1A$).
+  \item \code{IEXTEN} --- implementation-defined extensions
+    (\code{Ctrl-V} as ``literal next'', etc.). Off, just to be
+    safe.
+  \item \code{IXON} --- flow control (\code{Ctrl-S} freezes the
+    terminal, \code{Ctrl-Q} unfreezes). Off; you want those bytes
+    yourself.
+  \item \code{ICRNL} --- translate \code{CR} ($0x0D$) into \code{LF}
+    ($0x0A$) on input. Off, so you see exactly what was typed.
+  \item \code{INPCK}, \code{ISTRIP} --- parity checking and 7-bit
+    stripping. Both relics from serial-line days.
+  \item \code{OPOST} --- output processing, mostly translating
+    \code{LF} into \code{CR LF}. Off, because you will be writing
+    full escape sequences yourself.
+  \item \code{VMIN} = 0, \code{VTIME} = 0 --- ``return from
+    \code{read} immediately if there is no input''. The TUI loop
+    polls; it does not block.
+\end{itemize}
+
+\begin{warning}
+You must restore \code{cooked} on exit. If the program crashes before
+restoring, the user's shell will appear broken --- typed characters
+will not echo, \code{Enter} will not commit, \code{Ctrl-C} will not
+work. The remedy is the magic command \code{stty sane}, which resets
+\code{termios} to sensible defaults. \maya{} uses a RAII guard (see
+Chapter~\ref{ch:cpp}) so the destructor restores cooked mode even on
+exceptions.
+\end{warning}
+
+\subsection{What keystrokes look like in raw mode}
+
+In raw mode, a single keypress arrives as one or more bytes.
+
+\begin{itemize}[leftmargin=*]
+  \item Printable keys: one byte, their ASCII value. \code{a} arrives
+    as $0x61$.
+  \item Control keys: \code{Ctrl-A} is $0x01$, \code{Ctrl-B} is
+    $0x02$, \dots, \code{Ctrl-Z} is $0x1A$. (The pattern: clear the
+    top three bits of the letter.)
+  \item \code{Enter}: $0x0D$ ($CR$).
+  \item \code{Tab}: $0x09$ ($HT$).
+  \item \code{Backspace}: $0x7F$ ($DEL$).
+  \item \code{Escape}: $0x1B$. By itself \emph{or} as the start of a
+    sequence.
+  \item Function and arrow keys: an escape sequence. \code{Up}
+    arrives as the three bytes \code{ESC [ A}; \code{Down} as
+    \code{ESC [ B}; \code{Right} \code{ESC [ C}; \code{Left}
+    \code{ESC [ D}.
+  \item \code{Alt-}\emph{x}: the bytes \code{ESC} then \emph{x}.
+\end{itemize}
+
+The clash is obvious: \code{ESC} alone is a real keypress (some
+people bind it), but \code{ESC} is \emph{also} the first byte of every
+arrow-key sequence. The standard trick is to read \code{ESC},
+\emph{wait a few milliseconds}, and if no more bytes arrive, treat it
+as a bare \code{Escape}. If they do, parse the sequence. \maya{}'s
+input parser (\file{src/terminal/input.cpp}) implements exactly this;
+the timeout is around 50 ms by default.
+
+\section{The screen as a grid}
+
+We have looked at bytes; now look at what those bytes update.
+
+The emulator maintains, in its own memory, a 2-D grid of \textbf{cells}.
+Each cell holds:
+
+\begin{itemize}[leftmargin=*]
+  \item One Unicode \emph{grapheme} (for most languages, one code
+    point --- a letter or a digit; for emoji and some scripts, a
+    short cluster of code points that displays as one glyph).
+  \item A foreground colour and a background colour.
+  \item A set of attribute bits: bold, italic, underline, inverse,
+    strikethrough, dim.
+\end{itemize}
+
+The cursor has a position (row, column) and a visibility flag. A
+\textbf{frame} of UI is a complete specification of every cell that
+should be on screen.
+
+When the user resizes the window, the emulator sends the program a
+notification: on Linux/macOS, the \code{SIGWINCH} signal; on Windows,
+a console-resize event. The program re-queries the new size with
+\code{ioctl(TIOCGWINSZ)} and re-lays-out its UI. \maya{} does this
+inside the runtime; you do not need to call anything.
+
+\subsection{Wide characters}
+
+A subtle wrinkle: not every Unicode character takes \emph{one} cell.
+
+\begin{itemize}[leftmargin=*]
+  \item CJK ideographs (U+4E2D \emph{zh\=ong}, U+3042 \emph{hiragana
+    a}) take \textbf{two} cells. Their glyph is roughly square; in a
+    monospace font each one is twice as wide as a Latin letter.
+  \item Many emoji also take two cells (U+1F600 smiley face).
+  \item Combining marks --- a \code{COMBINING ACUTE ACCENT} on top
+    of an \code{e} to render \emph{\'e} --- take \textbf{zero}
+    cells; they decorate the previous cell.
+\end{itemize}
+
+If the program writes a wide character but counts it as one cell, the
+emulator and the program disagree about the cursor position after,
+and the layout drifts. The Unicode Consortium publishes
+\file{EastAsianWidth.txt} listing the width of every code point;
+\maya{} ships a generated table at
+\file{include/maya/text/unicode\_width\_table.hpp} and consults it
+when laying out text. You do not call into the table directly ---
+\maya{}'s text widget does it for you.
+
+\section{Putting it together: a no-library Hello world}
+
+We now know enough to write a complete TUI ``Hello, red world'' with
+no library at all. It is a useful exercise: you will see exactly what
+\maya{} is doing for you.
+
+\begin{lstlisting}[language=C]
+#include <stdio.h>
+#include <termios.h>
+#include <unistd.h>
+
+int main(void) {
+    termios cooked, raw;
+    tcgetattr(STDIN_FILENO, &cooked);
+    raw = cooked;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+
+    // 1. Hide the cursor
+    // 2. Clear the screen
+    // 3. Move to row 1, column 1
+    // 4. Set bold red foreground
+    // 5. Write "Hi"
+    // 6. Reset attributes
+    // 7. Show the cursor again
+    write(STDOUT_FILENO,
+          "\x1b[?25l"          // hide cursor
+          "\x1b[2J"            // erase entire screen
+          "\x1b[1;1H"          // cursor to (row 1, col 1)
+          "\x1b[1;31m"         // bold red foreground
+          "Hi"
+          "\x1b[0m"            // reset attributes
+          "\x1b[?25h",         // show cursor
+          /*len=*/ 33);
+
+    char c;
+    read(STDIN_FILENO, &c, 1);   // wait for any keypress
+
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &cooked);
+    return 0;
+}
+\end{lstlisting}
+
+Save it as \file{hello.c}, build with \code{cc hello.c -o hello}, run
+\code{./hello}. The screen clears; ``Hi'' appears in bold red at the
+top-left; press any key; the screen returns. You have just written a
+TUI by hand.
+
+This is also a faithful caricature of what \maya{} does \emph{every
+frame}. The whole library is in service of generating exactly this
+style of byte stream, only longer, more carefully diffed, and
+described to you as a tree of styled elements instead of a literal
+string.
+
+\begin{recap}
+A terminal is a state machine on the far end of a pty. Bytes flowing
+into it are mostly literal text, with a small number of control
+characters and the ANSI escape language (\code{ESC [} \emph{params}
+\emph{letter}) for everything else. Cooked mode lets the kernel
+pre-process input; raw mode hands bytes through unchanged. The screen
+is a 2-D grid of styled Unicode cells. Every layer above this in
+\maya{} speaks in \cpp{} values; this one alone speaks in bytes.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Inspect your terminal's flags.} Run \code{stty -a}
+    in a normal shell. Find the lines beginning with \code{iflag}
+    and \code{lflag}. Identify \code{icanon} and \code{echo} (with
+    or without a leading \code{-}, which means ``negated''). Those
+    are the bits a TUI clears.
+
+  \item \textbf{Identify maya's constants.} Open
+    \file{maya/include/maya/terminal/ansi.hpp} (we read it above).
+    Find:
+    \begin{itemize}[leftmargin=*]
+      \item the constant for entering the alternate screen;
+      \item the constant for enabling SGR mouse reporting (1006);
+      \item the constant for the Kitty Keyboard Protocol push.
+    \end{itemize}
+    Cross-check each one against the table earlier in this chapter.
+
+  \item \textbf{Drive a terminal by hand.} In a scratch \cpp{} file:
+    \begin{lstlisting}
+#include <cstdio>
+#include <unistd.h>
+int main() {
+    std::fputs("\x1b[?1049h", stdout);     // enter alt-screen
+    std::fputs("\x1b[1;1HHello", stdout);  // print at top-left
+    sleep(2);
+    std::fputs("\x1b[?1049l", stdout);     // leave alt-screen
+}
+    \end{lstlisting}
+    Build and run. Observe that your shell is exactly as you left it
+    afterwards.
+
+  \item \textbf{Type the no-library example.} Compile and run the C
+    program in this chapter. Then mutate it: change \code{31}
+    (red) to \code{32} (green), \code{1} (bold) to \code{4}
+    (underline). Each change is one digit.
+
+  \item \textbf{Provoke a raw-mode mistake.} Comment out the final
+    \code{tcsetattr} that restores cooked mode. Recompile and run.
+    Your shell will behave strangely after. Recover by typing
+    \code{stty sane}, then \code{Enter} (you may need to type
+    blind). You now appreciate the RAII guard.
+\end{enumerate}

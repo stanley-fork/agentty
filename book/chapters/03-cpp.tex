@@ -1,0 +1,1218 @@
+\chapter{Modern \cpp{} for \maya{}}
+\label{ch:cpp}
+
+This chapter is a self-contained course in the slice of \cpp{} that
+\maya{} uses. It assumes no \cpp{} background. If you have written
+\cpp{}11 or \cpp{}14 it will still be useful, because \maya{} leans
+on features that arrived in \cpp{}20, \cpp{}23, and \cpp{}26; some of
+the patterns will be new even to experienced \cpp{} programmers.
+
+Read it linearly the first time. The sections build on each other:
+later ones (templates, concepts, variants) lean on earlier ones
+(values, references, classes). When you finish, you will be able to
+read every line of \maya{} source code.
+
+\section{What a \cpp{} program is}
+\label{sec:cpp:program}
+
+A \cpp{} program is one or more \textbf{source files} compiled
+together into an \textbf{executable}. The smallest possible one fits
+on one line, although by convention we spread it out:
+
+\begin{lstlisting}
+#include <print>
+
+int main() {
+    std::println("Hello, world");
+}
+\end{lstlisting}
+
+Four things are happening, and each deserves a paragraph.
+
+\paragraph{The preprocessor runs first.}
+Before the compiler proper looks at your code, a small program called
+the \textbf{preprocessor} does textual substitution. Lines beginning
+with \code{\#} are its instructions. \code{\#include <print>}
+literally means ``find the file named \file{print} in the standard
+library's directories and paste its contents here''. After the
+preprocessor finishes, your source file has grown to several
+thousand lines, all the standard-library declarations now visible.
+
+\paragraph{The compiler reads what is left.}
+The expanded text is parsed, type-checked, and translated into
+\textbf{object code} --- machine instructions in a not-yet-runnable
+format. Each source file becomes one \emph{object file}, also called
+a \textbf{translation unit}. A small project has one; \maya{} has
+several hundred.
+
+\paragraph{The linker stitches object files together.}
+The \textbf{linker} takes all object files plus any libraries you
+depend on and produces a single executable. Its main job is
+resolving \textbf{symbols}: when one file uses a function defined in
+another file, the linker matches the use to the definition.
+
+\paragraph{The operating system runs the result.}
+When you type \code{./hello}, the OS loads the executable into
+memory and jumps to a specific named function: \code{main}. The
+integer \code{main} returns is the process's \emph{exit status}
+(zero = success). The whole program ends when \code{main} returns.
+
+\begin{idea}
+The preprocessor pastes text. The compiler turns text into object
+files. The linker joins object files into an executable. The OS runs
+the executable from \code{main}.
+\end{idea}
+
+\subsection{Headers, source files, and the one-definition rule}
+
+A \textbf{header file} (suffix \file{.hpp} or \file{.h}) is a file
+you \code{\#include} into other files. It typically contains
+\emph{declarations} --- statements about what exists, but not how it
+works. A \textbf{source file} (suffix \file{.cpp}) typically contains
+\emph{definitions} --- the actual function bodies and data.
+
+\begin{lstlisting}
+// math.hpp --- declaration
+int add(int a, int b);
+\end{lstlisting}
+
+\begin{lstlisting}
+// math.cpp --- definition
+#include "math.hpp"
+int add(int a, int b) { return a + b; }
+\end{lstlisting}
+
+\begin{lstlisting}
+// main.cpp --- user
+#include "math.hpp"
+int main() { return add(2, 3); }
+\end{lstlisting}
+
+Every use of \code{add} in any source file sees the same declaration
+(from \file{math.hpp}), and there is exactly one definition in the
+whole program (in \file{math.cpp}). That is the \textbf{One Definition
+Rule}, ODR: every entity must have exactly one definition across all
+translation units linked together.
+
+\maya{} is a \emph{header-mostly} library. Almost all its code lives
+in headers, with most functions and classes defined \code{inline} or
+as templates. This is unusual and has trade-offs (compile times can
+be long), but it lets the compiler aggressively inline and constant-
+fold across the library boundary. We discuss the trade-off in
+Chapter~\ref{ch:build}.
+
+\subsection{\code{\#pragma once} and include guards}
+
+If two headers include the same third header, the preprocessor would
+paste it twice, producing duplicate declarations. The traditional
+fix is an \textbf{include guard}:
+
+\begin{lstlisting}
+// math.hpp
+#ifndef MATH_HPP
+#define MATH_HPP
+int add(int a, int b);
+#endif
+\end{lstlisting}
+
+The second inclusion finds \code{MATH\_HPP} already defined and skips
+the contents. Modern code uses the shorter and equivalent:
+
+\begin{lstlisting}
+// math.hpp
+#pragma once
+int add(int a, int b);
+\end{lstlisting}
+
+Every file in \maya{} starts with \code{\#pragma once}.
+
+\section{Values, references, pointers, \code{const}}
+\label{sec:cpp:memory}
+
+\cpp{} forces you to be precise about \emph{where} a piece of data
+lives and \emph{who can change it}. This precision is what makes
+\cpp{} fast and what makes beginners stumble. We will walk it slowly.
+
+\subsection{Values}
+
+A \textbf{value} is just data: \code{int x = 42;} creates a variable
+\code{x} of type \code{int} holding the value $42$. The variable
+owns its storage. When \code{x} goes out of scope (the block ends),
+the storage is gone.
+
+\begin{lstlisting}
+int x = 42;          // x owns 4 bytes holding 42
+int y = x;           // y owns its own 4 bytes, copy of x
+y = 100;             // x is still 42
+\end{lstlisting}
+
+This is the \textbf{value semantics} model: every assignment is a
+copy, every variable is its own thing. The same applies to classes:
+
+\begin{lstlisting}
+std::string a = "hello";
+std::string b = a;   // b is its own string, copy of a\'s characters
+b += " world";
+// a == "hello", b == "hello world"
+\end{lstlisting}
+
+For a \code{std::string} this is a real copy of every character.
+That sounds wasteful and sometimes is; we will see \code{std::move}
+shortly as the way to opt out of copies when you no longer need the
+original.
+
+\subsection{References}
+
+A \textbf{reference} is an alias for an existing value. It is \emph{not}
+a separate variable; it is another name for the same storage.
+
+\begin{lstlisting}
+int x = 42;
+int& r = x;        // r is an alias for x
+r = 100;
+// x is now 100
+\end{lstlisting}
+
+References must be bound when created and cannot be re-seated.
+\code{int\& r;} alone is not legal --- a reference always names
+something.
+
+References are the standard way to pass large values into a function
+without copying:
+
+\begin{lstlisting}
+void print_long(const std::string& s) {
+    std::println("{}", s);     // s is the caller\'s string
+}                                  // no copy, no destruction
+\end{lstlisting}
+
+The \code{const} qualifier on a reference promises ``I will not
+modify the thing you let me look at''. \code{const T\&} is the
+idiomatic way to receive read-only inputs of any non-trivial type.
+
+\subsection{Pointers}
+
+A \textbf{pointer} is a value that holds an address --- the location
+of another value in memory. The syntax \code{T*} means ``pointer to a
+\code{T}''. You dereference with \code{*}.
+
+\begin{lstlisting}
+int x = 42;
+int* p = &x;         // p holds the address of x
+*p = 100;            // write through the pointer
+// x is now 100
+\end{lstlisting}
+
+Unlike references, pointers \emph{can} be re-seated, can be null
+(\code{nullptr}), and can point at nothing meaningful (a real source
+of bugs). \maya{} avoids raw pointers in user-facing APIs.
+Internally, it uses them for things that genuinely model ``maybe
+points to something'': linked lists, lookup tables, parent links
+in a tree.
+
+When you do see a pointer in \maya{}, prefer the modern alternatives:
+\code{std::unique\_ptr<T>} (single owner, automatically destroyed),
+\code{std::shared\_ptr<T>} (reference-counted shared owner),
+\code{std::optional<T>} (a value that may or may not be present, no
+heap allocation), \code{std::span<T>} (a non-owning view of a
+contiguous range), \code{std::string\_view} (the same for character
+data).
+
+\subsection{\code{const} on values and references}
+
+A \code{const} variable cannot be reassigned:
+
+\begin{lstlisting}
+const int n = 5;
+// n = 10;          // error: cannot assign to const
+\end{lstlisting}
+
+A \code{const} reference promises read-only access:
+
+\begin{lstlisting}
+void f(const std::string& s) {
+    // s.push_back('!');  // error: s is const here
+    std::println("{}", s);
+}
+\end{lstlisting}
+
+A \code{const} method on a class promises not to modify the object:
+
+\begin{lstlisting}
+struct Counter {
+    int n = 0;
+    int get() const { return n; }   // const method, ok to call on const objects
+    void inc()       { ++n; }
+};
+
+const Counter c;
+c.get();           // ok
+// c.inc();        // error: cannot call non-const method on const object
+\end{lstlisting}
+
+\code{const}-correctness is a deceptively powerful discipline: it
+lets the compiler check at compile time that your read-only paths
+really are read-only.
+
+\begin{recap}
+A value owns its storage. A reference is an alias; a pointer holds
+an address. \code{const} marks read-only at every level: variable,
+reference, method.
+\end{recap}
+
+\section{Functions, overloads, default arguments}
+\label{sec:cpp:functions}
+
+A function takes inputs, may return an output, and may have side
+effects:
+
+\begin{lstlisting}
+int square(int n) { return n * n; }
+void greet(std::string_view name) {
+    std::println("hi, {}", name);
+}
+\end{lstlisting}
+
+The return type goes first, then the name, then the parameters in
+parentheses. \code{void} means ``returns nothing''.
+
+\subsection{Parameter passing}
+
+A parameter declared by value (\code{int n}) is a fresh copy. A
+parameter declared by reference (\code{const T\&}) shares storage
+with the caller's value. The rule of thumb:
+
+\begin{itemize}[leftmargin=*]
+  \item Trivial small types (\code{int}, \code{double},
+    \code{std::string\_view}, \code{std::span<T>}) --- by value.
+    Copying is cheap.
+  \item Larger types you only read --- by \code{const} reference.
+    No copy.
+  \item Types you intend to modify in place --- by non-\code{const}
+    reference. The caller sees the change.
+  \item Types you want to take ownership of --- by value (and let
+    the caller \code{std::move} into the call).
+\end{itemize}
+
+\subsection{Overloading}
+
+Multiple functions can share a name if their parameter lists differ.
+This is \textbf{overloading}:
+
+\begin{lstlisting}
+void log(int n);
+void log(double d);
+void log(std::string_view s);
+
+log(42);          // calls log(int)
+log(3.14);        // calls log(double)
+log("hello");     // calls log(string_view)
+\end{lstlisting}
+
+The compiler picks the best match. If two are equally good, you get
+a compile error and you spell out the choice.
+
+\subsection{Default arguments}
+
+A parameter can have a default:
+
+\begin{lstlisting}
+void greet(std::string_view name, std::string_view greeting = "hi") {
+    std::println("{}, {}", greeting, name);
+}
+
+greet("world");            // "hi, world"
+greet("world", "hello");   // "hello, world"
+\end{lstlisting}
+
+Defaults are part of the declaration; later overloads of the same
+name cannot redeclare them.
+
+\section{Classes, constructors, destructors}
+\label{sec:cpp:classes}
+
+A \textbf{class} (introduced with \code{class} or \code{struct} ---
+the only difference is the default access level) is a user-defined
+type that bundles data and behaviour.
+
+\begin{lstlisting}
+struct Point {
+    double x;
+    double y;
+
+    double length() const {
+        return std::sqrt(x*x + y*y);
+    }
+};
+
+Point p{3.0, 4.0};
+std::println("{}", p.length());   // 5
+\end{lstlisting}
+
+\code{struct} members are public by default; \code{class} members
+are private by default. Most \maya{} types are \code{struct}.
+
+\subsection{Constructors}
+
+A \textbf{constructor} is a special function that runs when an object
+is created. It has the same name as the class, no return type, and
+may take parameters.
+
+\begin{lstlisting}
+struct File {
+    FILE* fp;
+
+    explicit File(const char* path) {
+        fp = std::fopen(path, "r");
+    }
+};
+
+File log{"app.log"};   // calls the constructor with "app.log"
+\end{lstlisting}
+
+\code{explicit} prevents implicit conversion: without it, you could
+write \code{File f = "app.log";} and \cpp{} would silently call the
+constructor. Mark single-argument constructors \code{explicit} unless
+you genuinely want the implicit form.
+
+\subsection{Member initialiser lists}
+
+The preferred way to set members from a constructor is the
+\textbf{initialiser list}, which appears between a colon and the
+body:
+
+\begin{lstlisting}
+struct File {
+    FILE* fp;
+
+    explicit File(const char* path) : fp(std::fopen(path, "r")) {}
+};
+\end{lstlisting}
+
+Members are initialised in the order they are declared in the class,
+\emph{not} in the order they appear in the initialiser list. Modern
+compilers warn if you write them in the wrong order; pay attention
+to the warning.
+
+\subsection{Destructors}
+
+A \textbf{destructor} is the constructor's counterpart: it runs when
+the object is about to be destroyed. Its name is the class name
+prefixed with \code{\~{}}.
+
+\begin{lstlisting}
+struct File {
+    FILE* fp;
+
+    explicit File(const char* path) : fp(std::fopen(path, "r")) {}
+    ~File() { if (fp) std::fclose(fp); }
+};
+
+void load() {
+    File log{"app.log"};   // fopen runs here
+    // ... use log.fp ...
+}                              // ~File runs here, fclose runs automatically
+\end{lstlisting}
+
+The destructor runs at the end of the scope where the object was
+created, even if the function returns early, even if an exception is
+thrown. This is the foundation of the next idea.
+
+\section{RAII --- the central pattern}
+\label{sec:cpp:raii}
+
+\textbf{Resource Acquisition Is Initialization}, or \textbf{RAII}, is
+the single most important idiom in \cpp{}. It is the principle that
+every resource your program holds --- memory, file descriptor,
+terminal mode, mutex lock, network connection --- should be tied to
+the lifetime of an object. The constructor acquires; the destructor
+releases. You cannot forget to release because the language runs the
+destructor for you.
+
+The \code{File} class above is RAII: constructing a \code{File} opens
+the file; the destructor closes it. There is no \code{close()}
+method to forget to call.
+
+\subsection{A \code{TerminalGuard} for raw mode}
+
+Let us write the RAII type that fixes the bug from
+Chapter~\ref{ch:terminal}, where forgetting to restore cooked mode
+left the user's shell broken.
+
+\begin{lstlisting}
+class TerminalGuard {
+    termios cooked_;
+public:
+    TerminalGuard() {
+        tcgetattr(STDIN_FILENO, &cooked_);
+        termios raw = cooked_;
+        raw.c_lflag &= ~(ICANON | ECHO | ISIG | IEXTEN);
+        raw.c_iflag &= ~(IXON | ICRNL | INPCK | ISTRIP);
+        raw.c_oflag &= ~(OPOST);
+        raw.c_cc[VMIN]  = 0;
+        raw.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    }
+
+    ~TerminalGuard() {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &cooked_);
+    }
+
+    TerminalGuard(const TerminalGuard&)            = delete;
+    TerminalGuard& operator=(const TerminalGuard&) = delete;
+};
+
+int main() {
+    TerminalGuard guard;   // raw mode on
+    // ... run a TUI ...
+}                          // raw mode off, automatically
+\end{lstlisting}
+
+The two \code{= delete} lines forbid copying. Copying would let two
+\code{TerminalGuard} objects fight over the terminal state. We will
+see \code{= delete} again shortly.
+
+\maya{}'s actual terminal driver is more elaborate (it also handles
+the alt-screen, mouse mode, KKP push, signal restoration on crash),
+but the shape is exactly this: a class whose lifetime is the
+lifetime of the terminal being in TUI mode.
+
+\begin{idea}
+RAII: every resource is owned by an object. Acquire in the
+constructor, release in the destructor. Forgetting becomes a
+compile-time impossibility, not a runtime risk.
+\end{idea}
+
+\subsection{The rule of zero, three, five}
+
+If a class manages a resource, you usually need to define five
+special member functions: destructor, copy constructor, copy
+assignment, move constructor, move assignment. This is the
+\textbf{rule of five}.
+
+If you do not manage any resource yourself --- you only hold other
+RAII types as members (\code{std::string}, \code{std::vector},
+\code{std::unique\_ptr}) --- you should define \emph{none} of them.
+The compiler generates correct versions automatically. This is the
+\textbf{rule of zero}, and it is the rule you should follow first.
+
+The \textbf{rule of three} (\cpp{}98) is the pre-move-semantics
+version: define destructor, copy constructor, copy assignment
+together.
+
+Most \maya{} classes follow the rule of zero. The few that hold raw
+resources (the terminal guard, signal handlers, file descriptor
+wrappers) follow the rule of five.
+
+\section{\code{auto} and type deduction}
+\label{sec:cpp:auto}
+
+Writing out the type of every variable is fine for \code{int} and
+\code{double}; it is exhausting for things like
+\code{std::vector<std::pair<std::string, Element>>::const\_iterator}.
+\cpp{}11 introduced \code{auto}: ``compiler, figure out the type from
+the initialiser''.
+
+\begin{lstlisting}
+auto x = 42;                  // int
+auto pi = 3.14;               // double
+auto name = std::string{"hi"};// std::string
+auto v = std::vector<int>{1, 2, 3};
+for (auto& item : v) ++item;  // item is int&
+\end{lstlisting}
+
+Three rules of thumb:
+
+\begin{itemize}[leftmargin=*]
+  \item Plain \code{auto} drops references and \code{const}. If you
+    write \code{auto x = some\_const\_ref();} you get a fresh copy.
+  \item \code{auto\&} keeps references and \code{const}. Use this in
+    range-\code{for} loops to avoid copying each element.
+  \item \code{const auto\&} is the most common form for read-only
+    iteration: \code{for (const auto\& cell : row) \{ ... \}}.
+\end{itemize}
+
+In \maya{}, \code{auto} is the default everywhere a type would be
+verbose. Spell types out only when the spelling is short or when it
+clarifies intent.
+
+\section{Move semantics}
+\label{sec:cpp:move}
+
+We saw that assignment copies. For a \code{std::vector<int>} with a
+million elements, copying is a million-element allocation plus a
+million-element copy. If you do not need the original after, the
+copy is pure waste.
+
+Move semantics is the \cpp{}11 feature that lets you say ``transfer
+the contents, do not copy''. A move is usually a pointer swap: the
+new vector inherits the buffer; the old vector is left empty.
+
+\begin{lstlisting}
+std::vector<int> a = {1, 2, 3};
+std::vector<int> b = std::move(a);   // O(1) --- b owns the buffer
+// a is in a "valid but unspecified" state; do not read it.
+\end{lstlisting}
+
+Key points:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{std::move(x)} does not actually move anything; it is a
+    \emph{cast} that says ``treat \code{x} as a thing whose contents
+    may be stolen''. The move actually happens in the constructor
+    or assignment operator that receives the rvalue.
+  \item After moving from \code{x}, you must not assume \code{x}
+    holds anything specific. You can still destroy it (safely) and
+    you can still assign a fresh value to it.
+  \item Move is an \emph{optimisation}, not a semantic change. A
+    correctly written program works whether \code{std::move} is
+    present or not; \code{std::move} only changes how fast it runs.
+\end{itemize}
+
+The \textbf{rvalue reference} type \code{T\&\&} is how a function
+opts in to receiving a move:
+
+\begin{lstlisting}
+void take(std::string s);              // by value: caller can move into it
+void take_ref(const std::string& s);   // by const ref: read-only
+void take_rref(std::string&& s);       // rvalue ref: must be moved in
+
+std::string name = "alice";
+take(name);              // copies name into the parameter
+take(std::move(name));   // moves name into the parameter
+// after this, name is moved-from
+\end{lstlisting}
+
+In \maya{} you see \code{std::move} most often in the runtime:
+\code{Model} flows through \code{update(Model, Msg)} without being
+copied, because \code{update} takes its \code{Model} by value and
+the runtime moves the current model into the call.
+
+\begin{warning}
+Do not \code{std::move} a local on the return statement (\code{return
+std::move(x);}). The compiler already moves return values
+automatically; writing \code{std::move} explicitly disables a
+separate optimisation called RVO (Return Value Optimisation) that is
+usually \emph{better} than move.
+\end{warning}
+
+\section{Templates}
+\label{sec:cpp:templates}
+
+A \textbf{template} is a recipe the compiler runs at compile time.
+You write the recipe once; the compiler bakes a fresh function or
+class for each set of arguments you give it.
+
+\subsection{Function templates}
+
+\begin{lstlisting}
+template <typename T>
+T add(T a, T b) { return a + b; }
+
+int    x = add(1, 2);          // T = int
+double y = add(1.5, 2.5);      // T = double
+std::string s = add<std::string>("foo", "bar");  // T = std::string
+\end{lstlisting}
+
+\code{typename T} introduces a type parameter named \code{T}. The
+function body uses \code{T} as if it were a type. The compiler
+\emph{instantiates} the template once per distinct \code{T}: there
+are separate \code{add<int>}, \code{add<double>}, and
+\code{add<std::string>} functions in the final binary.
+
+The template only compiles correctly if \code{T} actually supports
+\code{operator+}. Try \code{add(File, File)} and you will get a long
+error. Concepts (Section~\ref{sec:cpp:concepts}) fix this.
+
+\subsection{Class templates}
+
+\begin{lstlisting}
+template <typename T>
+struct Box {
+    T value;
+    T& get() { return value; }
+};
+
+Box<int>    a{42};
+Box<double> b{3.14};
+Box<std::string> c{"hi"};
+\end{lstlisting}
+
+Each instantiation is a different type. \code{Box<int>} and
+\code{Box<double>} share no relationship --- you cannot assign one
+to the other.
+
+\code{std::vector<T>}, \code{std::optional<T>},
+\code{std::unique\_ptr<T>}, \code{std::variant<T, U, ...>} are all
+class templates.
+
+\subsection{Multiple template parameters}
+
+\begin{lstlisting}
+template <typename K, typename V>
+struct Pair {
+    K first;
+    V second;
+};
+
+Pair<std::string, int> ages[] = {{"alice", 30}, {"bob", 25}};
+\end{lstlisting}
+
+\subsection{Non-type template parameters (NTTPs)}
+
+The lesser-known but crucial flavour. A template parameter does not
+have to be a type --- it can be a \emph{value}, computed at compile
+time:
+
+\begin{lstlisting}
+template <int N>
+struct Array {
+    int data[N];
+    int size() const { return N; }
+};
+
+Array<8>  a;   // data is int[8]
+Array<16> b;   // data is int[16]
+// a and b are different types
+\end{lstlisting}
+
+\code{std::array<T, N>} works this way. The size is part of the
+type, so \code{std::array<int, 4>} and \code{std::array<int, 8>} are
+distinct types and the size is known at compile time.
+
+The types of NTTPs were limited for a long time --- integers,
+pointers, enums. Since \cpp{}20, NTTPs can be \textbf{structural
+class types}: any literal type with all-public members and no
+user-defined comparison oddities. This is the trick that powers
+\maya{}'s DSL.
+
+\subsection{NTTPs of structural type --- the climax}
+
+We want to write \code{t<"Hello">} and have the string become part of
+the type. The straight path is to define a small ``string of fixed
+length'' type and use it as an NTTP:
+
+\begin{lstlisting}
+template <std::size_t N>
+struct Str {
+    char data[N]{};
+
+    consteval Str(const char (&s)[N]) {
+        for (std::size_t i = 0; i < N; ++i) data[i] = s[i];
+    }
+};
+\end{lstlisting}
+
+Line by line:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{template <std::size\_t N>}: a class template
+    parameterised by an integer.
+  \item \code{char data[N]\{\}}: a fixed-size array of \code{N}
+    characters, zero-initialised.
+  \item \code{consteval Str(const char (\&s)[N])}: a constructor that
+    \emph{must} run at compile time (\code{consteval}) and takes a
+    \emph{reference to a literal array of \code{N} chars}. The
+    array-reference syntax \code{(\&s)[N]} captures the length of
+    the literal --- the compiler picks \code{N} for you.
+  \item The loop copies the string into \code{data}.
+\end{itemize}
+
+Now we can use \code{Str} as an NTTP:
+
+\begin{lstlisting}
+template <Str S>
+struct Text {
+    static constexpr std::string_view text() {
+        return {S.data};
+    }
+};
+
+Text<"Hello"> a;     // S = Str{"Hello\\0"}, baked into the type
+Text<"World"> b;     // distinct type
+\end{lstlisting}
+
+\code{Text<"Hello">} and \code{Text<"World">} are different types.
+The \emph{bytes} of the string are part of the type identity. This
+is exactly how \maya{}'s \code{t<"...">} works, and it is the
+foundation of the whole compile-time DSL we tour in
+Chapter~\ref{ch:dsl}.
+
+\begin{idea}
+NTTPs let you encode \emph{values} into the type system. \maya{}
+encodes text, colours, paddings, borders, and style flags this way.
+Once a value is in a type, the compiler can check rules between
+values at compile time.
+\end{idea}
+
+\subsection{Templates and the \code{<>} syntax}
+
+When you see \code{Foo<X, Y>} in a \cpp{} expression, the angle
+brackets are template-argument syntax, not less-than / greater-than.
+The ambiguity is one of the language's papercuts; the compiler
+usually figures it out from context, and where it cannot, you write
+\code{template} explicitly: \code{x.template foo<int>()}.
+
+You will see \code{t<"Hi">}, \code{Fg<255, 100, 100>}, \code{pad<1>},
+\code{border\_<Round>} throughout \maya{}. They are all template
+instantiations.
+
+\section{\code{constexpr}, \code{consteval}, \code{constinit}}
+\label{sec:cpp:constexpr}
+
+A \textbf{constant expression} is one the compiler can evaluate at
+translation time, before the program runs. \cpp{} has three
+keywords governing this:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{constexpr} on a function or variable: \emph{may} be
+    constant-evaluated; otherwise behaves like a normal function or
+    variable.
+  \item \code{consteval} on a function: \emph{must} be
+    constant-evaluated. Calling it at runtime is a compile error.
+  \item \code{constinit} on a variable: must be initialised by a
+    constant expression, but the variable itself is otherwise
+    mutable. Used to forbid the ``static initialisation order
+    fiasco''.
+\end{itemize}
+
+Example of \code{constexpr}:
+
+\begin{lstlisting}
+constexpr int square(int n) { return n * n; }
+
+constexpr int sixteen = square(4);   // evaluated at compile time
+int runtime_n = 7;
+int forty_nine = square(runtime_n);  // also legal, evaluated at runtime
+\end{lstlisting}
+
+Example of \code{consteval}:
+
+\begin{lstlisting}
+consteval int square_only_ct(int n) { return n * n; }
+
+constexpr int a = square_only_ct(4);  // ok
+int runtime_n = 7;
+// int b = square_only_ct(runtime_n); // error: must be constant-evaluated
+\end{lstlisting}
+
+\maya{}'s DSL is heavy on \code{constexpr} and \code{consteval}. The
+entire chain \code{t<"Hi"> | Bold | Fg<255, 80, 80>} produces a
+\code{constexpr} value --- every \code{operator|} along the way is
+\code{constexpr}. Conversion to the runtime \code{Element} (which
+may allocate) happens only when you call \code{.build()}.
+
+\section{Concepts and \code{requires}}
+\label{sec:cpp:concepts}
+
+A template constrains its arguments implicitly: writing \code{a + b}
+in a template body means \code{T} must support \code{operator+}, but
+the constraint is invisible until you try to instantiate the
+template with a wrong type and get a wall of compiler errors.
+
+\cpp{}20 \textbf{concepts} make those constraints explicit and
+named:
+
+\begin{lstlisting}
+template <typename T>
+concept Addable = requires(T a, T b) {
+    { a + b } -> std::convertible_to<T>;
+};
+
+template <Addable T>
+T add(T a, T b) { return a + b; }
+
+add(1, 2);                // ok, int is Addable
+// add(File{...}, File{...});  // clean error: File does not satisfy Addable
+\end{lstlisting}
+
+The \code{requires} expression lists statements that must be valid
+for \code{T}. \code{\{ a + b \} -> std::convertible\_to<T>} means
+``\code{a + b} must compile, and its result must convert to
+\code{T}''. If a caller passes a \code{T} that does not satisfy
+\code{Addable}, the compiler points at the constraint, not at
+something seventeen layers deep inside the template body.
+
+\subsection{Maya's concepts}
+
+Maya defines several concepts in \file{core/concepts.hpp}. Three of
+the important ones:
+
+\begin{lstlisting}
+// (paraphrased from maya source)
+
+template <typename T>
+concept Node = requires(const T& t) {
+    { t.build() } -> std::convertible_to<Element>;
+};
+
+template <typename P>
+concept Program = requires(typename P::Model m, typename P::Msg msg) {
+    typename P::Model;
+    typename P::Msg;
+    { P::init() };
+    { P::update(m, msg) };
+    { P::view(m) }       -> std::convertible_to<Element>;
+    { P::subscribe(m) };
+};
+\end{lstlisting}
+
+\code{Node} says ``has a \code{.build()} that returns something
+convertible to \code{Element}''. Every DSL piece satisfies it.
+\code{Program} says ``has the four Elm functions with the right
+signatures''. \code{run<P>()} requires \code{Program<P>}; if your
+program is missing a function, the compiler tells you which one.
+
+\begin{idea}
+Concepts are documentation that the compiler checks. They turn
+``this template requires the type to do X'' from a comment into a
+compile-time predicate.
+\end{idea}
+
+\section{\code{std::variant} and \code{std::visit}}
+\label{sec:cpp:variant}
+
+A \code{std::variant<A, B, C>} is a value that holds \emph{exactly
+one} of \code{A}, \code{B}, or \code{C}. It is the \cpp{} closed sum
+type --- the same construct functional languages call an algebraic
+data type.
+
+\begin{lstlisting}
+#include <variant>
+std::variant<int, std::string, double> v;
+v = 42;          // holds an int
+v = "hello";     // now holds a string
+v = 3.14;        // now holds a double
+\end{lstlisting}
+
+You inspect a variant with \code{std::visit}, which dispatches to
+the overload matching the current alternative. The idiomatic helper
+is \code{overload}, a small struct that combines multiple lambdas
+into a single callable:
+
+\begin{lstlisting}
+template <typename... Fs> struct overload : Fs... { using Fs::operator()...; };
+template <typename... Fs> overload(Fs...) -> overload<Fs...>;
+
+std::visit(overload{
+    [](int n)               { std::println("int  : {}", n); },
+    [](const std::string& s){ std::println("str  : {}", s); },
+    [](double d)            { std::println("real : {}", d); },
+}, v);
+\end{lstlisting}
+
+The \code{overload} template uses two features:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Fs...} is a \textbf{parameter pack} --- a variadic
+    template, accepting any number of types.
+  \item Inheriting from each one and using \code{using
+    Fs::operator()...} brings every lambda's \code{operator()} into
+    the combined class. \code{overload\{f, g, h\}} is then a single
+    object with three call-operator overloads.
+\end{itemize}
+
+This is enough \cpp{} sorcery to write off as a one-liner you copy.
+It is in \file{maya/core/overload.hpp}.
+
+\subsection{Maya's variants}
+
+Maya uses \code{std::variant} relentlessly:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Element} is
+    \code{std::variant<BoxElement, TextElement, ElementList>}.
+  \item \code{Event} is
+    \code{std::variant<Key, Mouse, Resize, Paste, ...>}.
+  \item \code{Cmd<Msg>} is a variant over every effect the runtime
+    knows: \code{None}, \code{Quit}, \code{Batch}, \code{After},
+    \code{SetTitle}, \code{WriteClipboard}, \code{Task}, ...
+  \item \code{Sub<Msg>} is a variant over event sources.
+\end{itemize}
+
+Whenever you see a \code{std::visit} in \maya{}, it is the dispatch
+hub for one of these types.
+
+\begin{warning}
+If you add a new alternative to a variant and forget to handle it in
+a visitor, the visitor stops compiling. This is a feature: it makes
+refactors safe. Embrace it; do not paper over it with a generic
+fallback.
+\end{warning}
+
+\section{\code{std::expected<T, E>}}
+\label{sec:cpp:expected}
+
+\cpp{}23's \code{std::expected<T, E>} is a sum type for fallible
+operations: either a success of type \code{T} or an error of type
+\code{E}. It is \maya{}'s preferred alternative to throwing
+exceptions for ``failure is expected, just rare'' cases.
+
+\begin{lstlisting}
+#include <expected>
+#include <charconv>
+
+std::expected<int, std::string> parse_int(std::string_view s) {
+    int n;
+    auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), n);
+    if (ec != std::errc{}) return std::unexpected("not an int");
+    return n;
+}
+
+if (auto r = parse_int("42")) {
+    std::println("value: {}", *r);
+} else {
+    std::println("error: {}", r.error());
+}
+\end{lstlisting}
+
+The API at a glance:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{(bool)r} --- true if success.
+  \item \code{*r} or \code{r.value()} --- the success value.
+  \item \code{r.error()} --- the error value.
+  \item \code{std::unexpected(e)} --- factory for the error case.
+\end{itemize}
+
+In \maya{} the error type is usually a small struct:
+
+\begin{lstlisting}
+enum class HttpErrorKind { Tls, Timeout, Refused, Status, Cancel };
+struct HttpError {
+    HttpErrorKind kind;
+    int           http_status;
+    std::string   detail;
+};
+using HttpResult = std::expected<Response, HttpError>;
+\end{lstlisting}
+
+The caller switches on \code{kind} without parsing strings --- a
+proper closed sum of failure modes. This is what we call a
+``refined'' error type.
+
+\section{Lambdas and capture}
+\label{sec:cpp:lambdas}
+
+A \textbf{lambda} is an anonymous function object. Under the hood,
+the compiler synthesises a nameless class with an \code{operator()}
+that runs the lambda body.
+
+\begin{lstlisting}
+auto add = [](int a, int b) { return a + b; };
+int n = add(3, 4);    // 7
+\end{lstlisting}
+
+The square brackets at the front are the \textbf{capture list}: they
+list names from the surrounding scope the lambda should remember.
+
+\begin{lstlisting}
+int x = 10;
+
+auto by_value = [x](int n) { return x + n; };   // copy of x
+auto by_ref   = [&x](int n){ return x + n; };   // reference to x
+
+x = 99;
+by_value(0);   // 10  --- the lambda has the old copy
+by_ref(0);     // 99  --- the lambda sees the new x
+\end{lstlisting}
+
+Shorthand captures:
+
+\begin{lstlisting}
+[=]        // capture every used name by value
+[&]        // capture every used name by reference
+[=, &out]  // mostly by value, but out by reference
+[&, n]     // mostly by reference, but n by value
+\end{lstlisting}
+
+Default captures (\code{[=]} and \code{[\&]}) are convenient but
+dangerous in long-lived lambdas; you can easily capture a reference
+to a local that has gone out of scope. Prefer explicit capture lists.
+
+\subsection{Init-captures and moving into a lambda}
+
+\cpp{}14 added \textbf{init-captures}: \code{[name = expression]}
+introduces a new name local to the lambda with any initialiser. This
+is how you capture a move-only type into a lambda:
+
+\begin{lstlisting}
+auto buf = std::make_unique<Buffer>();
+auto cb  = [buf = std::move(buf)] {
+    buf->flush();
+};
+// outer buf is moved-from; only the lambda owns the buffer.
+\end{lstlisting}
+
+\subsection{Storing lambdas: \code{std::function} vs.\ \code{std::move\_only\_function}}
+
+A lambda's type is unique to it; you cannot write the type by hand.
+To store a lambda in a class member or container, you need a
+type-erased wrapper:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{std::function<R(Args...)>} (\cpp{}11) holds any
+    callable matching the signature, but the callable must be
+    \emph{copyable}. That excludes lambdas capturing move-only state
+    (\code{std::unique\_ptr}, sockets, file handles).
+  \item \code{std::move\_only\_function<R(Args...)>} (\cpp{}23)
+    requires only \emph{movable}. \maya{}'s signal callbacks and
+    \code{Cmd<Msg>::Task} use this; effect descriptions routinely
+    carry move-only state.
+\end{itemize}
+
+\section{Standard-library bits you will see}
+\label{sec:cpp:stdlib}
+
+The standard library is large. A non-exhaustive list of names that
+appear in \maya{} and what they are:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{std::string\_view} --- a non-owning view of a
+    contiguous \code{char} sequence. Two pointers under the hood.
+    Cheap to pass; does not own the bytes; the underlying data must
+    outlive the view.
+  \item \code{std::span<T>} --- the same idea for any contiguous
+    range of \code{T}. \code{std::span<const Cell>} is how the
+    renderer receives a row.
+  \item \code{std::array<T, N>} --- a fixed-size array; size is a
+    template argument. Same memory layout as \code{T[N]} but with
+    proper value semantics and methods.
+  \item \code{std::vector<T>} --- the dynamic-array workhorse.
+    Heap-allocated buffer that grows.
+  \item \code{std::optional<T>} --- either a \code{T} or nothing. Use
+    when ``absent'' is a real state but you do not need a richer
+    error.
+  \item \code{std::format} / \code{std::print} / \code{std::println}
+    --- \cpp{}20/23 formatted output, like Python's f-strings.
+  \item \code{std::source\_location} --- a value carrying the file,
+    line, and function name where it was constructed. \maya{} uses
+    it for stable cache identifiers.
+  \item \code{std::chrono} --- duration and time-point types.
+    \code{std::chrono::milliseconds(50)} reads cleanly.
+  \item \code{std::atomic<T>} --- lock-free operations on a value
+    shared across threads.
+  \item \code{std::jthread} --- a thread that joins on destruction
+    (no leaked threads on early return). \cpp{}20.
+  \item \code{std::ranges} / \code{std::views} --- lazy, composable
+    algorithms over sequences (\code{xs | views::transform(...) |
+    views::filter(...)}).
+\end{itemize}
+
+Learn the views as you meet them; the ranges library is large and you
+do not need it all at once.
+
+\section{Reading real \maya{} code}
+\label{sec:cpp:reading}
+
+With the toolkit in hand, let us read a fragment of actual \maya{}.
+This is from the style header; it declares the tag types behind
+\code{Bold}, \code{Fg<R, G, B>}, and friends.
+
+\begin{lstlisting}
+template <CTStyle V>
+struct StyTag {
+    constexpr operator Style() const noexcept { return V.runtime(); }
+};
+
+inline constexpr StyTag<CTStyle::bold()>   Bold{};
+inline constexpr StyTag<CTStyle::italic()> Italic{};
+
+template <std::uint8_t R, std::uint8_t G, std::uint8_t B>
+inline constexpr StyTag<CTStyle::fg(R, G, B)> Fg{};
+\end{lstlisting}
+
+Line by line:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{template <CTStyle V>}: \code{StyTag} is a class
+    template parameterised by an NTTP \code{V} of type
+    \code{CTStyle}. (\code{CTStyle} is a structural class type
+    --- another struct defined elsewhere --- carrying a compile-time
+    description of a style: which attributes are on, the colours,
+    and so on.)
+  \item \code{struct StyTag \{ ... \}}: the type has no data
+    members. It is a \emph{tag} type --- empty at runtime, distinct
+    at compile time. Two \code{StyTag<X>}'s with different \code{X}
+    are different types.
+  \item \code{constexpr operator Style() const noexcept}: an
+    implicit conversion from \code{StyTag<V>} to the runtime
+    \code{Style} type. \code{constexpr}, so it can run at compile
+    time; \code{noexcept} promises it does not throw. \code{const}
+    on the trailing position says the conversion does not modify
+    the object.
+  \item \code{return V.runtime();}: ask the compile-time style for
+    its runtime form. \code{V} is the NTTP, available inside the
+    class.
+  \item \code{inline constexpr StyTag<CTStyle::bold()> Bold\{\};}: a
+    \code{constexpr} variable of type
+    \code{StyTag<CTStyle::bold()>}, initialised with default braces.
+    \code{inline} on a variable in a header lets it appear in
+    multiple translation units without violating ODR. \code{Bold} is
+    the value you write in user code.
+  \item \code{Fg<R, G, B>}: a \emph{variable template} ---  a
+    template that yields a variable, not a function or class. The
+    expression \code{Fg<255, 80, 80>} instantiates the template with
+    those three integers, producing a unique \code{StyTag<...>}
+    value.
+\end{itemize}
+
+If you can read that fragment now and feel the pieces in place ---
+NTTP, class template, \code{constexpr}, \code{operator T()},
+variable template, the implicit conversion that lets \code{Bold}
+appear in places that want a \code{Style} --- you can read the rest
+of \maya{}'s headers. From here on, the rest of the book is mostly
+about what each file \emph{does}, not how its syntax decodes.
+
+\begin{recap}
+The \cpp{} \maya{} uses, in one paragraph: templates with type and
+non-type parameters; \code{constexpr}/\code{consteval} for compile-
+time evaluation; concepts and \code{requires} for named constraints;
+\code{std::variant} + \code{std::visit} + \code{overload} for closed
+sum types; \code{std::expected} for structured errors; lambdas with
+explicit capture and \code{std::move\_only\_function} for storage;
+move semantics to avoid copies; RAII to make resources self-managing.
+Together they support one discipline: encode invariants in the type
+system, make impossible states unrepresentable, defer side effects to
+the edge.
+\end{recap}
+
+\section*{Workshop}
+
+The exercises here are calibrated for someone who has never used the
+feature. If a step takes you fifteen minutes and three Google
+searches, that is the right speed.
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{RAII guard.} Write a class \code{Timer} whose
+    constructor records \code{std::chrono::steady\_clock::now()} and
+    whose destructor prints the elapsed time. Use it at the top of
+    a function; verify the message appears on return.
+  \item \textbf{Templates and NTTPs.} Implement a \code{FixedArray<T,
+    N>} class template with a member \code{T data[N]}, a
+    \code{size()} method returning \code{N}, and \code{operator[]}.
+    Instantiate \code{FixedArray<int, 4>} and \code{FixedArray<int,
+    8>}; convince yourself they are different types by trying to
+    assign one to the other.
+  \item \textbf{NTTP of structural type.} Type out the \code{Str<N>}
+    template from this chapter. Define a class template \code{Tag<Str
+    S>} parameterised by it. Instantiate \code{Tag<"hello">} and
+    \code{Tag<"world">} and call a method that returns the string.
+  \item \textbf{Concept.} Write a concept \code{Drawable} requiring
+    a \code{void draw() const} method. Use it on a template function
+    \code{render(const T\& t)}. Make two structs satisfying it, one
+    not, and observe the error.
+  \item \textbf{Variant.} Define
+    \code{using Shape = std::variant<Circle, Square, Triangle>}
+    with three trivial structs (each with one field). Write a
+    \code{double area(const Shape\&)} using \code{std::visit} and the
+    \code{overload} helper.
+  \item \textbf{Expected.} Write
+    \code{std::expected<int, std::string> safe\_div(int a, int b)}.
+    Call it with \code{(10, 2)} and \code{(10, 0)}; print each
+    result.
+  \item \textbf{Lambda with move capture.} Build a
+    \code{std::vector<int>}, capture it into a lambda by move, and
+    return the lambda from a function. Call the returned lambda;
+    confirm the vector outlives the function it came from.
+\end{enumerate}
