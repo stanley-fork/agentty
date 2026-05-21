@@ -531,9 +531,45 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 }
                 cfg.body.emplace_back(*slot.agent_timeline);
             } else {
-                cfg.body.emplace_back(
-                    maya::AgentTimeline{agent_timeline_config(
-                        tool_calls, m.s.spinner.frame_index(), style.color)}.build());
+                // Live (active) panel cache. Compute the SAME content
+                // key shape as the freeze path, then bucket the spinner
+                // frame so cache hits are possible mid-stream when only
+                // the spinner advances.
+                std::uint64_t live_key = 1469598103934665603ULL;
+                auto mixlive = [&](std::uint64_t v) {
+                    live_key = (live_key ^ v) * 1099511628211ULL;
+                };
+                mixlive(tool_calls.size());
+                for (const auto& tc : tool_calls)
+                    mixlive(tc.compute_render_key());
+                mixlive(static_cast<std::uint64_t>(style.color.r()));
+                mixlive(static_cast<std::uint64_t>(style.color.g()));
+                mixlive(static_cast<std::uint64_t>(style.color.b()));
+                // Bake model_id into the key too — the freeze path keeps
+                // it as a separate string compare; here we can fold it
+                // into the FNV mix cheaply.
+                for (char c : model_id_ref)
+                    mixlive(static_cast<std::uint64_t>(
+                        static_cast<unsigned char>(c)));
+
+                auto& slot = m.ui.view_cache.turn_config(
+                    m.d.current.id, msg.id);
+                if (slot.live_agent_timeline_key != live_key) {
+                    // Content changed — every spinner phase's cached
+                    // Element is stale. Drop the ring.
+                    for (auto& el : slot.live_agent_timeline) el.reset();
+                    slot.live_agent_timeline_key = live_key;
+                }
+                const int frame = m.s.spinner.frame_index();
+                const std::size_t bucket = static_cast<std::size_t>(
+                    ((frame % 10) + 10) % 10);
+                if (!slot.live_agent_timeline[bucket]) {
+                    auto built = maya::AgentTimeline{agent_timeline_config(
+                        tool_calls, frame, style.color)}.build();
+                    slot.live_agent_timeline[bucket] =
+                        std::make_shared<maya::Element>(std::move(built));
+                }
+                cfg.body.emplace_back(*slot.live_agent_timeline[bucket]);
             }
             // In-flight permission card under the timeline.
             for (const auto& tc : tool_calls) {

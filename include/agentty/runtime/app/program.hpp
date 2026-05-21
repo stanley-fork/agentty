@@ -4,6 +4,9 @@
 // Forwards to the per-domain reducer / view / subscribe.  The init function
 // reads settings + recent threads through the Store seam.
 
+#include <chrono>
+#include <cstdint>
+
 #include <maya/maya.hpp>
 
 #include "agentty/runtime/app/deps.hpp"
@@ -33,6 +36,91 @@ struct AgenttyApp {
 
     static auto subscribe(const Model& m) -> maya::Sub<Msg> {
         return ::agentty::app::subscribe(m);
+    }
+
+    // Optional Program hook (see maya/app/app.hpp — detail::HasVisualHash).
+    // The runtime calls this just before view(); when the hash is
+    // unchanged from the previous render, view() + render() are skipped
+    // entirely. Captures the axes that affect what the user can see;
+    // intentionally omits things like Session::last_tick that change
+    // every Tick without changing pixels.
+    //
+    // Time-driven animations (cursor blink, streaming caret pulse,
+    // spinner) are bucketed at coarse intervals so each visible step
+    // advances the hash. The bucket size is the upper bound on how
+    // often we'll render purely for animation.
+    static std::uint64_t visual_hash(const Model& m) {
+        std::uint64_t k = 1469598103934665603ULL;
+        auto mix = [&](std::uint64_t v) {
+            k = (k ^ v) * 1099511628211ULL;
+        };
+        auto mix_str = [&](std::string_view s) {
+            mix(s.size());
+            // Don't hash every byte for long strings — a 50 KB tool
+            // output would dominate the per-frame budget. Sample a
+            // few stable offsets; combined with size + render_keys
+            // computed elsewhere it's enough to detect change.
+            if (!s.empty()) {
+                mix(static_cast<std::uint8_t>(s.front()));
+                mix(static_cast<std::uint8_t>(s.back()));
+                if (s.size() >= 16)
+                    mix(static_cast<std::uint8_t>(s[s.size() / 2]));
+            }
+        };
+
+        // ── Domain.
+        mix(m.d.current.messages.size());
+        for (const auto& msg : m.d.current.messages) {
+            mix(msg.compute_render_key());
+        }
+        mix(static_cast<std::uint64_t>(m.d.profile));
+        mix_str(m.d.model_id.value);
+        mix(m.d.pending_permission ? 1ULL : 0ULL);
+
+        // ── Session / phase.
+        mix(static_cast<std::uint64_t>(m.s.phase.index()));
+        mix_str(m.s.status);
+        // Status expiry: bucket at 100 ms so the gauge’s rolling
+        // counter doesn't force a render every microsecond.
+        if (m.s.status_until.time_since_epoch().count() != 0) {
+            const auto until_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    m.s.status_until.time_since_epoch()).count();
+            mix(static_cast<std::uint64_t>(until_ms / 100));
+        }
+        // Spinner frame bucketed at 10 (its cycle length). Same bucket
+        // size the turn-level AgentTimeline cache uses, so a hash
+        // advance here corresponds to a new visual.
+        if (m.s.active()) {
+            mix(static_cast<std::uint64_t>(m.s.spinner.frame_index() % 10));
+        }
+
+        // ── Composer / UI.
+        mix_str(m.ui.composer.text);
+        mix(static_cast<std::uint64_t>(m.ui.composer.cursor));
+        mix(m.ui.composer.attachments.size());
+        mix(m.ui.composer.queued.size());
+        mix(m.ui.composer.expanded ? 1ULL : 0ULL);
+
+        // Time-driven animation buckets. Each bucket flip forces a
+        // render via hash advance. We pick the SMALLEST bucket of
+        // every animation currently visible so the hash steps at
+        // the rate of the fastest active animation:
+        //
+        //   - composer blink     → 265 ms (half-period, always live)
+        //   - streaming caret /
+        //     scramble glyphs    →  33 ms (StreamingMarkdown's RAF gate)
+        //
+        // Pick the streaming bucket when a turn is active; otherwise
+        // fall back to the blink bucket so idle still ticks the
+        // composer cursor.
+        const auto now_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        const std::int64_t anim_bucket_ms = m.s.active() ? 33 : 265;
+        mix(static_cast<std::uint64_t>(now_ms / anim_bucket_ms));
+
+        return k;
     }
 };
 
