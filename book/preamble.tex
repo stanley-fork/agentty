@@ -1,0 +1,162 @@
+% preamble.tex --- shared setup for the maya book.
+% Targets pdflatex (no fontspec / unicode-math). Safe on every TeX Live.
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage[a4paper,margin=1in,headheight=14pt]{geometry}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{tcolorbox}
+\usepackage{listings}
+\usepackage{caption}
+
+\tcbuselibrary{breakable,skins}
+
+% ---- Colour palette (terminal-themed) -----------------------------------
+\definecolor{mayablue}{HTML}{2E5C8A}
+\definecolor{mayalavender}{HTML}{6E5A8A}
+\definecolor{mayagreen}{HTML}{3F7B5A}
+\definecolor{mayarose}{HTML}{8A3F5A}
+\definecolor{mayaink}{HTML}{1A1A22}
+\definecolor{mayagrey}{HTML}{5E5E68}
+\definecolor{mayalight}{HTML}{F2F2F4}
+\definecolor{mayaamber}{HTML}{B07A1A}
+
+% ---- Hyperref -----------------------------------------------------------
+\hypersetup{
+  colorlinks=true,
+  linkcolor=mayablue,
+  citecolor=mayablue,
+  urlcolor=mayalavender,
+  pdftitle={The Maya Book},
+  pdfauthor={agentty docs},
+  pdfsubject={A complete tour of the maya TUI library},
+  bookmarksnumbered=true,
+  bookmarksopen=true
+}
+
+% ---- Headers / footers --------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\small\textit{\nouppercase{\leftmark}}}
+\fancyhead[RO]{\small\textit{\nouppercase{\rightmark}}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% ---- Chapter / section titles ------------------------------------------
+\titleformat{\chapter}[display]
+  {\normalfont\sffamily\Huge\bfseries\color{mayablue}}
+  {\filleft\Large\textit{Chapter \thechapter}}
+  {1ex}
+  {\titlerule\vspace{1ex}\filright}
+\titlespacing*{\chapter}{0pt}{-30pt}{20pt}
+
+\titleformat{\section}{\normalfont\sffamily\Large\bfseries\color{mayalavender}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalfont\sffamily\large\bfseries\color{mayagreen}}{\thesubsection}{1em}{}
+
+% ---- Listings: a C++ flavour we control ---------------------------------
+% pdflatex's listings package can't render arbitrary Unicode; we keep code
+% strictly ASCII inside lstlistings. For pretty terminal glyphs we drop
+% into tcolorbox bodies.
+\lstdefinelanguage{maya-cpp}{
+  language=C++,
+  morekeywords={
+    constexpr,consteval,concept,requires,co_await,co_yield,co_return,
+    char32_t,char8_t,string_view,expected,variant,visit,move_only_function,
+    Signal,Computed,Effect,Batch,Cmd,Sub,Element,Model,Msg,Program,
+    BoxNode,TextNode,DynNode,RuntimeTextNode,MapNode,Style,CTStyle,
+    Color,Border,BorderStyle,FlexDirection,Align,Justify,Ctx,RunConfig,
+    Canvas,StylePool,LayoutNode,Event,Key,Mouse,Resize,Paste,
+    overload,Str,FixedName,Refined,EffectSet,Profile,Decision
+  }
+}
+\lstdefinestyle{maya}{
+  language=maya-cpp,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{mayablue}\bfseries,
+  stringstyle=\color{mayarose},
+  commentstyle=\color{mayagrey}\itshape,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  tabsize=2,
+  columns=fullflexible,
+  keepspaces=true,
+  upquote=true,
+  numbers=left,
+  numberstyle=\ttfamily\scriptsize\color{mayaink},
+  numbersep=12pt,
+  frame=leftline,
+  framerule=2pt,
+  rulecolor=\color{mayablue},
+  xleftmargin=3em,
+  framexleftmargin=2.5em,
+  framesep=8pt,
+  literate=%
+    {->}{{$\rightarrow$}}2
+    {=>}{{$\Rightarrow$}}2
+}
+\lstset{style=maya}
+
+\lstdefinestyle{shell}{
+  language=bash,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{mayablue},
+  commentstyle=\color{mayagrey}\itshape,
+  showstringspaces=false,
+  breaklines=true,
+  frame=leftline,
+  framerule=2pt,
+  rulecolor=\color{mayagreen},
+  xleftmargin=1.5em,
+  framesep=8pt,
+  numbers=none
+}
+
+% ---- Boxes: idea, warning, terminal, theory ----------------------------
+\newtcolorbox{idea}[1][]{
+  enhanced, breakable,
+  colback=mayablue!5, colframe=mayablue, fonttitle=\bfseries,
+  title={Idea}, #1
+}
+\newtcolorbox{theory}[1][]{
+  enhanced, breakable,
+  colback=mayalavender!7, colframe=mayalavender, fonttitle=\bfseries,
+  title={Theory}, #1
+}
+\newtcolorbox{warning}[1][]{
+  enhanced, breakable,
+  colback=mayaamber!10, colframe=mayaamber, fonttitle=\bfseries,
+  title={Pitfall}, #1
+}
+\newtcolorbox{recap}[1][]{
+  enhanced, breakable,
+  colback=mayagreen!8, colframe=mayagreen, fonttitle=\bfseries,
+  title={Recap}, #1
+}
+\newtcolorbox{terminalbox}[1][]{
+  enhanced, breakable,
+  colback=mayaink, colframe=mayaink, coltext=mayalight,
+  fonttitle=\bfseries\color{mayalight},
+  title={Terminal}, fontupper=\ttfamily\small, #1
+}
+
+% ---- Misc convenience ---------------------------------------------------
+\newcommand{\maya}{\textsf{maya}}
+\newcommand{\agentty}{\textsf{agentty}}
+\newcommand{\cpp}{C\nolinebreak\hspace{-.05em}\raisebox{.2ex}{\small{++}}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\file}[1]{\textsf{\textit{#1}}}
+\newcommand{\TODO}[1]{\textcolor{mayarose}{\textbf{TODO:} #1}}
+
+\setlength{\parskip}{0.5\baselineskip}
+\setlength{\parindent}{0pt}

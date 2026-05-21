@@ -501,24 +501,93 @@ decides whether to wrap each frame in sync brackets.
 
 \subsection{Encoding non-ASCII keys: the Kitty Keyboard Protocol}
 
-Plain ANSI cannot tell \code{Ctrl+M} from \code{Enter} (both arrive as
-byte $0x0D$), or \code{Shift+Tab} from a regular escape sequence. This
-has been a chronic source of bugs in TUI editors for thirty years.
-The \textbf{Kitty Keyboard Protocol} (KKP) and the older
-\code{modifyOtherKeys=2} extension fix this by sending fully
-disambiguated key reports.
+Plain ANSI cannot tell \code{Ctrl+M} from \code{Enter} (both arrive
+as byte $0x0D$), or \code{Shift+Tab} from a function-key sequence,
+or \code{Ctrl+/} from anything else --- the low ASCII range is too
+crowded to carry the full modifier set. This has been a chronic
+source of bugs in TUI editors for thirty years. The \textbf{Kitty
+Keyboard Protocol} (KKP) and the older xterm \code{modifyOtherKeys=2}
+extension both fix the problem by sending fully disambiguated key
+reports in a uniform CSI-\code{u} format.
 
-\maya{} opts in on startup with two sequences:
+\paragraph{Opting in and out.}
+\maya{} pushes the protocol on startup with two sequences:
 
 \begin{lstlisting}
-ESC [ > 1 u            // push KKP flag 1 ("disambiguate")
-ESC [ > 4 ; 2 m        // xterm modifyOtherKeys=2
+ESC [ > 1 u            // push KKP flag 1 ("disambiguate escape codes")
+ESC [ > 4 ; 2 m        // xterm modifyOtherKeys=2 (fallback for non-KKP terms)
 \end{lstlisting}
 
-and opts out on exit with \code{ESC [ < u} and \code{ESC [ > 4 m}.
-Terminals that do not understand the sequences ignore them silently;
-the worst case is the older behaviour. We discuss the input side
-of this in Chapter~\ref{ch:events}.
+and pops on exit:
+
+\begin{lstlisting}
+ESC [ < u              // pop KKP flag stack
+ESC [ > 4 m            // disable modifyOtherKeys
+\end{lstlisting}
+
+The \code{>} after \code{[} makes the sequence ``push''; the \code{<}
+makes it ``pop''. KKP keeps a small stack of flag sets so nested
+programs (a TUI launched from inside another TUI) can each set
+their own preferences and restore on exit. Terminals that do not
+implement KKP silently ignore both sequences --- the worst case is
+the older, ambiguous behaviour.
+
+\paragraph{The CSI-\code{u} key report.}
+With KKP active, every key arrives in a uniform shape:
+
+\begin{center}
+\small
+\code{ESC [ }\emph{codepoint}\code{ ; }\emph{modifiers}\code{ u}
+\end{center}
+
+\emph{codepoint} is the Unicode code point of the key as if no
+modifier were held (\code{65} = \code{A}, \code{13} = \code{Enter},
+\code{9} = \code{Tab}, \code{47} = \code{/}). \emph{modifiers} is
+$1 + $ a bitfield: \code{Shift}=1, \code{Alt}=2, \code{Ctrl}=4,
+\code{Super}=8 (so unmodified = 1, Shift = 2, Ctrl = 5, Ctrl+Shift =
+6, etc.). The trailing letter is \code{u} for ``Unicode key''.
+
+Worked examples:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\textbf{Key} & \textbf{Without KKP} & \textbf{With KKP} \\
+\hline
+\code{Enter}      & \code{0D}             & \code{ESC [ 13 u} \\
+\code{Ctrl+M}     & \code{0D}             & \code{ESC [ 109 ; 5 u} \\
+\code{Ctrl+Enter} & \code{0D}             & \code{ESC [ 13 ; 5 u} \\
+\code{Tab}        & \code{09}             & \code{ESC [ 9 u} \\
+\code{Shift+Tab}  & \code{ESC [ Z}        & \code{ESC [ 9 ; 2 u} \\
+\code{Ctrl+/}     & \code{1F}             & \code{ESC [ 47 ; 5 u} \\
+\code{Ctrl+Space} & \code{00}             & \code{ESC [ 32 ; 5 u} \\
+\code{Esc}        & \code{1B} (ambiguous) & \code{ESC [ 27 u} (unambiguous) \\
+\end{tabular}
+\end{center}
+
+The payoff is in the right-hand column. \code{Ctrl+M} and
+\code{Ctrl+Enter} --- which collapsed into the same byte for thirty
+years --- now have distinct reports (\code{109} = ASCII \code{m},
+\code{13} = Enter). The bare \code{Esc} report carries its own
+code point (\code{27}) and a \code{u} terminator, so no
+fifty-millisecond timeout is required to disambiguate it from the
+start of an arrow-key sequence.
+
+\paragraph{What maya does with this.}
+\maya{}'s input parser (Chapter~\ref{ch:events}) recognises both the
+legacy and CSI-\code{u} forms. When KKP is active, the parser fast-paths
+through the CSI-\code{u} branch and never needs the escape timeout;
+when it is not, the parser falls back to the legacy table and the
+50 ms heuristic. The constants for the push/pop sequences live as
+\code{KITTY\_KEYBOARD\_PUSH} and \code{KITTY\_KEYBOARD\_POP} in
+\file{maya/include/maya/terminal/ansi.hpp}.
+
+\begin{idea}
+KKP turns every keystroke into one self-describing CSI-\code{u}
+sequence carrying \emph{(code point, modifiers)}. No more guessing
+whether \code{0x0D} meant Enter or Ctrl+M; no more 50 ms wait to
+decide if Esc was bare.
+\end{idea}
 
 \section{Cooked mode, raw mode, and \code{termios}}
 
@@ -770,6 +839,91 @@ common name. You meet \code{ioctl} mostly for terminals
 In portable code you would prefer dedicated APIs; in practice no
 such dedicated API exists for ``get terminal size'', so \code{ioctl}
 with \code{TIOCGWINSZ} is the only path.
+
+\section{Diagnose your terminal right now}
+\label{sec:term:diagnose}
+
+We have spent a lot of pages on what a terminal \emph{is}. Five
+minutes at a real prompt makes everything concrete. Open a shell
+and run the commands below; each one inspects a different layer of
+the stack we just described.
+
+\paragraph{What kind of terminal does the system think this is?}
+\begin{lstlisting}[style=shell]
+echo $TERM
+# typical: xterm-256color, tmux-256color, kitty, alacritty
+echo $COLORTERM
+# typical: truecolor, 24bit, or empty
+\end{lstlisting}
+
+\code{\$TERM} names a terminfo entry --- a database record describing
+which escape sequences the terminal understands. \code{\$COLORTERM}
+is the modern signal that 24-bit (truecolor) RGB is supported. If
+\code{\$TERM} is just \code{xterm} or \code{dumb}, you have a
+misconfigured environment; if \code{\$COLORTERM} is empty, programs
+will fall back to 256-colour mode even though your emulator probably
+handles RGB.
+
+\paragraph{What does terminfo say this terminal can do?}
+\begin{lstlisting}[style=shell]
+tput colors        # how many colours terminfo thinks we have
+tput cols          # current column count
+tput lines         # current row count
+infocmp | head     # full capability dump (long)
+\end{lstlisting}
+
+\code{tput colors} typically prints \code{256}; under a modern
+terminal with \code{\$COLORTERM=truecolor} the program treats that
+as a lower bound and uses RGB anyway. \code{infocmp} dumps every
+capability for the current terminfo entry --- you will see entries
+like \code{smcup}, \code{rmcup} (enter / leave alt-screen),
+\code{cup} (cursor positioning), \code{setaf} (set foreground), and
+so on. Every escape sequence we have shown in this chapter is in
+that list.
+
+\paragraph{Is 24-bit colour actually working?}
+A one-line shell test:
+
+\begin{lstlisting}[style=shell]
+printf '\x1b[38;2;255;100;0mHello in orange\x1b[0m\n'
+\end{lstlisting}
+
+If the word \code{Hello} appears in orange, your terminal really does
+24-bit. If it appears in a nearby palette colour (red, yellow), your
+terminal is degrading to 256-colour. If it appears in a control-code
+mess, something between you and the terminal is stripping the
+escape (most likely a multiplexer with a stale config).
+
+\paragraph{What does the kernel currently think termios is set to?}
+\begin{lstlisting}[style=shell]
+stty -a
+\end{lstlisting}
+
+The output is dense; the fields that matter are the long lines of
+flag names. Look for \code{icanon} and \code{echo} without a leading
+\code{-}: those are the cooked-mode defaults a TUI must clear. After
+you run a maya program and it exits cleanly, \code{stty -a} should
+show exactly the same flags as before --- proof that the RAII guard
+restored the original \code{termios}.
+
+\paragraph{What is the current window size, in cells?}
+The \code{tput cols} and \code{tput lines} commands above answer
+this. So does the shell variable \code{\$COLUMNS} (after a resize,
+the shell updates it from a \code{SIGWINCH} handler of its own).
+
+\paragraph{Is the terminal in cooked or raw mode right now?}
+If you can type a line, edit it with backspace, and submit it with
+Enter, it is cooked. If every keystroke is sent through immediately
+and backspace prints \code{\textasciicircum H} or similar, it is raw. Bare prompts are
+always cooked; a TUI flips to raw on entry and back on exit.
+
+\begin{idea}
+Five commands describe your terminal completely:
+\code{echo \$TERM}, \code{echo \$COLORTERM}, \code{tput colors},
+\code{stty -a}, \code{infocmp | head}. Run them once on every
+machine where you will work. You will know what assumptions every
+later chapter is allowed to make.
+\end{idea}
 
 \section{Mouse reporting, on the wire}
 \label{sec:term:mouse}

@@ -1856,6 +1856,103 @@ A program with UB is not a slow or buggy program; it is a program
 without a defined meaning. Treat UB as a hard error, not a warning.
 \end{warning}
 
+\subsection{When something does go wrong: a debugger in ten minutes}
+
+The sanitisers will catch most UB the moment it executes. For
+everything else --- a segfault, an assertion failure, a wrong answer
+whose source you cannot see --- a debugger is the next step. On
+Linux that is \code{gdb}; on macOS, \code{lldb} with very similar
+syntax. The minimum vocabulary fits on one screen.
+
+First, compile with debug information and without optimisation, so
+the debugger can map machine instructions back to your lines:
+
+\begin{lstlisting}[style=shell]
+g++-15 -std=c++26 -g -O0 -Wall buggy.cpp -o buggy
+\end{lstlisting}
+
+\code{-g} embeds the line numbers and variable names;
+\code{-O0} turns optimisation off so the compiler does not
+reorder, inline, or elide things you want to inspect.
+
+A worked session. Suppose \file{buggy.cpp} segfaults:
+
+\begin{lstlisting}[style=shell]
+$ ./buggy
+Segmentation fault (core dumped)
+
+$ gdb ./buggy
+(gdb) run                       # start the program under the debugger
+Program received signal SIGSEGV, Segmentation fault.
+0x000055... in process_row (row=0x0) at buggy.cpp:42
+42          row->cells[0] = 'x';
+
+(gdb) bt                        # "backtrace": show the call stack
+#0  process_row (row=0x0)         at buggy.cpp:42
+#1  0x000055... in main ()        at buggy.cpp:88
+
+(gdb) frame 1                   # switch to main's frame
+(gdb) list                      # show the source around it
+86          for (auto* r : rows) {
+87              if (r == nullptr) continue;
+88              process_row(r);
+89          }
+
+(gdb) print rows.size()         # inspect a variable
+$1 = 3
+(gdb) print rows[1]             # inspect by index
+$2 = (Row *) 0x0                # ah --- the second row is null,
+                                # and the `continue` on line 87 is wrong
+                                # because we wrote `r ==`, not `r != `.
+
+(gdb) quit
+\end{lstlisting}
+
+The core moves:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{run} (or \code{r}) --- start (or restart) the program.
+  \item \code{bt} --- backtrace; the call stack at the current
+    point. Frame 0 is the innermost (where you crashed); higher
+    numbers are callers.
+  \item \code{frame N} (or \code{f N}) --- switch to frame
+    \code{N} so \code{list} and \code{print} see its locals.
+  \item \code{list} (or \code{l}) --- show source around the
+    current line.
+  \item \code{print EXPR} (or \code{p EXPR}) --- evaluate any \cpp{}
+    expression in the current frame's scope. \code{p
+    vec.size()}, \code{p \*ptr}, \code{p obj.field} all work.
+  \item \code{break FILE:LINE} (or \code{b FILE:LINE}) --- set a
+    breakpoint. The program halts when execution reaches that
+    line; you can then inspect state.
+  \item \code{continue} (or \code{c}) --- resume after a breakpoint.
+  \item \code{next} (or \code{n}) --- step over the next source line.
+  \item \code{step} (or \code{s}) --- step into the next call.
+  \item \code{quit} (or \code{q}) --- leave the debugger.
+\end{itemize}
+
+That is the entire toolkit for ninety per cent of debugging
+sessions. Two more things worth knowing:
+
+\paragraph{Core dumps.}
+If the program crashes outside the debugger, the kernel can save a
+\emph{core file} you can post-mortem with \code{gdb ./prog core}.
+Enable them with \code{ulimit -c unlimited} in your shell.
+
+\paragraph{Sanitiser output is its own debugger.}
+A program built with \code{-fsanitize=address,undefined} prints a
+full stack trace on the first violation, naming the file, line,
+and kind of error. For UB-class bugs this is faster than
+\code{gdb}, because it tells you what happened, not just where the
+process died.
+
+\begin{idea}
+For crashes: \code{gdb}, \code{run}, \code{bt}, \code{frame N},
+\code{print expr}. For UB: rebuild with
+\code{-fsanitize=address,undefined} and run again. Between them they
+catch nearly everything a beginner will hit.
+\end{idea}
+
 \section{Templates}
 \label{sec:cpp:templates}
 
@@ -2701,6 +2798,107 @@ $ < some-book.txt ./wordcount
 If you can read every line of that program with confidence, you can
 read \maya{}. The next two sections cement the connection.
 
+\section{A second worked example: maya \code{Signal}s without a UI}
+\label{sec:cpp:worked2}
+
+The word-counter used only the standard library. Here is a smaller
+example that uses one piece of \maya{} --- \code{Signal<T>} and
+\code{Computed<T>} from \file{maya/core/signal.hpp} --- without any
+rendering, layout, or runtime. It is a bridge: same \cpp{} you have
+seen, applied to a real maya type, so the language stops feeling
+separate from the library.
+
+The scenario: track a width and a height; compute their area
+automatically. If you change either input, the area updates with no
+bookkeeping.
+
+\begin{lstlisting}
+#include <maya/core/signal.hpp>
+#include <print>
+
+using namespace maya;
+
+int main() {
+    Signal<int> width{10};
+    Signal<int> height{20};
+
+    // A Computed<int> whose value is a pure function of the two
+    // signals. The lambda is run once now, again whenever a dependency
+    // changes, lazily on the next get().
+    auto area = computed([&] {
+        return width.get() * height.get();
+    });
+
+    std::println("area = {}",  area.get());    // 200
+
+    width.set(15);
+    std::println("area = {}",  area.get());    // 300
+
+    height.update([](int& h) { h += 5; });
+    std::println("area = {}",  area.get());    // 375
+}
+\end{lstlisting}
+
+What each piece is:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Signal<int> width\{10\}} --- a \code{Signal} of
+    \code{int} initialised to ten via brace init. \code{Signal<T>}
+    is a class template (Section~\ref{sec:cpp:templates}); this
+    instantiation gives us a signal carrying an integer.
+  \item \code{width.get()} --- read the current value. Inside a
+    \emph{reactive scope} (the \code{computed([\&]\{...\})} body),
+    this read also registers \code{width} as a dependency, so the
+    computed will re-run when \code{width} changes. We pulled the
+    relevant lines straight from \file{core/signal.hpp}:
+
+  \begin{lstlisting}
+    [[nodiscard]] const T& get() const {
+        detail::track(node_.get());     // register as dependency
+        return node_->value;
+    }
+  \end{lstlisting}
+
+    Note the \code{[[nodiscard]]} attribute (Section
+    \ref{sec:cpp:attributes}) --- the compiler warns if you call
+    \code{get()} and throw the result away.
+  \item \code{width.set(15)} --- write a new value and notify
+    every subscriber. The next \code{area.get()} sees the change.
+  \item \code{height.update([](int\& h) \{ h += 5; \})} --- update
+    in place via a lambda (Section~\ref{sec:cpp:lambdas}). The
+    lambda receives a reference to the stored value and mutates it.
+    Useful when the new value depends on the old.
+  \item \code{computed([\&] \{ return ...; \})} --- factory that
+    builds a \code{Computed<int>} (the return type is deduced from
+    the lambda's return). The lambda captures \code{width} and
+    \code{height} by reference (\code{[\&]}). Calling
+    \code{area.get()} runs the lambda once, caches the result, and
+    returns it; subsequent \code{get()}s return the cache until a
+    dependency changes.
+\end{itemize}
+
+Build and run with the standalone-project \file{CMakeLists.txt}
+from Chapter~\ref{ch:intro}, or as a quick test from inside
+\file{maya/examples/}:
+
+\begin{lstlisting}[style=shell]
+# Inside maya/, create examples/signals_demo.cpp with the program above
+cmake --build build -j10 signals_demo
+./build/signals_demo
+# area = 200
+# area = 300
+# area = 375
+\end{lstlisting}
+
+\begin{idea}
+\code{Signal} stores a value and a list of subscribers.
+\code{Computed} stores a pure function plus a cache; reading inside
+that function auto-subscribes. Together they give you spreadsheet
+semantics --- change an input, the right downstream values
+recompute --- with zero manual wiring. Chapter~\ref{ch:signals}
+opens the implementation.
+\end{idea}
+
 \section{Reading real \maya{} code}
 \label{sec:cpp:reading}
 
@@ -2899,7 +3097,7 @@ up.
 
 If the failing template is constrained by a concept, the error names
 the concept and the unmet requirement directly. This is one of the
-killers reasons to use concepts. Compare:
+killer reasons to use concepts. Compare:
 
 \begin{lstlisting}[style=shell]
 # without concepts:

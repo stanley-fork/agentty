@@ -148,7 +148,10 @@ Chapter~\ref{ch:terminal} covers the pseudo-terminal in detail.
 \paragraph{3. The maya program reads the byte.}
 The \maya{} program is sitting in a loop, asking the OS ``is there
 any input ready?''. Now there is. It reads $0x2B$ from its standard
-input.
+input. (In the source: this poll-and-read loop lives in
+\file{maya/include/maya/app/app.hpp} and the platform-specific
+readers under \file{maya/include/maya/platform/}; the kernel call
+it ultimately makes is \code{read(0, \&buf, n)}.)
 
 \paragraph{4. Maya turns the byte into an Event.}
 A single byte is not yet a useful concept. \maya{}'s input parser
@@ -156,46 +159,67 @@ decides ``this is a printable character, namely the character
 \code{+}'' and constructs a structured value: \code{Key\{.kind =
 KeyKind::Char, .character = '+'\}}. That value is then wrapped in
 the broader \code{Event} type and handed to your application code.
+(In the source: the parser is a state machine in
+\file{maya/include/maya/terminal/} and the \code{Event} type
+lives in \file{maya/include/maya/core/event.hpp};
+Chapter~\ref{ch:events} dissects both.)
 
 \paragraph{5. Your code computes a new state.}
 Your application receives the \code{Event}, decides it means
 ``increment'', and produces the new state: the counter is now $8$.
 In an Elm-style \maya{} program this is one pure function:
-\code{update(state=7, event=Inc) = 8}.
+\code{update(state=7, event=Inc) = 8}. (In the source: your
+\code{update} is called from the runtime in
+\file{maya/include/maya/app/app.hpp}; the \code{Cmd<Msg>} return
+type it produces lives in \file{maya/include/maya/core/cmd.hpp}.)
 
 \paragraph{6. Maya turns the new state into an Element tree.}
 Your \code{view} function is called with the new state ($8$) and
 returns an \code{Element}: a description of the UI, ``a box with a
 rounded border containing the text \code{Count: 8}''. This is a
-value in memory, not yet bytes on the wire.
+value in memory, not yet bytes on the wire. (In the source: the
+\code{Element} type and the box/text node variants live in
+\file{maya/include/maya/element/}; the DSL that builds them is
+\file{maya/include/maya/dsl.hpp}.)
 
 \paragraph{7. The layout engine assigns positions.}
 Given the current terminal size --- say 80 columns by 24 rows ---
 \maya{} walks the element tree and decides where every piece goes:
 the outer box at $(0, 0)$ of size $14 \times 3$, the inner text at
 $(1, 1)$, and so on. The output is a list of styled cells, one per
-position.
+position. (In the source: \file{maya/include/maya/layout/}, which
+wraps Facebook's Yoga flexbox engine; Chapter~\ref{ch:layout}.)
 
 \paragraph{8. The renderer builds a virtual screen.}
 Those cells are written into a 2-D grid in memory --- the
 \emph{canvas}. Every position on the screen now has a known
 character, foreground colour, background colour, and attribute set.
+(In the source: \file{maya/include/maya/render/canvas.hpp};
+Chapter~\ref{ch:canvas}.)
 
 \paragraph{9. The differ finds what changed.}
 A copy of last frame's canvas is still around. \maya{} compares the
 two canvases cell by cell. For our counter, almost everything is
 identical; only one cell changed --- the \code{7} became an \code{8}.
+(In the source: \file{maya/include/maya/platform/simd/}, with
+architecture-specific paths for AVX2, SSE4.2, and ARM NEON;
+Chapter~\ref{ch:simd}.)
 
 \paragraph{10. Maya emits ANSI bytes for only that cell.}
 A short string of bytes is produced: ``move cursor to (col, row)
 of the changed cell; set the right colour; print \code{8}''. Even
 though there might be hundreds of cells on screen, only a dozen
-bytes are sent.
+bytes are sent. (In the source: the escape-sequence constants live
+in \file{maya/include/maya/terminal/ansi.hpp};
+Chapter~\ref{ch:ansi}.)
 
 \paragraph{11. Those bytes flow back through the pty to the emulator.}
 The emulator reads them, parses them, and updates its window. The
 user sees the digit change. From keypress to pixel update is
-typically a couple of milliseconds.
+typically a couple of milliseconds. (The kernel call \maya{}
+makes here is \code{write(1, buf, n)}, where \code{1} is the file
+descriptor for standard output. Chapter~\ref{ch:terminal} explains
+file descriptors from scratch.)
 
 That is one frame. The rest of the book is, in a sense, just
 detailed coverage of each of those eleven steps. The DSL
@@ -246,6 +270,41 @@ the work the library does for you is:
 This book covers each of those jobs in detail. For now, treat
 \maya{} as a black box that turns ``description of a UI'' into ``the
 correct bytes on the wire''.
+
+\section{Map of Part I}
+\label{sec:intro:map}
+
+Before we go further, here is exactly what the rest of Part I will
+teach you, and why each chapter exists.
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{This chapter (Chapter~\ref{ch:intro}).} What a
+    terminal is, what a TUI is, what \maya{} is, what one frame of
+    a TUI looks like, and how to install and build the library.
+    By the end you can compile and run a five-line static banner.
+  \item \textbf{Chapter~\ref{ch:terminal} --- the terminal as
+    bytes.} You stop treating the terminal as magic. We open it
+    up: pseudo-terminals, file descriptors, the ANSI byte language,
+    UTF-8 from scratch, raw mode, signals, mouse encoding,
+    bracketed paste. By the end you can write a small program in
+    plain \cpp{} --- no library --- that prints ``Hello'' in red and
+    cleans up after itself.
+  \item \textbf{Chapter~\ref{ch:cpp} --- the \cpp{} you need for
+    \maya{}.} A self-contained mini-course in modern \cpp{}, taught
+    only with the features \maya{} actually uses. RAII, templates,
+    \code{constexpr}, concepts, variants, lambdas, move semantics,
+    \code{expected}. By the end you can read \maya{}'s own headers
+    and recognise every construct.
+\end{itemize}
+
+If you already know modern \cpp{} well, skip Chapter~\ref{ch:cpp} on
+first pass; come back when an unfamiliar idiom shows up in Part II.
+
+\begin{idea}
+Part I is the rope ladder: terminal at the bottom, language in the
+middle, the rest of the book above. Each rung is one chapter; you
+climb in order.
+\end{idea}
 
 \section{What is a tree, and why a tree?}
 \label{sec:intro:tree}
@@ -573,69 +632,385 @@ Three observations are worth carrying forward:
     to it the syntax is quite pleasant to scan.
 \end{enumerate}
 
-\section{Building and running}
+\section{Building and running, from absolute zero}
 
-The \maya{} repository builds with \textbf{CMake}, a tool that
-generates build files for your platform. You need a recent \cpp{}
-compiler --- GCC 15 or newer, or a recent Clang --- because \maya{}
-uses \cpp{}26 features. On Linux:
+This is the longest section of the chapter on purpose. If you cannot
+build and run the Hello program, nothing in the rest of the book is
+reachable. We walk every step. Skip ahead only if you already have
+the \maya{} examples building locally.
+
+\subsection{Step 0: what you need installed}
+
+Four tools, no exceptions:
+
+\begin{enumerate}[leftmargin=*]
+  \item A \cpp{} compiler that speaks \cpp{}26. In practice that
+    means \textbf{GCC 15 or newer}, or a very recent \textbf{Clang}
+    (20+). Older compilers reject the features \maya{} uses on its
+    first header.
+  \item \textbf{CMake} 3.28 or newer --- the build-system generator
+    \maya{}'s root \file{CMakeLists.txt} requires.
+  \item \textbf{Git} --- to clone the repository and pull in its
+    submodules (Yoga, the flexbox layout engine, lives in one).
+  \item A terminal emulator that supports modern features: 24-bit
+    colour, mouse reporting, the alternate screen. Almost any
+    terminal you would actually use today qualifies (kitty,
+    iTerm2, WezTerm, Alacritty, Ghostty, recent GNOME Terminal or
+    Konsole, recent Windows Terminal). The chapter on the terminal
+    will tell you how to test this yourself.
+\end{enumerate}
+
+\begin{idea}
+Four tools: a recent \cpp{} compiler, CMake, Git, a modern terminal.
+Get those right once and you are set for the rest of the book.
+\end{idea}
+
+\subsection{Step 1: verify what you already have}
+
+Open a terminal and run, exactly:
 
 \begin{lstlisting}[style=shell]
+g++ --version
+cmake --version
+git --version
+echo $TERM
+\end{lstlisting}
+
+The output should look roughly like (numbers will vary):
+
+\begin{terminalbox}
+g++ (Ubuntu 15.1.0-1ubuntu1) 15.1.0\\
+cmake version 3.30.2\\
+git version 2.45.2\\
+xterm-256color
+\end{terminalbox}
+
+Read each one:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{g++} version must be 15.x or higher. \code{14} or
+    below will fail.
+  \item \code{cmake} must be 3.28 or higher. \code{3.22} (the
+    Ubuntu 22.04 default) is too old.
+  \item \code{git} any modern version is fine.
+  \item \code{\$TERM} should print something like
+    \code{xterm-256color}, \code{tmux-256color}, or
+    \code{kitty}. If it prints just \code{xterm} or \code{dumb},
+    your terminal database is misconfigured --- 24-bit colour will
+    look wrong. Fixable, but flag it now.
+\end{itemize}
+
+If any tool is missing or too old, install or upgrade it.
+
+\paragraph{Ubuntu / Debian.}
+\begin{lstlisting}[style=shell]
+sudo apt update
+sudo apt install build-essential git
+sudo apt install g++-15 cmake
+# if your distro doesn't ship g++-15 yet:
+sudo add-apt-repository ppa:ubuntu-toolchain-r/test
+sudo apt update && sudo apt install g++-15
+\end{lstlisting}
+
+\paragraph{Fedora / RHEL.}
+\begin{lstlisting}[style=shell]
+sudo dnf install gcc-c++ cmake git
+# Fedora 41+ ships GCC 14/15; older releases may need a toolset.
+\end{lstlisting}
+
+\paragraph{Arch / Manjaro.}
+\begin{lstlisting}[style=shell]
+sudo pacman -S gcc cmake git
+# Arch tracks the latest GCC; no extra repos needed.
+\end{lstlisting}
+
+\paragraph{macOS.}
+Apple ships an old Clang under the name \code{g++}; for \cpp{}26 you
+want Homebrew's LLVM (currently Clang 20):
+\begin{lstlisting}[style=shell]
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+brew install llvm cmake git
+# Then point CMake at the Homebrew clang++:
+export CXX=$(brew --prefix llvm)/bin/clang++
+\end{lstlisting}
+
+\paragraph{Windows.}
+Install \textbf{WSL2} with Ubuntu, then follow the Ubuntu steps
+above inside the WSL terminal. Native Windows toolchains (MSVC,
+MinGW) build \maya{} only in its \cpp{}23 subset; the book assumes
+\cpp{}26 and Linux semantics throughout.
+
+\begin{warning}
+Do not try to use the \code{g++} that ships with Ubuntu 22.04
+(version 11) or even Ubuntu 24.04 LTS's default (version 13). You
+will get a wall of errors on \code{constexpr} and \code{requires}
+clauses. Install \code{g++-15} explicitly and either symlink
+\code{/usr/bin/g++} to it or set \code{CXX=g++-15} in your shell.
+\end{warning}
+
+\subsection{Step 2: clone the repository}
+
+Pick a directory --- anywhere you keep code; we use \file{\textasciitilde/code} here:
+
+\begin{lstlisting}[style=shell]
+mkdir -p ~/code && cd ~/code
 git clone --recursive https://github.com/1ay1/agentty
 cd agentty/maya
+\end{lstlisting}
+
+A word on \code{--recursive}. \maya{} does not contain Yoga
+(the flexbox layout engine) directly --- instead Yoga lives in a
+subdirectory marked as a \textbf{submodule}, which is git's way of
+saying ``a pointer to another repository at a specific commit''. The
+\code{--recursive} flag tells git to clone the submodules at the same
+time. Forget it and the build will later fail with
+\code{fatal error: yoga/Yoga.h: No such file or directory}. The fix
+in that case is:
+
+\begin{lstlisting}[style=shell]
+git submodule update --init --recursive
+\end{lstlisting}
+
+from the repository root.
+
+\subsection{Step 3: configure the build}
+
+From inside the \file{maya/} directory:
+
+\begin{lstlisting}[style=shell]
 cmake -B build
+\end{lstlisting}
+
+``Configure'' means: CMake reads \file{CMakeLists.txt}, asks your
+system questions (which compiler, where its headers live, what
+instruction-set extensions the CPU supports), and writes out actual
+build files (usually Makefiles, occasionally Ninja files) into a
+new directory called \file{build/}.
+
+The terminal output is dense; the lines you care about are near the
+top and look like:
+
+\begin{terminalbox}
+-- The CXX compiler identification is GNU 15.1.0\\
+-- Detecting CXX compile features\\
+-- Performing Test MAYA\_HAS\_AVX2 -- Success\\
+-- Configuring done\\
+-- Generating done\\
+-- Build files have been written to: \textasciitilde/code/agentty/maya/build
+\end{terminalbox}
+
+If the compiler identification says \code{GNU 13.x} or lower, CMake
+found the wrong compiler. Tell it explicitly:
+
+\begin{lstlisting}[style=shell]
+cmake -B build -DCMAKE_CXX_COMPILER=g++-15
+\end{lstlisting}
+
+\subsection{Step 4: build}
+
+\begin{lstlisting}[style=shell]
 cmake --build build -j$(nproc)
 \end{lstlisting}
 
-What each command does, briefly:
+\code{\$(nproc)} expands to the number of CPU cores on your machine,
+so the build uses every core. On a quiet eight-core laptop the
+first clean build takes one to two minutes; subsequent builds
+(after a small edit) take seconds, because only the changed files
+are recompiled.
 
-\begin{itemize}[leftmargin=*]
-  \item \code{git clone --recursive ...} downloads the project and
-    its sub-projects (called \emph{submodules}).
-  \item \code{cd agentty/maya} moves into the maya directory.
-  \item \code{cmake -B build} reads \maya{}'s \file{CMakeLists.txt}
-    file and produces build files in a new directory called
-    \file{build}.
-  \item \code{cmake --build build -j\$(nproc)} actually compiles
-    things, using as many parallel jobs as you have CPU cores.
-\end{itemize}
+Progress lines look like:
 
-If it succeeds, \file{build/} contains around two dozen example
-programs --- \file{build/counter}, \file{build/dashboard},
-\file{build/doom\_fire} --- one for each file in \file{examples/}.
-Run any of them by typing its path:
+\begin{terminalbox}
+{[ 12\%] Building CXX object CMakeFiles/maya.dir/src/canvas.cpp.o}\\
+{[ 24\%] Building CXX object CMakeFiles/maya.dir/src/layout.cpp.o}\\
+\dots\\
+{[100\%] Linking CXX executable counter}
+\end{terminalbox}
+
+If you see a percentage climb to 100 and no red text, the build
+succeeded.
+
+\subsection{Step 5: run an example}
+
+The \file{build/} directory now contains 26 example programs --- one
+binary per source file in \file{examples/}:
+
+\begin{lstlisting}[style=shell]
+ls build/ | head
+# agent  breakout  chat  counter  dashboard  deploy
+# doom_fire  fluid  fps  hacker  ide ...
+\end{lstlisting}
+
+Run a small one:
 
 \begin{lstlisting}[style=shell]
 ./build/counter
 \end{lstlisting}
 
-A small UI appears. Press the keys it documents (often \code{q} to
-quit). Resize the terminal window while it runs; watch the UI
-re-flow.
+The screen clears, a small bordered box appears with a number and
+key hints. Press \code{+} and \code{-}; the number changes. Resize
+the terminal window while it runs --- the UI re-centres. Press
+\code{q} to quit. The screen restores to where you were.
 
-\subsection{Adding your own example}
+If that worked, every layer described earlier is now executing on
+your machine: input parsing (Step 4 of the frame timeline), the
+Elm-style update (5), the DSL building an Element tree (6), Yoga
+layout (7), canvas (8), SIMD diff (9), ANSI bytes (10).
 
-The easiest way to try the program above is to drop it into
-\file{maya/examples/hello.cpp}, re-run CMake, and rebuild:
+Try two more, for the felt sense of what the library can do:
+
+\begin{lstlisting}[style=shell]
+./build/dashboard      # multi-pane realtime gauges
+./build/doom_fire      # the classic Doom fire effect
+\end{lstlisting}
+
+\subsection{Step 6: add your own program inside the repo}
+
+The quickest way to compile the Hello banner from earlier in this
+chapter is to drop it into \file{maya/examples/}. The CMakeLists
+is written to scan that directory --- every \file{.cpp} in there
+automatically becomes an example binary.
 
 \begin{lstlisting}[style=shell]
 # from inside maya/
-$EDITOR examples/hello.cpp        # paste the program
+$EDITOR examples/hello.cpp        # paste the Hello program here
 cmake -B build                    # picks up the new file
-cmake --build build -j$(nproc)
+cmake --build build -j$(nproc) hello
 ./build/hello
 \end{lstlisting}
 
-This loop --- edit, build, run --- is the loop you will spend the
-rest of the book in.
+Adding the target name \code{hello} at the end of the build line
+asks for that one binary, not the whole world. Faster on iteration.
+
+\subsection{Step 7: a standalone project that uses maya}
+
+Dropping files into \file{maya/examples/} is fine for experimenting.
+For real work, you want your own project that \emph{depends on}
+maya. The minimum is two files.
+
+\file{my-app/CMakeLists.txt}:
+
+\begin{lstlisting}[style=shell]
+cmake_minimum_required(VERSION 3.28)
+project(my_app LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Point CMake at the maya checkout you cloned earlier.
+# Adjust the path to wherever you put it.
+add_subdirectory(../agentty/maya maya-build)
+
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE maya)
+\end{lstlisting}
+
+\file{my-app/main.cpp}:
+
+\begin{lstlisting}
+#include <maya/maya.hpp>
+using namespace maya;
+using namespace maya::dsl;
+
+int main() {
+    constexpr auto ui = t<"Hello from my own project">
+                      | Bold | Fg<100, 200, 255>
+                      | border_<Round> | pad<1>;
+    print(ui.build());
+}
+\end{lstlisting}
+
+Build it the same way:
+
+\begin{lstlisting}[style=shell]
+cd my-app
+cmake -B build
+cmake --build build -j$(nproc)
+./build/my_app
+\end{lstlisting}
+
+The \code{add\_subdirectory(...)} line is the magic: it pulls maya's
+entire build into your project, exposing the \code{maya} target you
+then link against. Because everything is built from source, you get
+the \cpp{}26 niceties --- inlining across translation units, full
+\code{constexpr} evaluation --- that a pre-built library could not
+offer.
+
+\begin{idea}
+Two ways to use maya in your own code: either drop a file into
+\file{maya/examples/} (fast, throwaway), or write a tiny
+\file{CMakeLists.txt} that calls \code{add\_subdirectory(...maya)}
+and links against the \code{maya} target (proper, reusable).
+\end{idea}
+
+\subsection{Step 8: the edit -- build -- run loop}
+
+From here on, the loop you spend in is small:
+
+\begin{enumerate}[leftmargin=*]
+  \item Edit a source file.
+  \item \code{cmake --build build -j\$(nproc) <target>}
+  \item \code{./build/<target>}
+  \item Look at what happened on screen. Goto 1.
+\end{enumerate}
+
+No CMake re-configure needed for code edits. Only re-run
+\code{cmake -B build} when you \emph{add} or \emph{remove} files, or
+edit the \file{CMakeLists.txt} itself. Everything else is just step
+2 of the loop.
+
+\subsection{Troubleshooting first builds}
+
+A small catalogue of failures you will hit at least once:
 
 \begin{warning}
-If the build complains about \code{constexpr}, \code{concept}, or
-unknown standard-library headers, your compiler is too old. \code{g++
---version} should be 15 or newer. On Ubuntu/Debian:
-\code{sudo apt install g++-15}. On macOS, install a recent Homebrew
-\code{llvm}. On Windows, use WSL with a current Ubuntu.
+\textbf{Symptom:} a sea of red on a header, mentioning
+\code{concept}, \code{requires}, or \code{constexpr}.\\
+\textbf{Cause:} compiler is too old.\\
+\textbf{Fix:} install \code{g++-15} and re-configure with
+\code{cmake -B build -DCMAKE\_CXX\_COMPILER=g++-15}.
 \end{warning}
+
+\begin{warning}
+\textbf{Symptom:} \code{fatal error: yoga/Yoga.h: No such file or directory}.\\
+\textbf{Cause:} submodules not fetched.\\
+\textbf{Fix:} from the repo root, \code{git submodule update --init --recursive}, then rebuild.
+\end{warning}
+
+\begin{warning}
+\textbf{Symptom:} \code{cmake: command not found}, or CMake complains
+about its own version being too old.\\
+\textbf{Cause:} CMake older than 3.28.\\
+\textbf{Fix:} install a current CMake. On Ubuntu, the cleanest path
+is the Kitware PPA; on macOS, \code{brew upgrade cmake}.
+\end{warning}
+
+\begin{warning}
+\textbf{Symptom:} the binary runs but the colours look monochrome
+or the borders show as \code{q}, \code{x}, \code{l}, \code{k}.\\
+\textbf{Cause:} terminal not in UTF-8 mode, or \code{\$TERM} is
+\code{dumb}.\\
+\textbf{Fix:} run \code{locale} and check \code{LANG} ends in
+\code{UTF-8}; export \code{TERM=xterm-256color} (or your terminal's
+proper name) and re-run.
+\end{warning}
+
+\begin{warning}
+\textbf{Symptom:} the binary crashes with \code{Illegal instruction}
+(SIGILL) on a different machine to where you built it.\\
+\textbf{Cause:} \code{-march=native} baked the build host's CPU
+into the binary; the runner CPU lacks one of those instructions.\\
+\textbf{Fix:} re-configure with \code{cmake -B build -DMAYA\_NATIVE\_TUNING=OFF}
+and rebuild.
+\end{warning}
+
+\begin{recap}
+If you have done Steps 1--5 you have a working maya. Step 6 lets
+you compile this chapter's Hello program; Step 7 lets you build
+your own project against maya without modifying its tree.
+Everything later in the book assumes you can run the edit -- build
+-- run loop from Step 8.
+\end{recap}
 
 \section{What the rest of the book looks like}
 
