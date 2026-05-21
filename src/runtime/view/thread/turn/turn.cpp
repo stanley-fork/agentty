@@ -13,6 +13,7 @@
 #include "agentty/domain/catalog.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
@@ -441,6 +442,20 @@ void append_assistant_body_slots(maya::Turn::Config& cfg,
         for (char c : model_id_ref)
             mixlive(static_cast<std::uint64_t>(
                 static_cast<unsigned char>(c)));
+        // Coarse elapsed bucket of any non-terminal tool, so the live
+        // duration cell actually ticks. Without this the cached
+        // AgentTimeline Element is reused frame-to-frame and the
+        // elapsed string is frozen at the value it had on first build.
+        // 100ms buckets keep the displayed value within the user-
+        // perceptible jitter floor while keeping the cache rebuild
+        // rate bounded (≤10/s per running tool).
+        for (const auto& tc : tool_calls) {
+            if (tc.is_terminal()) continue;
+            const auto secs = tool_elapsed(tc);
+            const std::uint64_t bucket =
+                static_cast<std::uint64_t>(secs * 10.0f);
+            mixlive(bucket);
+        }
 
         auto& slot = m.ui.view_cache.turn_config(
             m.d.current.id, msg.id);
