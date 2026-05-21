@@ -198,12 +198,54 @@ void clear_frozen(Model& m) {
 
 void rehydrate_frozen(Model& m) {
     clear_frozen(m);
-    // Default rehydration policy: freeze the entire history. The live
-    // tail starts empty; the next stream (or composer action) decides
-    // what becomes live. This matches the post-load expectation that
-    // the user sees their full saved transcript as immutable scrollback,
-    // with the composer poised to start a new turn beneath it.
-    freeze_range(m, 0, m.d.current.messages.size());
+    const auto& msgs = m.d.current.messages;
+    const std::size_t total = msgs.size();
+    if (total == 0) return;
+
+    // Bounded rehydrate: only materialise the tail that would survive
+    // the soft cap anyway. Building the whole history on load is the
+    // dominant ThreadListSelect cost: each frozen turn invokes markdown
+    // parse + tool body preview + AgentTimeline layout, so a 400-msg
+    // thread spent that cost on ~320 entries that trim_frozen_if_oversized
+    // (kFrozenMax=240) would discard at the next turn anyway. Skip them
+    // up front; messages stay in m.d.current.messages so wire payload
+    // and reload state are intact, they just never get rendered. Their
+    // absence matches what the user already sees on a long live session
+    // after trim has fired.
+    //
+    // kRehydrateTurns leaves headroom below kFrozenMax/2 so a few more
+    // turns can be appended before the next trim.
+    constexpr std::size_t kRehydrateTurns = 60;
+
+    // Walk backward counting speaker-runs until we hit the budget.
+    std::size_t units = 0;
+    std::size_t start = total;
+    std::size_t cursor = total;
+    while (cursor > 0) {
+        std::size_t j = cursor;
+        if (msgs[j - 1].role == Role::Assistant) {
+            while (j > 0 && msgs[j - 1].role == Role::Assistant) --j;
+        } else {
+            --j;
+        }
+        ++units;
+        start = j;
+        if (units >= kRehydrateTurns) break;
+        cursor = j;
+    }
+
+    // Seed frozen_turn to the count of assistant runs in the skipped
+    // prefix so visible turn numbers reflect their true position
+    // (e.g. "turn 87" not "turn 1" on a long reload).
+    int skipped_assistant_runs = 0;
+    for (std::size_t k = 0; k < start; ) {
+        const std::size_t run_end = ui::turn_run_end(msgs, k);
+        if (msgs[k].role == Role::Assistant) ++skipped_assistant_runs;
+        k = run_end;
+    }
+    m.ui.frozen_turn = skipped_assistant_runs;
+
+    freeze_range(m, start, total);
 }
 
 maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
