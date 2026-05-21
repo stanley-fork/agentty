@@ -103,22 +103,22 @@ struct AgenttyApp {
         mix(m.ui.composer.expanded ? 1ULL : 0ULL);
 
         // Time-driven animation buckets. Each bucket flip forces a
-        // render via hash advance. We pick the SMALLEST bucket of
-        // every animation currently visible so the hash steps at
-        // the rate of the fastest active animation:
+        // render via hash advance. The bucket size is the FLOOR on
+        // how often we'll re-render purely for animation; the actual
+        // wake-up cadence is driven by request_animation_frame()
+        // deadlines, so a tight bucket here costs nothing when no
+        // animation is live.
         //
-        //   - composer blink     → 265 ms (half-period, always live)
-        //   - streaming caret /
-        //     scramble glyphs    →  33 ms (StreamingMarkdown's RAF gate)
-        //
-        // Pick the streaming bucket when a turn is active; otherwise
-        // fall back to the blink bucket so idle still ticks the
-        // composer cursor.
+        // 33 ms = 30 fps — fast enough for the welcome screen's
+        // sine-wave wordmark bob, the streaming caret pulse, and
+        // the spinner. The composer cursor blink (530 ms period)
+        // still resolves correctly inside this bucket: two adjacent
+        // ~265 ms half-periods land in different 33 ms buckets so
+        // the toggle is captured.
         const auto now_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-        const std::int64_t anim_bucket_ms = m.s.active() ? 33 : 265;
-        mix(static_cast<std::uint64_t>(now_ms / anim_bucket_ms));
+        mix(static_cast<std::uint64_t>(now_ms / 33));
 
         return k;
     }
