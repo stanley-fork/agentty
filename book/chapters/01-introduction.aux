@@ -8,31 +8,54 @@
 \@writefile{toc}{\contentsline {subsection}{\numberline {1.1.1}Why does it look so old?}{2}{subsection.1.1.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {1.2}What is a TUI?}{3}{section.1.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {1.2.1}Why bother with TUIs in 2025?}{3}{subsection.1.2.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {1.3}What is \textsf  {maya}{}?}{4}{section.1.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {1.4}Why does \textsf  {maya}{} exist when there are already others?}{4}{section.1.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{1. Wrong UI code does not compile.}{4}{section.1.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{2. Re-drawing is wired to be fast.}{4}{section.1.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{3. The runtime is borrowed from a language called Elm.}{5}{section.1.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {1.5}The layers of a \textsf  {maya}{} program}{5}{section.1.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {1.6}Your first \textsf  {maya}{} program}{5}{section.1.6}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.6.1}Line by line}{6}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {\#include <maya/maya.hpp>}.}{6}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {using namespace maya;} and \texttt  {using namespace maya::dsl;}.}{6}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {int main()}.}{6}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {constexpr auto ui = ...}.}{6}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {v(...)}.}{6}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {t<"Hello, maya">}.}{6}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {| Bold | Fg<100, 180, 255>}.}{7}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {| Dim}.}{7}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {| border\_<Round> | pad<1>}.}{7}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\texttt  {print(ui.build())}.}{7}{subsection.1.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.6.2}What you should take away}{7}{subsection.1.6.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {1.7}Building and running}{7}{section.1.7}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.7.1}Adding your own example}{8}{subsection.1.7.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {1.8}What the rest of the book looks like}{8}{section.1.8}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {1.9}How this book is laid out}{9}{section.1.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.3}One frame of a TUI: what literally happens}{4}{section.1.3}\protected@file@percent }
+\newlabel{sec:intro:one-frame}{{1.3}{4}{One frame of a TUI: what literally happens}{section.1.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{1. The keyboard sends a byte to the kernel.}{4}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{2. The terminal emulator forwards the byte.}{4}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{3. The maya program reads the byte.}{4}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{4. Maya turns the byte into an Event.}{4}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{5. Your code computes a new state.}{4}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{6. Maya turns the new state into an Element tree.}{4}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{7. The layout engine assigns positions.}{4}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{8. The renderer builds a virtual screen.}{4}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{9. The differ finds what changed.}{4}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{10. Maya emits ANSI bytes for only that cell.}{5}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{11. Those bytes flow back through the pty to the emulator.}{5}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.4}What is \textsf  {maya}{}?}{5}{section.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.5}What is a tree, and why a tree?}{5}{section.1.5}\protected@file@percent }
+\newlabel{sec:intro:tree}{{1.5}{5}{What is a tree, and why a tree?}{section.1.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {1.6}Why does \textsf  {maya}{} exist when there are already others?}{6}{section.1.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{1. Wrong UI code does not compile.}{7}{section.1.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{2. Re-drawing is wired to be fast.}{7}{lstnumber.-1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{3. The runtime is borrowed from a language called Elm.}{7}{lstnumber.-1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.7}The layers of a \textsf  {maya}{} program}{7}{section.1.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.8}Your first \textsf  {maya}{} program}{8}{section.1.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8.1}Line by line}{9}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {\#include <maya/maya.hpp>}.}{9}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {using namespace maya;} and \texttt  {using namespace maya::dsl;}.}{9}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {int main()}.}{9}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {constexpr auto ui = ...}.}{9}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {v(...)}.}{9}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {t<"Hello, maya">}.}{9}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {| Bold | Fg<100, 180, 255>}.}{9}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {| Dim}.}{9}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {| border\_<Round> | pad<1>}.}{10}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {print(ui.build())}.}{10}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8.2}What you should take away}{10}{subsection.1.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.9}Building and running}{10}{section.1.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.9.1}Adding your own example}{11}{subsection.1.9.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.10}What the rest of the book looks like}{11}{section.1.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.11}How \textsf  {maya}{} compares to other TUI libraries}{12}{section.1.11}\protected@file@percent }
+\newlabel{sec:intro:compare}{{1.11}{12}{How \maya {} compares to other TUI libraries}{section.1.11}{}}
+\@writefile{toc}{\contentsline {paragraph}{ncurses (C, 1990s).}{12}{section.1.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{textual (Python).}{12}{lstnumber.-6.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{ratatui (Rust).}{12}{lstnumber.-7.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\textsf  {maya}{} (C\nolinebreak  \hspace  {-.05em}\raisebox  {.2ex}{\small  {++}}{}26).}{13}{lstnumber.-8.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.12}What is a ``binary''?}{13}{section.1.12}\protected@file@percent }
+\newlabel{sec:intro:binary}{{1.12}{13}{What is a ``binary''?}{section.1.12}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {1.13}How this book is laid out}{13}{section.1.13}\protected@file@percent }
 \@setckpt{chapters/01-introduction}{
-\setcounter{page}{11}
+\setcounter{page}{17}
 \setcounter{equation}{0}
 \setcounter{enumi}{5}
 \setcounter{enumii}{0}
@@ -42,7 +65,7 @@
 \setcounter{mpfootnote}{0}
 \setcounter{part}{1}
 \setcounter{chapter}{1}
-\setcounter{section}{9}
+\setcounter{section}{13}
 \setcounter{subsection}{0}
 \setcounter{subsubsection}{0}
 \setcounter{paragraph}{0}
@@ -53,10 +76,10 @@
 \setcounter{section@level}{0}
 \setcounter{Item}{16}
 \setcounter{Hfootnote}{0}
-\setcounter{bookmark@seq@number}{16}
-\setcounter{tcbbreakpart}{2}
+\setcounter{bookmark@seq@number}{20}
+\setcounter{tcbbreakpart}{1}
 \setcounter{tcblayer}{0}
-\setcounter{tcolorbox@number}{10}
+\setcounter{tcolorbox@number}{12}
 \setcounter{lstnumber}{6}
 \setcounter{caption@flags}{0}
 \setcounter{continuedfloat}{0}

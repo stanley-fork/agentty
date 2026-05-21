@@ -1,38 +1,54 @@
 \relax 
 \providecommand\hyper@newdestlabel[2]{}
-\@writefile{toc}{\contentsline {chapter}{\numberline {2}The terminal, byte by byte}{11}{chapter.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {2}The terminal, byte by byte}{17}{chapter.2}\protected@file@percent }
 \@writefile{lof}{\addvspace {10\p@ }}
 \@writefile{lot}{\addvspace {10\p@ }}
-\newlabel{ch:terminal}{{2}{11}{The terminal, byte by byte}{chapter.2}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {2.1}Three things called ``terminal''}{11}{section.2.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The hardware terminal.}{11}{section.2.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The terminal emulator.}{11}{section.2.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The pseudo-terminal, or \emph  {pty}.}{11}{section.2.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.1.1}What is a file descriptor?}{11}{subsection.2.1.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {2.2}The pseudo-terminal: a kitchen-pass-through}{12}{section.2.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {2.3}The byte language: ASCII plus ANSI}{12}{section.2.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.1}Ordinary bytes: ASCII}{12}{subsection.2.3.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.2}Control bytes}{13}{subsection.2.3.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.3}Anatomy of an escape sequence}{13}{subsection.2.3.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.4}The families}{14}{subsection.2.3.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{ANSI columns and rows are 1-based.}{14}{subsection.2.3.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Private modes use \texttt  {?}.}{14}{subsection.2.3.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Numbers default to $1$.}{14}{subsection.2.3.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.5}SGR: colours and attributes}{14}{subsection.2.3.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.6}Cursor movement and erasing}{15}{subsection.2.3.6}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.7}Modes: cursor, alt-screen, mouse, paste}{16}{subsection.2.3.7}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The alternate screen.}{16}{lstnumber.-9.10}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Bracketed paste.}{16}{lstnumber.-9.10}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Synchronised update.}{16}{lstnumber.-9.10}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.8}Encoding non-ASCII keys: the Kitty Keyboard Protocol}{16}{subsection.2.3.8}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {2.4}Cooked mode, raw mode, and \texttt  {termios}}{17}{section.2.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.1}The \texttt  {termios} struct}{17}{subsection.2.4.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.2}What keystrokes look like in raw mode}{18}{subsection.2.4.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {2.5}The screen as a grid}{19}{section.2.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.1}Wide characters}{19}{subsection.2.5.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {2.6}Putting it together: a no-library Hello world}{20}{section.2.6}\protected@file@percent }
+\newlabel{ch:terminal}{{2}{17}{The terminal, byte by byte}{chapter.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2.1}What is a ``state machine''?}{17}{section.2.1}\protected@file@percent }
+\newlabel{sec:term:fsm}{{2.1}{17}{What is a ``state machine''?}{section.2.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2.2}Three things called ``terminal''}{18}{section.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The hardware terminal.}{18}{section.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The terminal emulator.}{18}{section.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The pseudo-terminal, or \emph  {pty}.}{18}{section.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2.1}What is a file descriptor?}{19}{subsection.2.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.3}The pseudo-terminal: a kitchen-pass-through}{19}{section.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.4}The byte language: ASCII plus ANSI}{19}{section.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.1}Ordinary bytes: ASCII}{20}{subsection.2.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.2}Control bytes}{20}{subsection.2.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.3}Anatomy of an escape sequence}{20}{subsection.2.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.4}The families}{21}{subsection.2.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{ANSI columns and rows are 1-based.}{22}{subsection.2.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Private modes use \texttt  {?}.}{22}{subsection.2.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Numbers default to $1$.}{22}{subsection.2.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.5}SGR: colours and attributes}{22}{subsection.2.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.6}Cursor movement and erasing}{23}{subsection.2.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.7}Modes: cursor, alt-screen, mouse, paste}{23}{subsection.2.4.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The alternate screen.}{24}{lstnumber.-14.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Bracketed paste.}{24}{lstnumber.-14.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Synchronised update.}{24}{lstnumber.-14.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.8}Encoding non-ASCII keys: the Kitty Keyboard Protocol}{24}{subsection.2.4.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.5}Cooked mode, raw mode, and \texttt  {termios}}{24}{section.2.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.1}The \texttt  {termios} struct}{25}{subsection.2.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.2}What keystrokes look like in raw mode}{26}{subsection.2.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.6}The screen as a grid}{27}{section.2.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6.1}Wide characters}{27}{subsection.2.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.7}Signals: \texttt  {SIGWINCH}, \texttt  {SIGINT}, and friends}{27}{section.2.7}\protected@file@percent }
+\newlabel{sec:term:signals}{{2.7}{27}{Signals: \code {SIGWINCH}, \code {SIGINT}, and friends}{section.2.7}{}}
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {SIGWINCH} --- window-size change.}{27}{section.2.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {SIGINT} --- interrupt.}{28}{lstnumber.-17.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {SIGTERM}, \texttt  {SIGHUP}, \texttt  {SIGSEGV}.}{28}{lstnumber.-17.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7.1}What \texttt  {ioctl} actually is}{28}{subsection.2.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.8}Mouse reporting, on the wire}{28}{section.2.8}\protected@file@percent }
+\newlabel{sec:term:mouse}{{2.8}{28}{Mouse reporting, on the wire}{section.2.8}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2.9}Bracketed paste, on the wire}{29}{section.2.9}\protected@file@percent }
+\newlabel{sec:term:paste}{{2.9}{29}{Bracketed paste, on the wire}{section.2.9}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2.10}The input parser as a state machine}{30}{section.2.10}\protected@file@percent }
+\newlabel{sec:term:input-fsm}{{2.10}{30}{The input parser as a state machine}{section.2.10}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2.11}Putting it together: a no-library Hello world}{30}{section.2.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.12}A real maya frame, traced byte by byte}{31}{section.2.12}\protected@file@percent }
+\newlabel{sec:term:trace}{{2.12}{31}{A real maya frame, traced byte by byte}{section.2.12}{}}
 \@setckpt{chapters/02-terminal}{
-\setcounter{page}{22}
+\setcounter{page}{34}
 \setcounter{equation}{0}
 \setcounter{enumi}{5}
 \setcounter{enumii}{0}
@@ -42,7 +58,7 @@
 \setcounter{mpfootnote}{0}
 \setcounter{part}{1}
 \setcounter{chapter}{2}
-\setcounter{section}{6}
+\setcounter{section}{12}
 \setcounter{subsection}{0}
 \setcounter{subsubsection}{0}
 \setcounter{paragraph}{0}
@@ -51,12 +67,12 @@
 \setcounter{table}{0}
 \setcounter{parentequation}{0}
 \setcounter{section@level}{0}
-\setcounter{Item}{21}
+\setcounter{Item}{24}
 \setcounter{Hfootnote}{0}
-\setcounter{bookmark@seq@number}{35}
+\setcounter{bookmark@seq@number}{46}
 \setcounter{tcbbreakpart}{1}
 \setcounter{tcblayer}{0}
-\setcounter{tcolorbox@number}{18}
+\setcounter{tcolorbox@number}{30}
 \setcounter{lstnumber}{10}
 \setcounter{caption@flags}{0}
 \setcounter{continuedfloat}{0}

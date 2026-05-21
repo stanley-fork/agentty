@@ -13,6 +13,81 @@ There is nothing magical here. The terminal is one of the simplest
 abstract machines in computing. It has a small alphabet and a small
 list of rules; we will learn both.
 
+\section{What is a ``state machine''?}
+\label{sec:term:fsm}
+
+The chapter is titled ``the terminal as a state machine'', so it is
+worth saying what that phrase means before we use it.
+
+A \textbf{state machine} (formally, a \emph{finite-state automaton})
+is a model of computation with three parts:
+
+\begin{enumerate}[leftmargin=*]
+  \item A finite set of \textbf{states} --- things the system can
+    \emph{be in} right now.
+  \item An \textbf{alphabet} --- the kinds of \emph{input}
+    the system reacts to.
+  \item A \textbf{transition table} --- for each (state, input)
+    pair, the state the machine moves to next, and any output it
+    produces along the way.
+\end{enumerate}
+
+The machine sits in a state, reads an input, looks up the transition,
+and moves. That is the entire model. A vending machine is one: state
+is ``how much money has been inserted''; alphabet is ``coin'',
+``button press''; transitions either accept the coin (raising the
+balance) or, if the button is pressed and balance is sufficient,
+dispense a snack and return to zero.
+
+A terminal emulator is a state machine. Its states include:
+
+\begin{itemize}[leftmargin=*]
+  \item \emph{Ground} --- the default, awaiting the next byte.
+  \item \emph{Escape} --- the previous byte was \code{ESC};
+    expecting a follow-up.
+  \item \emph{CSI} --- inside a Control Sequence; reading parameter
+    digits.
+  \item \emph{OSC} --- inside an Operating System Command; reading
+    a string up to a terminator.
+  \item \emph{DCS} --- inside a Device Control String (rare).
+\end{itemize}
+
+Its alphabet is ``one byte''. Its transitions read like:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\textbf{State} & \textbf{Input byte} & \textbf{Action / next state} \\
+\hline
+Ground  & printable & emit the glyph; stay in Ground \\
+Ground  & \code{0x1B} (ESC) & move to Escape \\
+Ground  & \code{0x0A} (LF) & move cursor down; stay in Ground \\
+Escape  & \code{[}       & move to CSI \\
+Escape  & other         & dispatch a one-byte escape; back to Ground \\
+CSI     & digit         & accumulate into current parameter \\
+CSI     & \code{;}       & start the next parameter \\
+CSI     & letter         & dispatch the sequence; back to Ground \\
+\end{tabular}
+\end{center}
+
+This is a tiny excerpt of what a real terminal emulator implements
+(Paul Williams's well-known VT500 state diagram has a few more rows),
+but it is the whole essence. Every byte the emulator receives moves
+it through these states; the side effects --- drawing glyphs,
+changing colours, moving the cursor --- happen on the transitions.
+
+\maya{}'s input parser is also a state machine, but in reverse: it
+reads bytes from the keyboard and assembles them into structured
+\code{Key} events. Its states are ``Ground'', ``after ESC'', ``inside
+CSI'', ``maybe Alt+key''. The grammar is the same; only the
+direction of the byte flow is reversed.
+
+\begin{idea}
+The terminal is a small state machine that reads bytes and updates a
+grid. Your program is a state machine in the other direction:
+structured intent in, bytes out.
+\end{idea}
+
 \section{Three things called ``terminal''}
 
 The word \emph{terminal} is overloaded. Pinning down which one we mean
@@ -125,6 +200,29 @@ Characters outside ASCII (accented letters, CJK, emoji) are sent as
 terminals all understand UTF-8; \maya{} produces UTF-8 throughout. We
 will return to the question of \emph{cell width} for non-ASCII
 characters in the canvas chapter.
+
+\subsubsection*{A quick word on UTF-8}
+
+UTF-8 is the variable-length encoding of Unicode that the world
+standardised on. The rule, in one paragraph: code points 0--127 (the
+old ASCII range) are encoded as a single byte, exactly as in ASCII;
+code points 128--2047 take two bytes; 2048--65535 take three bytes;
+the remainder (including emoji and obscure scripts) take four. The
+first byte of a multi-byte sequence has a specific high-bit pattern
+identifying the length (\code{110xxxxx} for two-byte, \code{1110xxxx}
+for three-byte, \code{11110xxx} for four-byte), and subsequent bytes
+all begin with \code{10xxxxxx}.
+
+Example. The letter \code{H} is \code{0x48} (one byte). The Greek
+letter mu, $\mu$ (U+03BC), takes two: \code{0xCE 0xBC}. The Chinese
+character zh\=ong (U+4E2D) takes three: \code{0xE4 0xB8 0xAD}. A
+grinning emoji (U+1F600) takes four: \code{0xF0 0x9F 0x98 0x80}.
+
+Why this matters for a TUI: the number of \emph{bytes} in a string
+is not the number of \emph{characters}, and the number of
+characters is not the number of \emph{cells} the terminal will use
+to display it. Three different quantities. \maya{}'s text layer
+distinguishes them carefully; you usually do not have to.
 
 \subsection{Control bytes}
 
@@ -610,6 +708,215 @@ and the layout drifts. The Unicode Consortium publishes
 when laying out text. You do not call into the table directly ---
 \maya{}'s text widget does it for you.
 
+\section{Signals: \code{SIGWINCH}, \code{SIGINT}, and friends}
+\label{sec:term:signals}
+
+A \textbf{signal} on Unix is a tiny asynchronous notification the
+kernel delivers to a process. The process can install a handler ---
+a function that runs when the signal arrives --- or it can use the
+default behaviour (often: ``terminate''). Two signals matter to a
+TUI.
+
+\paragraph{\code{SIGWINCH} --- window-size change.}
+When the user resizes the terminal window, the kernel delivers
+\code{SIGWINCH} to whichever process owns the foreground of the pty.
+The signal carries no payload --- the process must re-ask the kernel
+for the new size. The mechanism is the system call \code{ioctl},
+broadly ``do a non-standard thing on a file descriptor''. The
+request \code{TIOCGWINSZ} (``terminal IO control: get window size'')
+fills a small struct with row and column counts:
+
+\begin{lstlisting}[language=C]
+#include <sys/ioctl.h>
+struct winsize ws;
+ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
+// ws.ws_row, ws.ws_col, ws.ws_xpixel, ws.ws_ypixel
+\end{lstlisting}
+
+\maya{}'s runtime installs a \code{SIGWINCH} handler that simply
+sets an atomic flag; the main loop checks the flag, re-queries the
+size, and re-runs layout. Doing real work inside a signal handler
+is dangerous (most library functions are not safe to call from one);
+flagging-then-handling is the standard idiom.
+
+\paragraph{\code{SIGINT} --- interrupt.}
+Delivered by the kernel when the user presses \code{Ctrl-C} \emph{in
+cooked mode}. In raw mode (which \maya{} sets), \code{Ctrl-C}
+becomes the byte \code{0x03}, which the program sees as ordinary
+input and may interpret however it likes. \maya{} also installs a
+backup \code{SIGINT} handler so that if something forces cooked
+mode back on mid-run (a misbehaving sub-process, for example), a
+Ctrl-C still cleans up the terminal state before exiting.
+
+\paragraph{\code{SIGTERM}, \code{SIGHUP}, \code{SIGSEGV}.}
+\maya{}'s terminal driver installs handlers for all three so that
+catastrophic exits still restore the cooked-mode terminal
+before the process dies. Without this, killing a TUI with
+\code{kill <pid>} or letting it crash would leave the user's shell
+in raw mode. RAII is not enough alone; the destructor only runs if
+the stack unwinds, and \code{SIGSEGV} does not unwind. The signal
+handler is a belt-and-braces backup.
+
+\subsection{What \code{ioctl} actually is}
+
+The ``standard'' file operations are \code{open}, \code{read},
+\code{write}, \code{close}. \code{ioctl} (``IO control'') is the
+escape hatch for everything else: ``perform request \code{X} on file
+descriptor \code{fd}, with these arguments''. Hundreds of requests
+exist; each one is essentially a separate API hiding behind a
+common name. You meet \code{ioctl} mostly for terminals
+(\code{TIOCGWINSZ}), sockets, and device drivers.
+
+In portable code you would prefer dedicated APIs; in practice no
+such dedicated API exists for ``get terminal size'', so \code{ioctl}
+with \code{TIOCGWINSZ} is the only path.
+
+\section{Mouse reporting, on the wire}
+\label{sec:term:mouse}
+
+Mouse input is also delivered as escape sequences. When mouse
+reporting is enabled (\code{ESC [ ?1000 h} or one of its richer
+variants), every mouse event arrives as a CSI sequence the program
+must parse.
+
+The modern format is \textbf{SGR mouse reporting} (\code{?1006 h}):
+
+\begin{center}
+\small
+\code{ESC [ < button ; column ; row M}~~(press / drag) \\
+\code{ESC [ < button ; column ; row m}~~(release)
+\end{center}
+
+\code{button} is a small bitfield: low bits encode left/middle/right
+(0/1/2); higher bits flag \code{Shift}, \code{Alt}, \code{Ctrl}
+modifiers (4, 8, 16); a bit at position 32 marks ``motion event''
+(this is a drag, not a click); a bit at position 64 marks wheel
+scroll. \code{column} and \code{row} are 1-based.
+
+Example. A left-click at (col 12, row 5):
+
+\begin{terminalbox}
+ESC [ < 0 ; 12 ; 5 M
+\end{terminalbox}
+
+A Shift-drag of the same button to (15, 5):
+
+\begin{terminalbox}
+ESC [ < 36 ; 15 ; 5 M
+\end{terminalbox}
+
+(Button code $36 = 0 + 4 \text{ (Shift)} + 32 \text{ (motion)}$.)
+
+A wheel-scroll down at (40, 10):
+
+\begin{terminalbox}
+ESC [ < 65 ; 40 ; 10 M
+\end{terminalbox}
+
+(Button code $65 = 1 + 64 \text{ (wheel)}$; the low bit on wheel
+means ``down''. Wheel up would be 64; left/right wheel use 66/67.)
+
+\maya{}'s event parser decodes these into structured
+\code{Mouse} events. The widget layer then routes them by position
+to the widget under the cursor.
+
+\subsubsection*{Why the SGR form?}
+
+The old X10 mouse-reporting format (\code{?1000 h}) encoded the
+column and row as \emph{single bytes}, with an offset of 32 (so the
+byte for column 1 was 33, the byte for column 12 was 44). It broke
+on column or row numbers above $223 - 32 = 191$, because the bytes
+were only 7-bit-safe and the offsetting overflowed. Modern wide
+terminals routinely exceed 200 columns; the SGR form, with decimal
+coordinates, has no such limit. \maya{} enables both \code{?1000 h}
+and \code{?1006 h} on startup, the latter overrides; emulators that
+do not understand \code{?1006 h} fall back gracefully to the older
+encoding.
+
+\section{Bracketed paste, on the wire}
+\label{sec:term:paste}
+
+When \code{?2004 h} is enabled and the user pastes a block of text
+into the terminal, the emulator wraps the pasted bytes in two
+sentinel sequences:
+
+\begin{terminalbox}
+ESC [ 200 \textasciitilde~ ... pasted bytes ... ESC [ 201 \textasciitilde
+\end{terminalbox}
+
+The content between can be arbitrary, including newlines and other
+control characters --- the program should treat the whole block
+as one atomic event.
+
+Example. Pasting the two lines
+
+\begin{terminalbox}
+foo \\
+bar
+\end{terminalbox}
+
+produces on the wire:
+
+\begin{terminalbox}
+ESC [ 200 \textasciitilde~f o o LF b a r ESC [ 201 \textasciitilde
+\end{terminalbox}
+
+Without bracketed paste, that arrival is indistinguishable from a
+very fast user typing \code{f}, \code{o}, \code{o}, \code{Enter},
+\code{b}, \code{a}, \code{r}. With it, an editor knows to disable
+auto-indent, treat the whole block as a single undo unit, and so
+on. \maya{}'s input parser produces a single \code{Paste} event
+carrying the entire content as a \code{std::string}.
+
+\section{The input parser as a state machine}
+\label{sec:term:input-fsm}
+
+We sketched the input parser earlier as ``a state machine in the
+other direction''. Concretely: it reads bytes from \code{stdin} and
+builds structured \code{Event} values. Here is its core loop in
+pseudo-code:
+
+\begin{lstlisting}
+enum State { Ground, AfterEsc, InCsi };
+State s = Ground;
+std::string params;          // accumulator for CSI parameter bytes
+for (;;) {
+    byte b = read_one();
+    switch (s) {
+      case Ground:
+        if (b == 0x1B) { s = AfterEsc; start_esc_timeout(50ms); }
+        else            emit_key(b);
+        break;
+      case AfterEsc:
+        if (b == '[')  { s = InCsi; params.clear(); }
+        else if (timed_out) { emit_key(Escape); s = Ground; pushback(b); }
+        else            { emit_key_alt(b); s = Ground; }
+        break;
+      case InCsi:
+        if (is_param_byte(b)) params.push_back(b);
+        else if (is_final_byte(b)) {
+            dispatch_csi(params, b);   // -> emit Arrow, Mouse, Paste, ...
+            s = Ground;
+        }
+        break;
+    }
+}
+\end{lstlisting}
+
+A single keystroke can therefore become a single \code{Event}
+(\code{A} arrives, \code{KeyKind::Char 'A'} emitted) or take a few
+bytes (\code{ESC [ A} becomes \code{KeyKind::Up}) or many
+(a paste of a hundred bytes is one \code{Paste} event). The 50 ms
+timeout on \code{ESC} is the only piece that is not a pure function
+of the byte stream --- it disambiguates a bare \code{Escape} from
+an incomplete escape sequence.
+
+\maya{}'s real parser is more elaborate (it handles modified
+arrows, the Kitty Keyboard Protocol's CSI-u format,
+\code{modifyOtherKeys=2}, function keys, focus events, OSC
+responses), but every additional case follows the same state-machine
+shape.
+
 \section{Putting it together: a no-library Hello world}
 
 We now know enough to write a complete TUI ``Hello, red world'' with
@@ -663,6 +970,61 @@ frame}. The whole library is in service of generating exactly this
 style of byte stream, only longer, more carefully diffed, and
 described to you as a tree of styled elements instead of a literal
 string.
+
+\section{A real maya frame, traced byte by byte}
+\label{sec:term:trace}
+
+To close the chapter, here is a hand-traced version of one
+incremental redraw in a maya program. The screen currently shows
+the word \code{Count: 7} on row 5, starting at column 3, in the
+default white foreground. The user pressed \code{+}; maya wants the
+screen to now read \code{Count: 8}. Only one cell changed --- column
+10 of row 5 --- so maya emits only what is needed to update it.
+
+The bytes \maya{} writes:
+
+\begin{terminalbox}
+\textbackslash x1b[?2026h   ~ESC [ ?2026 h ~  begin synchronised update \\
+\textbackslash x1b[5;10H   ~ESC [ 5;10 H  ~  move cursor to row 5, col 10 \\
+\textbackslash x1b[39;49m  ~ESC [ 39;49 m ~  default fg \& bg (style reset) \\
+8                       ~~~~~~~~~~~~~~~~~~  the new digit \\
+\textbackslash x1b[?2026l  ~ESC [ ?2026 l ~  end synchronised update
+\end{terminalbox}
+
+Byte-by-byte that is:
+
+\begin{terminalbox}
+1B 5B 3F 32 30 32 36 68 1B 5B 35 3B 31 30 48 1B \\
+5B 33 39 3B 34 39 6D 38 1B 5B 3F 32 30 32 36 6C
+\end{terminalbox}
+
+32 bytes in total to redraw the change. Compare to what a naive
+renderer would do: clear the screen, redraw every cell. For an 80
+by 24 terminal that is roughly $80 \times 24 \times 10$ bytes (most
+cells take around ten bytes including SGR and the character), or
+close to 20\,kB. Two orders of magnitude saved by the diff.
+
+The sync wrapper (\code{?2026 h} \dots \code{?2026 l}) is optional
+and omitted by terminals that do not advertise it; \maya{}'s
+renderer checks an environment-derived hint
+(\code{env\_supports\_synchronized\_output} in
+\file{terminal/ansi.hpp}) and elides the wrapper if the terminal
+will not honour it.
+
+The cursor positioning (\code{ESC [ 5;10 H}) and the style transition
+(\code{ESC [ 39;49 m}) are produced by \maya{}'s
+\code{StyleApplier::transition\_to} helper, which writes the minimal
+SGR change from the previous cell's style to the new one (in this
+case, the previous cell on the row was already styled the same, so
+the SGR transition would actually be empty --- we include it here
+for illustration).
+
+\begin{idea}
+The whole \maya{} rendering pipeline exists to make this incremental
+byte stream short and correct. Everything from the canvas to the
+SIMD diff to the ANSI builder is in service of: ``write the minimum
+bytes needed to update only the cells that actually changed''.
+\end{idea}
 
 \begin{recap}
 A terminal is a state machine on the far end of a pty. Bytes flowing

@@ -171,6 +171,58 @@ echo '#include <print>\nint main(){std::println("ok");}' \
 
 If that prints \code{ok}, you can run every example in this book.
 
+\subsection{A first build session, narrated}
+
+For concreteness, here is what a real first session at the terminal
+looks like. We will write a tiny \cpp{} file, compile it, deliberately
+introduce an error to see what the compiler says, fix it, and run.
+
+\begin{lstlisting}[style=shell]
+$ cat > greet.cpp <<'EOF'
+#include <print>
+
+int main() {
+    std::println("hi, world");
+}
+EOF
+
+$ g++-15 -std=c++26 -Wall -Wextra greet.cpp -o greet
+$ ./greet
+hi, world
+\end{lstlisting}
+
+Good. Now break it on purpose --- forget the semicolon after
+\code{println}:
+
+\begin{lstlisting}[style=shell]
+$ cat > greet.cpp <<'EOF'
+#include <print>
+
+int main() {
+    std::println("hi, world")
+}
+EOF
+
+$ g++-15 -std=c++26 -Wall -Wextra greet.cpp -o greet
+greet.cpp: In function 'int main()':
+greet.cpp:4:32: error: expected ';' before '}' token
+    4 |     std::println("hi, world")
+      |                                ^
+      |                                ;
+    5 | }
+      | ~
+\end{lstlisting}
+
+Note the shape: file name, line number, column, error kind, the
+offending line printed with a carat pointing where the compiler
+thinks the fix goes. Reading those four pieces of information is a
+skill; most beginners panic at the wall of text and miss that the
+compiler is being quite specific.
+
+Fix the semicolon, rebuild, run. That is the entire edit-build-run
+loop. The rest of this chapter explains what to write between
+\code{int main() \{} and \code{\}}.
+
 \section{Statements, blocks, control flow}
 \label{sec:cpp:flow}
 
@@ -672,6 +724,69 @@ an address. \code{const} marks read-only at every level: variable,
 reference, method.
 \end{recap}
 
+\section{Stack and heap}
+\label{sec:cpp:stack-heap}
+
+When you write \code{int x = 42;}, where does \code{x} actually
+live? \cpp{} programs have two main regions of memory you should
+know about.
+
+\paragraph{The stack.}
+A region of memory managed implicitly, like a stack of plates. Every
+function call pushes a new \textbf{stack frame} on top: storage for
+the function's parameters, its local variables, and bookkeeping for
+the return address. When the function returns, its frame is popped
+off. Allocation and deallocation are essentially free --- a single
+register adjustment.
+
+Local variables go on the stack:
+
+\begin{lstlisting}
+void f() {
+    int x = 42;            // x is in f's stack frame
+    std::array<int, 8> a;  // also on the stack: 32 bytes here
+}                          // both gone when f returns
+\end{lstlisting}
+
+The stack is small --- typically 1\,MB on Linux, 512\,kB on macOS
+by default. You cannot put very large objects on it (a million-element
+array of \code{int} would not fit), and you cannot have data outlive
+the function it was created in.
+
+\paragraph{The heap.}
+A region of memory managed explicitly. You ask the OS for a chunk
+with \code{new T(...)} or \code{std::make\_unique<T>(...)} or any
+standard-library container that allocates internally
+(\code{std::vector}, \code{std::string}, \code{std::map}, \dots).
+The chunk persists until you free it (with \code{delete}, or by
+letting the smart pointer / container destructor do it).
+
+\begin{lstlisting}
+void f() {
+    auto p = std::make_unique<int>(42);     // 4 bytes on the heap
+    auto v = std::vector<int>(1'000'000);   // 4 MB on the heap, owned by v
+}                                            // both freed when p and v go away
+\end{lstlisting}
+
+The heap is large (gigabytes), and data on it can live as long as
+you like. Allocation and deallocation are real work --- the OS needs
+to find a block, mark it used, eventually mark it free again. A
+program that allocates millions of small heap blocks will be
+noticeably slower than one that does not.
+
+\paragraph{The rule.}
+Use the stack for everything you can (locals, parameters, small
+fixed-size containers like \code{std::array}, small classes). Use
+the heap for things that are large, dynamically-sized, or need to
+outlive the function that created them. Standard containers
+automatically use the heap for their internal storage; you do not
+have to call \code{new} explicitly.
+
+\maya{}'s hot path tries hard to keep allocations down. The canvas
+is allocated once and reused; the renderer's output buffer is
+allocated once and reused; the diff loop touches no heap at all.
+This is what makes \maya{} feel fast on a slow link.
+
 \section{Functions, overloads, default arguments}
 \label{sec:cpp:functions}
 
@@ -739,6 +854,78 @@ greet("world", "hello");   // "hello, world"
 
 Defaults are part of the declaration; later overloads of the same
 name cannot redeclare them.
+
+\section{Strings: three kinds, and when to use each}
+\label{sec:cpp:strings}
+
+Text handling has three core types in \cpp{}. Choosing the right one
+for each parameter and return type matters more than beginners
+realise.
+
+\paragraph{\code{const char*} --- the C string.}
+A pointer to a null-terminated array of bytes. The \code{\textbackslash 0}
+byte signals the end. This is what \code{"hello"} actually \emph{is}
+in \cpp{} (a \code{const char[6]}, which decays to \code{const
+char*} when passed around).
+
+\begin{lstlisting}
+const char* name = "alice";   // points at static read-only memory
+std::printf("%s\n", name);     // C-style I/O still takes const char*
+\end{lstlisting}
+
+Use \code{const char*} when interfacing with C APIs. Avoid for new
+\cpp{} code.
+
+\paragraph{\code{std::string} --- the owning string.}
+A class that owns a heap-allocated, dynamically resizable buffer of
+bytes. It is the workhorse:
+
+\begin{lstlisting}
+#include <string>
+std::string s = "hello";        // copy of the literal, heap-allocated
+s += ", world";                  // grows the buffer if needed
+std::println("{}", s);
+\end{lstlisting}
+
+Use \code{std::string} when you need to own and mutate string data.
+It is a real allocation; do not copy it casually.
+
+\paragraph{\code{std::string\_view} --- the non-owning view.}
+Two pointers under the hood: ``start'' and ``end'' (or ``start'' and
+``length''). Refers to a contiguous range of bytes \emph{owned by
+someone else}.
+
+\begin{lstlisting}
+#include <string_view>
+void greet(std::string_view name) {
+    std::println("hi, {}", name);
+}
+
+greet("alice");                  // works: literal becomes string_view
+std::string s = "bob";
+greet(s);                        // works: string converts to string_view
+\end{lstlisting}
+
+A \code{string\_view} does not allocate, does not copy, and does not
+own. The catch: the data it points at must outlive the view. Storing
+a \code{string\_view} as a class member is risky; using one as a
+function parameter is almost always safe (the caller's data outlives
+the call).
+
+\paragraph{The rule.}
+\begin{itemize}[leftmargin=*]
+  \item Function takes a string parameter, read-only?
+    \code{std::string\_view}.
+  \item Function returns or stores a string it owns?
+    \code{std::string}.
+  \item Interfacing with a C API? \code{const char*}, often via
+    \code{s.c\_str()} on an existing \code{std::string}.
+\end{itemize}
+
+In \maya{}, you will see \code{std::string\_view} everywhere a
+function reads a string, and \code{std::string} where the type owns
+the data (e.g.\ in \code{Cmd<Msg>::SetTitle}, which owns the title
+string).
 
 \section{\code{enum class}: typed enumerations}
 \label{sec:cpp:enum}
@@ -1039,6 +1226,81 @@ Most \maya{} classes follow the rule of zero. The few that hold raw
 resources (the terminal guard, signal handlers, file descriptor
 wrappers) follow the rule of five.
 
+\section{\code{static} at three different scopes}
+\label{sec:cpp:static}
+
+The keyword \code{static} means three different things in \cpp{}
+depending on \emph{where} you write it. This is a long-standing
+source of confusion. Untangle them once:
+
+\paragraph{1. \code{static} on a local variable.}
+Makes the variable persist between calls of the function:
+
+\begin{lstlisting}
+int next_id() {
+    static int counter = 0;   // initialised once, on first call
+    return ++counter;
+}
+
+next_id();   // 1
+next_id();   // 2
+next_id();   // 3
+\end{lstlisting}
+
+The \code{counter} variable lives in the program's data segment ---
+not on the stack. It is initialised the first time control flows
+through the declaration, in a thread-safe way (\cpp{}11 guarantees
+this), and survives until program exit.
+
+Useful for cheap, deterministic singletons. Maya uses it to lazily
+build lookup tables on first access.
+
+\paragraph{2. \code{static} on a class member.}
+Makes the member shared across all instances of the class, not
+owned by any individual instance:
+
+\begin{lstlisting}
+struct Counter {
+    static int total;        // declaration; shared by all Counters
+    int      individual;
+};
+int Counter::total = 0;       // definition, exactly once, outside the class
+
+Counter a, b;
+Counter::total = 5;
+// a.total and b.total are both 5; they refer to the same storage
+\end{lstlisting}
+
+For \code{static constexpr} members of fundamental type, you can
+initialise inline and skip the out-of-class definition. \cpp{}17's
+\code{inline} on a \code{static} member makes it definable in the
+header without ODR violations.
+
+\paragraph{3. \code{static} on a free function or namespace-scope variable.}
+Gives the function or variable \textbf{internal linkage} --- it is
+visible only inside the translation unit that defines it. Other
+files cannot use it even if they declare it.
+
+\begin{lstlisting}
+// in foo.cpp
+static int helper(int x) { return x + 1; }   // local to this .cpp
+int visible_helper(int x) { return x + 1; }  // visible everywhere
+\end{lstlisting}
+
+This is the \cpp{}'s pre-namespace way of saying ``do not leak this
+name''. Modern style prefers an anonymous namespace, which has the
+same effect and reads more clearly:
+
+\begin{lstlisting}
+namespace { // anonymous namespace --- everything here has internal linkage
+    int helper(int x) { return x + 1; }
+}
+\end{lstlisting}
+
+Three different things, one keyword. When you read \maya{} source,
+check the scope first: inside a function (case 1), inside a class
+(case 2), or at file scope (case 3).
+
 \section{Inheritance and \code{virtual} (and why \maya{} avoids them)}
 \label{sec:cpp:inheritance}
 
@@ -1303,6 +1565,68 @@ variants where appropriate (\code{Element} children are stored in a
 because \code{Element} is itself a variant with value semantics).
 The few raw pointers are non-owning parent links.
 
+\section{Iterators}
+\label{sec:cpp:iterators}
+
+The standard library's containers (\code{vector}, \code{map},
+\code{set}, \code{string}, \dots) are walked with
+\textbf{iterators}. An iterator is an object that acts like a
+pointer into a container: dereference to get the element, increment
+to advance to the next.
+
+\begin{lstlisting}
+std::vector<int> v = {10, 20, 30, 40};
+
+auto it  = v.begin();    // iterator to the first element
+auto end = v.end();      // iterator one past the last
+
+while (it != end) {
+    std::println("{}", *it);   // dereference
+    ++it;                      // advance
+}
+\end{lstlisting}
+
+Three things to know:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{begin()} returns an iterator to the first element.
+  \item \code{end()} returns a sentinel \emph{one past} the last
+    element --- you never dereference it; you compare against it.
+  \item Iterators support \code{*}, \code{++}, and (where the
+    container allows it) \code{--}, \code{+ n}, \code{- n}.
+\end{itemize}
+
+The pattern \code{for (auto it = c.begin(); it != c.end(); ++it)}
+is the classic STL walk. The range-\code{for} loop
+\code{for (auto\& x : c)} expands to exactly this; modern code
+almost always prefers the range form for clarity.
+
+\subsection{Why iterators show up in maya errors}
+
+When something goes wrong with a container --- you erase while
+iterating, the container reallocates and invalidates the iterator,
+you pass an iterator past the end --- the error usually mentions
+``iterator''. Common cases:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{map.find(key)} returns an iterator. Compare to
+    \code{map.end()} to check ``not found''. Dereferencing the
+    end iterator is undefined behaviour.
+  \item Pushing into a \code{std::vector} \emph{invalidates}
+    every existing iterator, pointer, and reference into it ---
+    because the buffer may have moved. Save indices, not
+    iterators, across pushes.
+  \item Erasing from a \code{std::vector} invalidates iterators
+    from the erased element onward. Use the return value of
+    \code{erase} (an iterator to the next valid element) to
+    continue.
+\end{itemize}
+
+Iterators are also what makes algorithms generic: \code{std::sort(v.begin(),
+v.end())} works on any container that provides random-access
+iterators. \maya{} uses standard algorithms throughout the layout
+and text engines.
+
 \section{\code{auto} and type deduction}
 \label{sec:cpp:auto}
 
@@ -1468,6 +1792,69 @@ Throw on bugs, return on errors. Exceptions for ``the world is
 broken''; \code{std::expected} for ``this might not work, and that
 is fine''.
 \end{idea}
+
+\section{Undefined behaviour: what it is and how to avoid it}
+\label{sec:cpp:ub}
+
+A fact you need to know about \cpp{}: some operations are
+\textbf{undefined behaviour} (UB). The standard does not say what
+the program should do when you perform them; the compiler is
+allowed to do \emph{anything}, including silently produce nonsense.
+This is jarring if you come from a safer language.
+
+The most common forms of UB:
+
+\begin{itemize}[leftmargin=*]
+  \item Reading an uninitialised variable. \code{int x; std::println("{}", x);}
+    is UB.
+  \item Indexing out of bounds. \code{v[v.size()]} on a non-empty
+    \code{std::vector} is UB. (\code{v.at(i)} is \emph{not} UB; it
+    throws.)
+  \item Dereferencing a null or dangling pointer. \code{int* p = nullptr;
+    *p;} is UB. \code{auto p = (int*)0xdeadbeef; *p;} is UB.
+  \item Using a moved-from object as if it were valid. After
+    \code{auto b = std::move(a);}, reading \code{a} (unless you
+    have re-assigned to it) is implementation-defined or undefined
+    depending on the type.
+  \item Signed integer overflow. \code{int x = INT\_MAX; ++x;} is UB.
+  \item Data races: two threads concurrently access the same
+    non-atomic variable, at least one of them writing.
+  \item Returning a reference or pointer to a local variable, then
+    using it after the function returns.
+\end{itemize}
+
+The surprise is that the compiler is \emph{allowed} to assume UB
+never happens, and to optimise on that assumption. A program with
+UB can run fine in debug mode, fail in release mode, and crash on a
+different CPU. There is no easy ``just inspect the value'' fix; the
+fix is to not commit the UB in the first place.
+
+\subsection{How to avoid it}
+
+Three habits cover 90\% of cases:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Initialise everything.} Default values are free with
+    brace init: \code{int x\{\};}, \code{Point p\{\};}. Never write
+    \code{int x;} and read \code{x} before assignment.
+  \item \textbf{Use containers and views, not raw arrays.}
+    \code{std::vector::operator[]} is technically UB on out-of-bounds
+    \emph{but} debug builds with sanitisers catch it; raw C arrays
+    have neither bounds nor safety nets.
+  \item \textbf{Compile with sanitisers during development.}
+    \code{-fsanitize=address,undefined} catches most of the above
+    list at runtime with a clean diagnostic. Use this constantly
+    while learning.
+\end{enumerate}
+
+\maya{}'s test suite runs under both sanitisers in CI. Code reviews
+treat UB-trigger patterns as bugs even if they happen not to crash
+in the local build.
+
+\begin{warning}
+A program with UB is not a slow or buggy program; it is a program
+without a defined meaning. Treat UB as a hard error, not a warning.
+\end{warning}
 
 \section{Templates}
 \label{sec:cpp:templates}
@@ -2193,6 +2580,126 @@ appear in \maya{} and what they are:
 
 Learn the views as you meet them; the ranges library is large and you
 do not need it all at once.
+
+\section{A complete worked example: counting words}
+\label{sec:cpp:worked}
+
+Let us put the whole chapter together in a small but real program.
+It reads lines from standard input until EOF, counts how many times
+each word appears, and prints the top ten words sorted by count.
+It uses values, references, \code{string\_view}, \code{string},
+maps, sorting, lambdas, structured bindings, range-\code{for},
+brace-init, \code{auto}, and a tiny RAII guard --- the whole
+starter kit.
+
+\begin{lstlisting}
+#include <print>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
+#include <iostream>
+#include <chrono>
+
+// RAII guard: prints how long its scope took.
+struct Timer {
+    using clock = std::chrono::steady_clock;
+    clock::time_point start{clock::now()};
+    ~Timer() {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      clock::now() - start).count();
+        std::println(stderr, "[took {} ms]", ms);
+    }
+};
+
+// Split a line into whitespace-separated word views.
+// Returns views into the input line --- the caller must keep it alive.
+static std::vector<std::string_view> split(std::string_view line) {
+    std::vector<std::string_view> out;
+    std::size_t i = 0;
+    while (i < line.size()) {
+        while (i < line.size() && std::isspace((unsigned char)line[i])) ++i;
+        std::size_t start = i;
+        while (i < line.size() && !std::isspace((unsigned char)line[i])) ++i;
+        if (i > start) out.push_back(line.substr(start, i - start));
+    }
+    return out;
+}
+
+int main() {
+    Timer t{};                      // RAII: time the whole run
+    std::unordered_map<std::string, int> counts;
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        // split returns string_views into `line`; we copy each into
+        // a std::string key because the map must own its keys.
+        for (auto word : split(line)) {
+            counts[std::string{word}] += 1;
+        }
+    }
+
+    // Move pairs into a vector for sorting.
+    std::vector<std::pair<std::string, int>> pairs(counts.begin(), counts.end());
+    std::sort(pairs.begin(), pairs.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::size_t n = std::min<std::size_t>(10, pairs.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& [word, count] = pairs[i];
+        std::println("{:6}  {}", count, word);
+    }
+}
+\end{lstlisting}
+
+Walk through:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Timer} is a RAII guard. Constructing one records the
+    start time; the destructor (at scope exit) prints the elapsed.
+    \code{Timer t\{\};} at the top of \code{main} times the whole
+    program.
+  \item \code{split} takes the line by \code{std::string\_view} ---
+    no copy --- and returns a \code{std::vector<std::string\_view>}
+    of pieces. The views are valid only as long as \code{line} is.
+  \item The map key is \code{std::string}; the value is \code{int}.
+    \code{counts[key] += 1} either inserts a new entry with value
+    $1$ or increments an existing one.
+  \item \code{std::string\{word\}} converts a \code{string\_view}
+    to an owned \code{std::string} --- the explicit brace init
+    makes it obvious we are allocating.
+  \item The \code{auto word :} in the range-\code{for} loop is
+    actually \code{std::string\_view word :}; the compiler
+    deduces it.
+  \item \code{std::sort} takes two iterators and a comparator. The
+    comparator is a lambda taking two pairs and returning
+    \code{true} if the first should come before the second. We
+    sort descending by count.
+  \item \code{std::min<std::size\_t>(10, pairs.size())} clamps to
+    ten while keeping types matched.
+  \item \code{const auto\& [word, count] = pairs[i]} is a
+    structured binding into the pair --- no copy of the strings.
+  \item \code{std::println("\{:6\}  \{\}", count, word)} formats
+    the count in a six-wide column then the word.
+  \item When \code{main} returns, \code{t}'s destructor runs and
+    prints the elapsed time.
+\end{itemize}
+
+Build and run:
+
+\begin{lstlisting}[style=shell]
+$ g++-15 -std=c++26 -O2 -Wall wordcount.cpp -o wordcount
+$ < some-book.txt ./wordcount
+  1234  the
+   987  of
+   654  and
+   ...
+[took 42 ms]
+\end{lstlisting}
+
+If you can read every line of that program with confidence, you can
+read \maya{}. The next two sections cement the connection.
 
 \section{Reading real \maya{} code}
 \label{sec:cpp:reading}

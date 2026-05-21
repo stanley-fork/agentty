@@ -122,6 +122,99 @@ The trade-off is the visual restriction: no images (well, mostly), no
 freeform layouts, no animations beyond what a grid of glyphs can do.
 For a large class of programs, that is exactly the right trade.
 
+\section{One frame of a TUI: what literally happens}
+\label{sec:intro:one-frame}
+
+To make the rest of this book concrete, let us walk what happens in
+one ``frame'' of a typical TUI --- the unit of work between two
+updates of the screen. We will use a counter app as the example: it
+shows a number, and the keys \code{+} and \code{-} change it.
+
+Suppose the screen currently shows the number $7$. The user presses
+\code{+}.
+
+\paragraph{1. The keyboard sends a byte to the kernel.}
+When you press \code{+}, the OS kernel receives the byte $0x2B$
+(ASCII for \code{+}) from your keyboard driver and places it into
+the input buffer of whichever terminal program currently has focus
+--- your terminal emulator.
+
+\paragraph{2. The terminal emulator forwards the byte.}
+Your terminal emulator (kitty, iTerm, GNOME Terminal, \dots) writes
+the byte into one end of the \emph{pseudo-terminal} --- the kernel
+byte-pipe between the emulator and the program running inside it.
+Chapter~\ref{ch:terminal} covers the pseudo-terminal in detail.
+
+\paragraph{3. The maya program reads the byte.}
+The \maya{} program is sitting in a loop, asking the OS ``is there
+any input ready?''. Now there is. It reads $0x2B$ from its standard
+input.
+
+\paragraph{4. Maya turns the byte into an Event.}
+A single byte is not yet a useful concept. \maya{}'s input parser
+decides ``this is a printable character, namely the character
+\code{+}'' and constructs a structured value: \code{Key\{.kind =
+KeyKind::Char, .character = '+'\}}. That value is then wrapped in
+the broader \code{Event} type and handed to your application code.
+
+\paragraph{5. Your code computes a new state.}
+Your application receives the \code{Event}, decides it means
+``increment'', and produces the new state: the counter is now $8$.
+In an Elm-style \maya{} program this is one pure function:
+\code{update(state=7, event=Inc) = 8}.
+
+\paragraph{6. Maya turns the new state into an Element tree.}
+Your \code{view} function is called with the new state ($8$) and
+returns an \code{Element}: a description of the UI, ``a box with a
+rounded border containing the text \code{Count: 8}''. This is a
+value in memory, not yet bytes on the wire.
+
+\paragraph{7. The layout engine assigns positions.}
+Given the current terminal size --- say 80 columns by 24 rows ---
+\maya{} walks the element tree and decides where every piece goes:
+the outer box at $(0, 0)$ of size $14 \times 3$, the inner text at
+$(1, 1)$, and so on. The output is a list of styled cells, one per
+position.
+
+\paragraph{8. The renderer builds a virtual screen.}
+Those cells are written into a 2-D grid in memory --- the
+\emph{canvas}. Every position on the screen now has a known
+character, foreground colour, background colour, and attribute set.
+
+\paragraph{9. The differ finds what changed.}
+A copy of last frame's canvas is still around. \maya{} compares the
+two canvases cell by cell. For our counter, almost everything is
+identical; only one cell changed --- the \code{7} became an \code{8}.
+
+\paragraph{10. Maya emits ANSI bytes for only that cell.}
+A short string of bytes is produced: ``move cursor to (col, row)
+of the changed cell; set the right colour; print \code{8}''. Even
+though there might be hundreds of cells on screen, only a dozen
+bytes are sent.
+
+\paragraph{11. Those bytes flow back through the pty to the emulator.}
+The emulator reads them, parses them, and updates its window. The
+user sees the digit change. From keypress to pixel update is
+typically a couple of milliseconds.
+
+That is one frame. The rest of the book is, in a sense, just
+detailed coverage of each of those eleven steps. The DSL
+(Chapter~\ref{ch:dsl}) and Element tree
+(Chapter~\ref{ch:elements}) cover steps 5--6; the layout engine
+(Chapter~\ref{ch:layout}) is step 7; the canvas
+(Chapter~\ref{ch:canvas}) is step 8; the differ
+(Chapter~\ref{ch:simd}) is step 9; ANSI
+(Chapter~\ref{ch:ansi}) is step 10; the runtime that orchestrates
+the whole loop (Chapter~\ref{ch:elm}) is what sits around steps
+3--6.
+
+\begin{idea}
+One frame: a byte arrives, it becomes an event, you compute new
+state, maya builds the new screen, compares it to the old one, and
+sends bytes for just the differences. That tight loop is what every
+TUI library is, including \maya{}.
+\end{idea}
+
 \section{What is \maya{}?}
 
 \maya{} is a \cpp{} \textbf{library} --- a bundle of code you include
@@ -154,6 +247,77 @@ This book covers each of those jobs in detail. For now, treat
 \maya{} as a black box that turns ``description of a UI'' into ``the
 correct bytes on the wire''.
 
+\section{What is a tree, and why a tree?}
+\label{sec:intro:tree}
+
+In computing, a \textbf{tree} is a data structure that looks like a
+family tree turned upside down: one thing at the top, called the
+\textbf{root}, which has zero or more \textbf{children}, each of
+which may have its own children, and so on. The end of every branch
+--- a node with no children --- is called a \textbf{leaf}.
+
+A terminal UI is naturally tree-shaped, and once you see it you
+cannot unsee it. Consider a chat application:
+
+\begin{center}
+\small
+\begin{verbatim}
+  +-------------------------------------------+
+  | Title: my chat                           |
+  +-------------------------------------------+
+  | sidebar  |  message list                  |
+  |  - alice |   alice: hi                    |
+  |  - bob   |   me   : hello                 |
+  |          |   bob  : evening               |
+  +----------+--------------------------------+
+  | type here...                             |
+  +-------------------------------------------+
+\end{verbatim}
+\end{center}
+
+Described as a tree, this UI is:
+
+\begin{center}
+\small
+\begin{verbatim}
+  Root: vertical stack
+  |-- Title bar (text)
+  |-- Body: horizontal split
+  |   |-- Sidebar: vertical list
+  |   |   |-- "alice"  (text)
+  |   |   `-- "bob"    (text)
+  |   `-- Messages: vertical list
+  |       |-- "alice: hi"      (text)
+  |       |-- "me   : hello"   (text)
+  |       `-- "bob  : evening" (text)
+  `-- Input: bordered text box
+\end{verbatim}
+\end{center}
+
+Four kinds of node appear: ``vertical stack'', ``horizontal split'',
+``list'', ``text''. The first three are \emph{container} nodes ---
+they have children that they arrange. Text nodes are leaves: they
+have no children, just a string.
+
+A tree is the right structure because UIs are recursive: a sidebar
+\emph{is} a UI; a message list \emph{is} a UI; both are pieces of a
+bigger UI. Trees compose. You can reuse the message-list subtree in
+a completely different program by grafting it onto a different root.
+
+\maya{}'s \code{Element} type is exactly the tree representation of
+a UI. Container nodes (\code{BoxElement}, \code{ElementList}) hold
+\code{std::vector<Element>} of children; leaf nodes
+(\code{TextElement}) hold the bytes of a string. The DSL is the
+surface syntax that lets you spell that tree out as readable \cpp{}
+code. Chapter~\ref{ch:elements} dissects the \code{Element} type in
+full.
+
+\begin{idea}
+A UI is a tree of containers and text. Containers arrange their
+children; text leaves carry the actual characters. \maya{}'s
+\code{Element} type \emph{is} that tree.
+\end{idea}
+
 \section{Why does \maya{} exist when there are already others?}
 
 There are many TUI libraries. \code{ncurses} (C, ancient and
@@ -168,6 +332,19 @@ a no-op, a negative padding silently becomes zero, a layout meant to
 be a row accidentally becomes a column. \maya{} is built on \cpp{}'s
 \emph{type system} so that a lot of these mistakes refuse to compile.
 The compiler tells you, at build time, exactly which line is wrong.
+
+As a tiny taste: in \maya{} you might write
+
+\begin{lstlisting}
+auto ui = t<"Hello"> | bcol<60, 65, 80>;   // border colour, no border yet
+\end{lstlisting}
+
+A library written in Python or Go would accept that and silently do
+nothing with the border colour at run-time. \maya{} refuses to
+compile it, because the \code{bcol} (``border colour'') modifier is
+defined to only apply to nodes that have already been given a
+border. The compiler error names the constraint that failed; you fix
+the code by adding \code{| border\_<Round>} first.
 
 You will not see why this is possible until Chapter~\ref{ch:dsl}; the
 short version is that the description you write is stored in the
@@ -267,9 +444,24 @@ int main() {
 }
 \end{lstlisting}
 
-You are not expected to understand every token. You \emph{are}
-expected to be able to point at each piece and at least name what it
-is. Let us go line by line.
+Before we decode it line by line, here is roughly what you should
+see in your terminal after running this:
+
+\begin{terminalbox}
+\textcolor{mayablue}{\textbf{.----------------.}}\\
+\textcolor{mayablue}{\textbf{|}}\, \textbf{Hello, maya}~~\, \textcolor{mayablue}{\textbf{|}}\\
+\textcolor{mayablue}{\textbf{|}}\, a tiny banner \textcolor{mayablue}{\textbf{|}}\\
+\textcolor{mayablue}{\textbf{`----------------'}}
+\end{terminalbox}
+
+A two-line text stack, the first line bold and pale blue, the second
+dimmed, surrounded by a rounded border with one cell of padding
+inside it. The corners are drawn with the Unicode box-drawing
+glyphs the terminal renders as smooth round corners.
+
+You are not expected to understand every token of the program. You
+\emph{are} expected to be able to point at each piece and at least
+name what it is. Let us go line by line.
 
 \subsection{Line by line}
 
@@ -478,6 +670,106 @@ You can read straight through. You can also skip Chapter~\ref{ch:cpp}
 on first pass if you already know modern \cpp{} well, and come back
 to it as a reference.
 
+\section{How \maya{} compares to other TUI libraries}
+\label{sec:intro:compare}
+
+It helps to know what other people are doing. Here is the same
+static banner --- text, bold, colour, border --- in four other
+popular TUI libraries, alongside the \maya{} version, so you have a
+felt sense of where this book is taking you.
+
+\paragraph{ncurses (C, 1990s).}
+\begin{lstlisting}[language=C]
+#include <ncurses.h>
+int main(void) {
+    initscr();
+    start_color();
+    init_pair(1, COLOR_CYAN, COLOR_BLACK);
+    box(stdscr, 0, 0);
+    attron(A_BOLD | COLOR_PAIR(1));
+    mvprintw(1, 2, "Hello, maya");
+    attroff(A_BOLD | COLOR_PAIR(1));
+    mvprintw(2, 2, "a tiny banner");
+    refresh();
+    getch();
+    endwin();
+}
+\end{lstlisting}
+Imperative. You position every character by row and column. There
+is no layout; if the terminal is smaller than your hard-coded
+numbers, the UI breaks.
+
+\paragraph{textual (Python).}
+\begin{lstlisting}[language=Python]
+from textual.app import App
+from textual.widgets import Static
+
+class Hello(App):
+    def compose(self):
+        yield Static("[bold cyan]Hello, maya[/]\n[dim]a tiny banner[/]",
+                     classes="box")
+    CSS = ".box { border: round cyan; padding: 1; }"
+
+Hello().run()
+\end{lstlisting}
+Declarative, pleasant, but markup is strings (the bold/colour
+spans), and the CSS is a separate sub-language the Python compiler
+cannot check.
+
+\paragraph{ratatui (Rust).}
+\begin{lstlisting}[language=C]
+let block = Block::default()
+    .borders(Borders::ALL)
+    .border_type(BorderType::Rounded)
+    .border_style(Style::default().fg(Color::Cyan));
+let text = Text::from(vec![
+    Line::from(Span::styled("Hello, maya",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+    Line::from(Span::styled("a tiny banner",
+        Style::default().add_modifier(Modifier::DIM))),
+]);
+frame.render_widget(Paragraph::new(text).block(block), frame.size());
+\end{lstlisting}
+Close to \maya{} in spirit --- a tree of widgets, styles as values
+--- but more verbose, and styles are runtime values, so e.g. an
+out-of-range colour is caught only at runtime (or in your tests).
+
+\paragraph{\maya{} (\cpp{}26).}
+\begin{lstlisting}
+constexpr auto ui = v(
+    t<"Hello, maya"> | Bold | Fg<100, 180, 255>,
+    t<"a tiny banner"> | Dim
+) | border_<Round> | pad<1>;
+print(ui.build());
+\end{lstlisting}
+The whole description is a \code{constexpr} value. The compiler
+builds the tree at translation time; bad styles, bad borders, and
+out-of-range colours are caught before the program runs.
+
+The trade is roughly: more verbose than \maya{} in dynamic
+languages; more strictly checked in \maya{} than anywhere else;
+broadly similar mental model across the declarative tier (textual,
+ratatui, \maya{}). Once you can read one, you can read all of them.
+
+\section{What is a ``binary''?}
+\label{sec:intro:binary}
+
+We keep mentioning ``the binary'' --- the thing your compiler
+produces. One sentence on what it is: a \textbf{binary} (or
+\textbf{executable}) is a single file on disk full of CPU
+instructions plus the data your program needs. When you run
+\code{./hello}, the operating system loads that file into memory
+and begins executing the instructions at a fixed entry point
+(typically a function the compiler links in, which then calls your
+\code{main}).
+
+The binary is built once and run many times. Anything that can be
+computed at compile time can live inside the binary directly ---
+text strings, constant tables, style values --- without any cost at
+startup. That is what \maya{} exploits with \code{constexpr}: the
+UI tree of a static banner is, literally, encoded into the bytes of
+the executable file.
+
 \section{How this book is laid out}
 
 A few visual conventions you will see in the chapters:
@@ -551,3 +843,72 @@ machinery the chapter introduced.
     message. You do not need to fix it elegantly --- just observe
     that it caught the mistake.
 \end{enumerate}
+
+\section*{Glossary of terms introduced in this chapter}
+
+Keep this list handy; every term here is referenced freely in the
+rest of the book.
+
+\begin{description}[leftmargin=*, style=nextline]
+  \item[\textbf{ANSI}] The byte language a program writes to a
+    terminal to control colour, cursor position, and screen modes.
+    Standardised in 1976. Chapter~\ref{ch:terminal} covers it.
+  \item[\textbf{Binary, executable}] A file on disk holding compiled
+    CPU instructions for your program. \code{./hello} runs the
+    binary called \file{hello}.
+  \item[\textbf{Canvas}] \maya{}'s in-memory 2-D grid of styled
+    cells; the working representation of the next screen.
+    Chapter~\ref{ch:canvas}.
+  \item[\textbf{Cell}] One position in the terminal grid. Holds one
+    character (sometimes two-cell-wide), foreground colour,
+    background colour, and attribute bits.
+  \item[\textbf{\code{constexpr}}] \cpp{} keyword meaning ``compute
+    this at compile time''. \maya{}'s DSL leans on it heavily.
+  \item[\textbf{Diff}] The pass that compares the new canvas to the
+    previous one and decides which cells changed.
+    Chapter~\ref{ch:simd}.
+  \item[\textbf{DSL}] Domain-Specific Language. The pleasant
+    \code{t<"..."> | Bold | ...} syntax in \maya{} is a DSL
+    embedded inside \cpp{}. Chapter~\ref{ch:dsl}.
+  \item[\textbf{Element}] \maya{}'s in-memory UI tree. The output of
+    your \code{view} function; the input to the layout engine.
+    Chapter~\ref{ch:elements}.
+  \item[\textbf{Elm runtime}] The Elm-inspired loop
+    (\code{init}--\code{update}--\code{view}--\code{subscribe}) that
+    \maya{} programs are organised around. Chapter~\ref{ch:elm}.
+  \item[\textbf{Escape sequence}] A short string of bytes beginning
+    with \code{ESC} (\code{0x1B}) that tells the terminal to do
+    something. The grammar of ANSI.
+  \item[\textbf{Frame}] One complete update cycle: read events,
+    compute new state, build new canvas, diff, emit bytes.
+  \item[\textbf{GUI}] Graphical User Interface --- pixel-based.
+    Contrast with TUI.
+  \item[\textbf{Layout}] The step that assigns each Element a
+    position and size given the terminal dimensions.
+    Chapter~\ref{ch:layout}.
+  \item[\textbf{Leaf, node, root}] Tree vocabulary. The root is the
+    top of a tree; leaves are nodes with no children; everything
+    else is an internal node.
+  \item[\textbf{NTTP}] Non-Type Template Parameter --- a template
+    argument that is a value, not a type. The trick that lets
+    \code{t<"Hello">} encode a string into a type.
+    Chapter~\ref{ch:cpp}.
+  \item[\textbf{Pseudo-terminal, pty}] The kernel-managed byte pipe
+    between a terminal emulator and the program running inside it.
+    Chapter~\ref{ch:terminal}.
+  \item[\textbf{Raw mode}] A configuration of the terminal where the
+    kernel passes every keystroke through immediately, with no line
+    editing or echo. The mode every TUI runs in.
+  \item[\textbf{SIMD}] Single Instruction Multiple Data: CPU
+    instructions that operate on many bytes at once. \maya{}'s diff
+    pass uses SIMD. Chapter~\ref{ch:simd}.
+  \item[\textbf{stdin / stdout / stderr}] The three default file
+    descriptors --- 0, 1, 2 --- a process inherits. In a TUI all
+    three are wired to the pty.
+  \item[\textbf{Tree}] A data structure: a root with children, each
+    of which may have children. A UI is naturally a tree.
+  \item[\textbf{TUI}] Text User Interface. A program that draws
+    into the grid of cells inside a terminal window.
+  \item[\textbf{UTF-8}] The standard variable-length encoding of
+    Unicode characters into bytes. Modern terminals expect UTF-8.
+\end{description}
