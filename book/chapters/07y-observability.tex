@@ -1,0 +1,332 @@
+\chapter{Logging, tracing, and observability}
+\label{ch:observability}
+
+\begin{aside}
+An interactive program that does not log is opaque when things
+go wrong. \maya{} ships a small observability toolkit: a ring
+buffer for last-N messages, structured tracing for the render
+pipeline, and a debug overlay you can toggle at runtime. None
+of it is mandatory; all of it pays off the first time a user
+files a bug.
+\end{aside}
+
+\section{Why not just std::cerr?}
+
+A TUI app cannot use \code{std::cerr} freely because stderr is
+the user's screen. Writing log messages to stderr corrupts the
+display.
+
+Three workable alternatives:
+
+\begin{itemize}[leftmargin=*]
+  \item Redirect stderr to a file at startup.
+  \item Buffer log messages in memory; surface on demand.
+  \item Write to a separate log file always.
+\end{itemize}
+
+\maya{} supports all three. The default is the ring buffer:
+in-memory by default, dump on request.
+
+\section{The Logger interface}
+
+\file{maya/include/maya/app/context.hpp} exposes:
+
+\begin{lstlisting}
+class Logger {
+public:
+    void debug(std::string_view msg);
+    void info(std::string_view msg);
+    void warn(std::string_view msg);
+    void error(std::string_view msg);
+
+    template <class... Args>
+    void info(std::string_view fmt, Args&&... args) {
+        info(std::format(fmt, std::forward<Args>(args)...));
+    }
+
+    std::vector<LogEntry> recent(size_t n) const;
+    void dump_to(std::ostream& os) const;
+};
+\end{lstlisting}
+
+Four levels (debug, info, warn, error). Each takes a message;
+the \code{std::format}-aware overloads support typed
+arguments. \code{recent(n)} returns the last $n$ entries;
+\code{dump\_to} writes them to a stream.
+
+\subsection*{LogEntry}
+
+\begin{lstlisting}
+struct LogEntry {
+    std::chrono::system_clock::time_point time;
+    Level level;
+    std::string category;
+    std::string message;
+};
+\end{lstlisting}
+
+Time, level, category (subsystem tag), message. Categories let
+you filter logs by source.
+
+\section{The ring buffer}
+
+The default logger is a fixed-size ring:
+
+\begin{lstlisting}
+class RingLogger {
+    std::vector<LogEntry> buffer_;
+    size_t head_ = 0;
+    size_t count_ = 0;
+    mutable std::mutex mu_;
+
+public:
+    explicit RingLogger(size_t capacity);
+    void append(LogEntry e);
+    std::vector<LogEntry> snapshot() const;
+};
+\end{lstlisting}
+
+Capacity is typically 1024 or 4096 entries. Older entries are
+overwritten in place; the ring stays at constant memory.
+
+The mutex is fine-grained: a single mutex protects the buffer.
+Logging from multiple threads is supported (worker tasks, the
+main thread).
+
+\subsection*{Snapshot}
+
+\begin{lstlisting}
+std::vector<LogEntry> RingLogger::snapshot() const {
+    std::lock_guard lk{mu_};
+    std::vector<LogEntry> out;
+    out.reserve(count_);
+    for (size_t i = 0; i < count_; ++i) {
+        out.push_back(buffer_[(head_ - count_ + i) % buffer_.size()]);
+    }
+    return out;
+}
+\end{lstlisting}
+
+Returns the entries in chronological order. Threadsafe; can be
+called while logging continues.
+
+\section{Structured logging}
+
+For tracing, \maya{} uses a slightly richer entry shape:
+
+\begin{lstlisting}
+struct TraceEntry {
+    std::chrono::steady_clock::time_point time;
+    std::string event;
+    std::unordered_map<std::string, std::string> attributes;
+};
+\end{lstlisting}
+
+The attributes map lets you attach context: \code{frame=42},
+\code{node\_count=128}, \code{cell\_count=1920}. When you
+later inspect the trace, you can filter and group by attribute.
+
+\subsection*{Tracing the render pipeline}
+
+The pipeline emits trace events at each stage:
+
+\begin{lstlisting}
+trace(\"view.begin\", {{\"frame\", std::to_string(frame_no)}});
+auto e = P::view(model);
+trace(\"view.end\", {{\"frame\", std::to_string(frame_no)},
+                    {\"node_count\", std::to_string(count_nodes(e))}});
+\end{lstlisting}
+
+A trace pair: \code{begin}/\code{end} with the same key
+attributes. The duration is the difference; the attribute set
+lets you correlate.
+
+\section{The debug overlay}
+
+A widget that renders the most recent log entries:
+
+\begin{lstlisting}
+Element render_log_overlay(const Logger& l) {
+    auto entries = l.recent(20);
+    std::vector<Element> lines;
+    for (auto& e : entries) {
+        auto style = level_style(e.level);
+        lines.push_back(h(
+            text(format_time(e.time)) | Dim,
+            text(\" \"),
+            text(e.message) | style
+        ));
+    }
+    return box(v(lines)) | border<Single> | pad<1>;
+}
+\end{lstlisting}
+
+Toggled with a hotkey (typically F12 or Ctrl-Shift-L). The
+overlay sits on top of the app via the z-stack from
+Chapter~\ref{ch:elements}.
+
+\section{Categories and filters}
+
+Tag log messages with a category:
+
+\begin{lstlisting}
+logger.info(\"render\", \"frame {} ({} cells dirty)\", n, dirty);
+logger.info(\"network\", \"GET {} -> 200\", url);
+logger.info(\"input\", \"key {} pressed\", key.name());
+\end{lstlisting}
+
+Then filter:
+
+\begin{lstlisting}
+auto render_logs = logger.recent_filtered(
+    100, [](auto& e) { return e.category == \"render\"; });
+\end{lstlisting}
+
+For development, set an environment variable to control which
+categories are recorded:
+
+\begin{lstlisting}
+MAYA_LOG_CATEGORIES=render,network ./my_app
+\end{lstlisting}
+
+Only the listed categories are appended; others are dropped
+cheaply.
+
+\section{Telemetry to a remote sink}
+
+For deployed apps, log to a file or service. The pattern:
+
+\begin{lstlisting}
+auto telemetry_cmd = Cmd<Msg>::task([entries] {
+    upload(entries);
+    return TelemetryDone{};
+});
+\end{lstlisting}
+
+A background task uploads batches. The main loop is unaffected;
+the user does not see the upload.
+
+\subsection*{Privacy}
+
+Be careful about what you log. PII (personally identifiable
+information), file paths, secrets --- redact before recording.
+A simple redactor:
+
+\begin{lstlisting}
+std::string redact(std::string_view msg) {
+    // Replace anything that looks like an email, a token, a path.
+    return std::regex_replace(std::string{msg},
+        std::regex{R\"(\\w+@\\w+\\.\\w+)\"}, \"[REDACTED]\");
+}
+\end{lstlisting}
+
+The list of patterns is app-specific. Err on the side of
+redacting too much.
+
+\section{Crash diagnostics}
+
+If your app crashes, what survives?
+
+\subsection*{The ring buffer is volatile}
+
+A SIGSEGV does not flush. You need a signal handler:
+
+\begin{lstlisting}
+extern \"C\" void crash_handler(int sig) {
+    logger.dump_to(std::ofstream{\"/tmp/myapp.crashlog\"});
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+\end{lstlisting}
+
+Install with \code{std::signal(SIGSEGV, crash\_handler)}. The
+handler must be async-signal-safe; in practice ``open a file
+and write'' is OK but allocating memory is not. \maya{}'s
+\code{dump\_to} is designed to be async-signal-safe.
+
+\subsection*{Symbolicated stacks}
+
+The crash log should include a stack trace. Use
+\code{std::stacktrace} (C++23):
+
+\begin{lstlisting}
+auto trace = std::stacktrace::current();
+for (auto& frame : trace) {
+    log_line(std::format(\"{}\", frame));
+}
+\end{lstlisting}
+
+Compile with debug symbols (\code{-g}); the trace will name
+functions and line numbers.
+
+\section{Performance considerations}
+
+Logging is on the hot path. Cheap logging:
+
+\begin{itemize}[leftmargin=*]
+  \item String formatting is the slowest part; do it lazily.
+  \item Disabled levels (e.g. \code{debug} in release) should
+    cost zero --- one branch on a constant flag, not even a
+    function call.
+  \item Lock contention is real; if multiple threads log
+    heavily, the buffer mutex becomes a bottleneck. Use
+    thread-local buffers and a periodic merge.
+\end{itemize}
+
+The simplest lazy pattern:
+
+\begin{lstlisting}
+if (logger.level_enabled(Level::Debug)) {
+    logger.debug(\"value = {}\", expensive_compute());
+}
+\end{lstlisting}
+
+The expensive compute only runs if debug is on.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Logging in the inner loop.} Even cheap logging adds up
+at 10\,000 calls per frame. Sample (log every 100th occurrence)
+or gate by level.
+\end{warning}
+
+\begin{warning}
+\textbf{Logging secrets.} A bug report with a config file
+containing API keys is a security incident. Redact aggressively.
+\end{warning}
+
+\begin{warning}
+\textbf{Lost messages on crash.} A buffer that lives only in
+memory disappears with the process. Pair with a crash handler
+that flushes.
+\end{warning}
+
+\begin{warning}
+\textbf{Overlapping logs.} Multiple threads writing to the
+same buffer can produce interleaved messages. The mutex
+serialises them, but if you log a multi-line message, the
+lines may not be adjacent. Log one message per call.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a ring logger to a small app. Log on every key
+    press. Toggle the debug overlay; verify entries appear.
+  \item Install a crash handler that dumps the log on
+    \code{SIGSEGV}. Force a crash (deref a null pointer);
+    verify the log is written.
+  \item Add structured tracing to the render pipeline (begin
+    + end events with attributes). Compute frame durations
+    from the trace.
+\end{enumerate}
+
+\begin{recap}
+A TUI cannot use stderr freely; use a ring buffer or a log
+file. Structured tracing captures context with attributes.
+A debug overlay surfaces recent entries at runtime. A crash
+handler dumps the buffer on SIGSEGV. Categories and levels
+let you filter cheaply. Redact secrets before they leave the
+process.
+\end{recap}

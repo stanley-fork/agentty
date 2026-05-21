@@ -1,0 +1,332 @@
+\chapter{Cross-cutting concerns: logging, time, ID}
+\label{ch:cross-cutting}
+
+\begin{aside}
+Some concerns do not belong to a single architectural layer.
+Time, logging, ID generation, randomness --- each is touched
+by many components, each is a source of bugs if treated
+carelessly. This chapter pulls them together and shows the
+patterns \maya{} uses for each.
+\end{aside}
+
+\section{Time}
+
+A surprising amount of TUI code touches time:
+
+\begin{itemize}[leftmargin=*]
+  \item Animations advance over time.
+  \item Timeouts fire after a duration.
+  \item Timestamps display ``now''.
+  \item Debounce windows compare ``now'' to previous.
+  \item Profiling measures elapsed time.
+\end{itemize}
+
+C++26 gives several clocks:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{std::chrono::system\_clock}: wall-clock time.
+    Can jump backwards (NTP, user adjustment).
+  \item \code{std::chrono::steady\_clock}: monotonically
+    increasing. Cannot jump back. Use for durations.
+  \item \code{std::chrono::high\_resolution\_clock}: alias for
+    one of the above; system-dependent.
+\end{itemize}
+
+\subsection*{When to use which}
+
+\begin{itemize}[leftmargin=*]
+  \item Display: \code{system\_clock} (the user wants to see
+    actual wall-clock).
+  \item Animations, timeouts, debounce, profiling:
+    \code{steady\_clock}.
+\end{itemize}
+
+Mixing them is a bug source. A debounce that uses
+\code{system\_clock} can fire repeatedly or never if the clock
+jumps.
+
+\subsection*{Wrapping time for testability}
+
+For test determinism, abstract the clock:
+
+\begin{lstlisting}
+class Clock {
+public:
+    virtual std::chrono::steady_clock::time_point now() const = 0;
+};
+
+class RealClock : public Clock {
+    std::chrono::steady_clock::time_point now() const override {
+        return std::chrono::steady_clock::now();
+    }
+};
+
+class FakeClock : public Clock {
+    std::chrono::steady_clock::time_point current_;
+public:
+    void advance(std::chrono::milliseconds d) { current_ += d; }
+    std::chrono::steady_clock::time_point now() const override {
+        return current_;
+    }
+};
+\end{lstlisting}
+
+Inject the clock into modules that care; use \code{RealClock}
+in production, \code{FakeClock} in tests.
+
+\section{Logging}
+
+Already covered (Chapter~\ref{ch:observability}). The
+cross-cutting point: every layer of your app may want to log,
+not just the runtime. Make logging accessible:
+
+\begin{itemize}[leftmargin=*]
+  \item Pass a \code{Logger\&} via the context.
+  \item Inside widgets, accept an optional \code{Logger*}.
+  \item For tests, supply a \code{NullLogger}.
+\end{itemize}
+
+\subsection*{Avoiding global loggers}
+
+A global \code{spdlog::get(\"app\")} pattern is convenient but
+breaks test isolation. The injection pattern is better; one
+logger per app instance, one app per test.
+
+\section{IDs}
+
+Generating unique IDs comes up everywhere:
+
+\begin{itemize}[leftmargin=*]
+  \item Focus IDs.
+  \item Element keys for reconciliation.
+  \item Database row IDs.
+  \item Correlation IDs for log entries.
+\end{itemize}
+
+\subsection*{Patterns}
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Monotonic counter.} Simple, safe within one
+    process. Not unique across runs.
+  \item \textbf{UUID.} Unique across processes, machines, time.
+    16 bytes; \code{libuuid} or \code{stduuid}.
+  \item \textbf{Hash of content.} Deterministic; same input
+    gives same ID. Useful for cache keys.
+  \item \textbf{Timestamp + counter.} Sortable IDs.
+    Snowflake-style.
+\end{enumerate}
+
+\subsection*{Monotonic counter implementation}
+
+\begin{lstlisting}
+class IdGenerator {
+    std::atomic<uint64_t> next_{1};
+public:
+    uint64_t next() { return next_.fetch_add(1, std::memory_order_relaxed); }
+};
+\end{lstlisting}
+
+Thread-safe via atomic. Zero is reserved for ``invalid'';
+counts up from 1.
+
+\section{Randomness}
+
+\code{std::rand} is broken (not really random, not thread-safe).
+Use \code{<random>}:
+
+\begin{lstlisting}
+thread_local std::mt19937 rng{std::random_device{}()};
+\end{lstlisting}
+
+Each thread gets its own seeded engine. Use
+\code{std::uniform\_int\_distribution} for ranges.
+
+\subsection*{Reproducibility}
+
+For tests, seed the RNG deterministically:
+
+\begin{lstlisting}
+std::mt19937 rng{42};
+\end{lstlisting}
+
+Same seed, same sequence. The test fails deterministically when
+it fails at all.
+
+\subsection*{Cryptographic randomness}
+
+\code{std::mt19937} is not cryptographically secure. For tokens
+or session IDs, use the OS:
+
+\begin{itemize}[leftmargin=*]
+  \item Linux: \code{getrandom}.
+  \item BSD: \code{arc4random}.
+  \item Win32: \code{BCryptGenRandom}.
+\end{itemize}
+
+The platform abstraction layer should provide a thin wrapper.
+
+\section{Errors}
+
+Cross-cutting because every layer can produce them. Patterns:
+
+\begin{itemize}[leftmargin=*]
+  \item Use \code{Expected<T, E>} for recoverable failures.
+  \item Use exceptions for unrecoverable bugs (assertion
+    failures).
+  \item Log every error at the boundary it crossed; do not
+    re-log as it propagates.
+  \item Surface to the user via the UI, not via stderr.
+\end{itemize}
+
+\section{Configuration access}
+
+Already covered (Chapter~\ref{ch:config}). The cross-cutting
+point: any layer might need to read config. The pattern:
+
+\begin{itemize}[leftmargin=*]
+  \item The model holds the config struct.
+  \item \code{view} reads from \code{model.config.\ldots}.
+  \item Widgets that need config take it as a parameter.
+\end{itemize}
+
+Do not reach into a global; thread the config through.
+
+\section{Caches}
+
+A cache is cross-cutting: it sits between a producer and a
+consumer. Patterns:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Memoise} pure functions.
+    \code{std::unordered\_map<Key, Result>}.
+  \item \textbf{LRU caches} for bounded memory.
+  \item \textbf{Signal-driven} caches that invalidate when
+    inputs change (Chapter~\ref{ch:reactivity-preview}).
+\end{itemize}
+
+The trade-off is always memory vs CPU. Profile before adding a
+cache; the framework's fingerprint cache often makes app-level
+caches unnecessary.
+
+\section{Locking and synchronisation}
+
+\maya{}'s threading model (Chapter~\ref{ch:runtime}) keeps most
+synchronisation invisible. Where you need to share state across
+threads:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{std::atomic} for single primitives.
+  \item \code{std::mutex} + \code{std::lock\_guard} for short
+    critical sections.
+  \item \code{std::shared\_mutex} for read-heavy workloads.
+  \item Lock-free queues for high-throughput producer/consumer.
+\end{itemize}
+
+The pattern: take the lock for the minimum scope; never call
+out (especially not to user code) while holding a lock.
+
+\section{Async cleanup}
+
+Resources that need explicit cleanup (file descriptors, sockets,
+GPU handles) should use RAII:
+
+\begin{lstlisting}
+class FdGuard {
+    int fd_;
+public:
+    explicit FdGuard(int fd) : fd_{fd} {}
+    ~FdGuard() { if (fd_ >= 0) ::close(fd_); }
+    FdGuard(const FdGuard&) = delete;
+    FdGuard(FdGuard&& o) noexcept : fd_{std::exchange(o.fd_, -1)} {}
+};
+\end{lstlisting}
+
+The destructor handles cleanup; move-only semantics prevent
+double-close. Use \code{std::unique\_ptr} with a custom deleter
+for non-trivial resources.
+
+\section{Validation}
+
+Whenever data crosses a trust boundary (network, file, user
+input), validate. Patterns:
+
+\begin{itemize}[leftmargin=*]
+  \item Validate at the boundary, not deep in the call stack.
+  \item Reject early; return \code{Expected<\ldots>::error}.
+  \item Log the rejection (so you can spot patterns).
+  \item Never silently truncate or coerce; that hides bugs.
+\end{itemize}
+
+\section{Telemetry}
+
+If your app reports anonymous usage stats, the patterns from
+Chapter~\ref{ch:security} apply: redact, opt-in by default
+in some jurisdictions, transparent about what is sent.
+
+The simplest pattern: log a structured event every time a
+meaningful action happens; upload batches in
+\code{Cmd::isolated\_task}. Privacy and bandwidth both win.
+
+\section{Memory pressure}
+
+When the system is low on memory:
+
+\begin{itemize}[leftmargin=*]
+  \item \maya{}'s frame buffers can be shrunk on demand.
+  \item Logs can be trimmed.
+  \item Caches can be flushed.
+\end{itemize}
+
+The Linux kernel signals via cgroups and OOM thresholds; the
+app can register a handler. For most apps, this is overkill;
+mention it for the few that need it.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Time arithmetic.} Subtracting two
+\code{std::chrono::time\_point}s of different clocks does not
+compile (good). Subtracting two \code{system\_clock}
+timestamps that span a clock jump gives nonsense (bad). Use
+\code{steady\_clock} for durations.
+\end{warning}
+
+\begin{warning}
+\textbf{Global RNG seeded once.} A single global RNG seeded
+at startup gives every call the same sequence relative to
+program order. Tests become flaky as soon as call order
+changes. Use \code{thread\_local} engines or pass a seed.
+\end{warning}
+
+\begin{warning}
+\textbf{Caching too eagerly.} A cache that never invalidates
+holds stale data forever. Pair every cache with an
+invalidation rule.
+\end{warning}
+
+\begin{warning}
+\textbf{Validating in the wrong place.} Validating deep in a
+function means callers have already done partial work that
+must be undone. Validate at the entry point.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Inject a fake clock into a debounce helper. Test that
+    the debounce fires exactly when the clock crosses the
+    threshold.
+  \item Generate IDs with a thread-safe counter. Verify
+    uniqueness under high concurrency.
+  \item Wrap a file descriptor in a \code{FdGuard}. Test that
+    closing happens deterministically even on early return.
+\end{enumerate}
+
+\begin{recap}
+Time, logging, IDs, randomness, errors, config, caches, locks,
+cleanup, validation, telemetry, memory pressure --- each is a
+cross-cutting concern. None belongs to one layer. The patterns:
+inject (do not globalise), validate at the boundary, RAII for
+resources, atomic or thread-local for shared state. Test with
+fakes; production uses the real thing.
+\end{recap}

@@ -1,0 +1,241 @@
+\chapter{The DSL's static guarantees, in detail}
+\label{ch:dsl-guarantees}
+
+\begin{aside}
+Chapter~\ref{ch:dsl} introduced the DSL's type-state machine.
+This chapter zooms in on the specific guarantees: what the DSL
+prevents at compile time, what it allows at runtime, and how
+each guarantee maps to a constraint or concept. Treat it as a
+reference for ``what can I assume about my code if it
+compiled?''.
+\end{aside}
+
+\section{Guarantee 1: borderless boxes cannot have border colour}
+
+\begin{lstlisting}
+auto a = box(text(\"x\"));                       // no border
+auto b = a | bcol<60, 65, 80>;                  // compile error
+\end{lstlisting}
+
+Mechanism: the \code{operator|(BoxNode<Cfg>, bcol\_t)} has a
+\code{requires (Cfg.has\_border)} clause. Without a border, the
+clause fails.
+
+Why it matters: a border colour without a border produces no
+visible effect at runtime --- a silent bug. The compile error
+makes the intent explicit.
+
+\section{Guarantee 2: padding is non-negative}
+
+\begin{lstlisting}
+auto a = text(\"x\") | pad<-1>;                  // compile error
+\end{lstlisting}
+
+Mechanism: the \code{pad} template uses an NTTP constrained to
+non-negative integers via a concept.
+
+Why it matters: negative padding has no defined meaning; a
+runtime crash or visual glitch would be the alternative.
+
+\section{Guarantee 3: each pipe attribute applies at most once}
+
+\begin{lstlisting}
+auto a = text(\"x\") | width<10> | width<20>;    // compile error
+\end{lstlisting}
+
+Mechanism: the second \code{| width<20>} has a \code{requires
+(!Cfg.has\_width)} clause; the first pipe set the flag, so the
+second fails.
+
+Why it matters: ``which width wins?'' would be ambiguous;
+forbidding the double-pipe makes the intent explicit. If you
+really want to override, build a fresh node.
+
+\section{Guarantee 4: children must be elements}
+
+\begin{lstlisting}
+auto a = h(text(\"x\"), 42);                     // compile error
+\end{lstlisting}
+
+Mechanism: \code{h(\ldots)} requires all arguments to satisfy
+\code{ElementLike}. An \code{int} does not.
+
+Why it matters: silent conversion would produce a runtime crash
+or empty element.
+
+\section{Guarantee 5: NTTPs are constant expressions}
+
+\begin{lstlisting}
+std::string s = compute();
+auto a = t<s>;                                 // compile error
+\end{lstlisting}
+
+Mechanism: \code{t<S>} takes a \code{Str} NTTP; only literals
+and constexpr values qualify.
+
+Why it matters: the compile-time path is exclusive to compile-
+time strings. For runtime strings, use \code{text(s)} explicitly.
+
+\section{Guarantee 6: style composition is associative}
+
+\begin{lstlisting}
+auto a = Bold | Italic | Underline;
+auto b = (Bold | Italic) | Underline;
+auto c = Bold | (Italic | Underline);
+// a, b, c are the same type.
+\end{lstlisting}
+
+Mechanism: \code{StyTag<A> | StyTag<B>} returns \code{StyTag<merge(A,
+B)>}, and \code{merge} is associative on the underlying flag
+struct.
+
+Why it matters: refactoring style expressions is safe; the
+order of pipes does not affect the result.
+
+\section{Guarantee 7: TextNode preserves literal storage}
+
+\begin{lstlisting}
+auto a = t<\"hello\">;                           // TextNode<Str{\"hello\"}>
+// At runtime, the bytes \"hello\" are in the static string table.
+// The runtime element holds a string_view into them.
+\end{lstlisting}
+
+Mechanism: the NTTP carries the literal; the runtime element
+holds a \code{string\_view} that points into the static segment.
+
+Why it matters: no allocation for compile-time text; no
+copy-on-construction.
+
+\section{Guarantee 8: Style merge precedence is deterministic}
+
+\begin{lstlisting}
+auto a = text(\"x\") | Bold;                     // Bold
+auto b = box(a) | Italic;                       // Bold + Italic
+// The order of Bold and Italic across the parent/child is unambiguous.
+\end{lstlisting}
+
+Mechanism: the merge function is pure and deterministic; same
+inputs, same output.
+
+Why it matters: behavioural reasoning is local; reading a pipe
+chain tells you the resulting style without running the program.
+
+\section{Guarantee 9: width-clipped text never exceeds width}
+
+\begin{lstlisting}
+auto a = text(very_long) | width<10>;
+// At runtime, the rendered text is exactly 10 cells wide.
+\end{lstlisting}
+
+Mechanism: the layout phase respects the width as a hard cap.
+The text renderer truncates (with optional ellipsis) when
+content exceeds.
+
+Why it matters: layout stability; widgets that allocate 10
+cells get exactly 10.
+
+\section{Guarantee 10: flex direction is one-way}
+
+\begin{lstlisting}
+auto a = h(text(\"x\")) | direction<Column>;     // ?? not allowed
+\end{lstlisting}
+
+Mechanism: \code{h(\ldots)} creates a row; the direction is
+baked in. Overriding via pipe is not supported; if you want a
+column, write \code{v(\ldots)}.
+
+Why it matters: ambiguity in direction would force a runtime
+choice; making it explicit at the DSL level avoids the
+confusion.
+
+\section{Guarantees the DSL does not give}
+
+For completeness, the things the DSL does \emph{not} guarantee:
+
+\begin{itemize}[leftmargin=*]
+  \item Runtime content fits the layout. A long runtime string
+    might overflow its width container.
+  \item Terminal capabilities. The DSL emits truecolour even
+    if the terminal does not support it; quantisation happens
+    later.
+  \item Sub-tree count. A vector of children can be of any
+    length; the DSL does not constrain.
+  \item Memory budget. A deeply nested tree can blow the
+    stack; the DSL does not bound recursion.
+\end{itemize}
+
+These are runtime concerns that the DSL leaves to the
+runtime. The discipline is: use the DSL for shape, use the
+runtime for content.
+
+\section{Cumulative effect}
+
+The ten guarantees, plus a dozen more that fall out of concept
+constraints, mean a \maya{} UI that compiles is structurally
+sound. You cannot ship a panel with a border colour and no
+border; you cannot pass an \code{int} where an element is
+expected; you cannot accidentally set width twice.
+
+This is what the type-state machine buys you: the compiler
+caught the bugs before you ran the program.
+
+\begin{idea}
+A compiler that catches structural bugs is the best code review
+you will ever get. The DSL turns the C++ compiler into a UI
+linter, automatically and continuously. Every successful build is
+a small certificate of correctness.
+\end{idea}
+
+\section{Mapping guarantees to error messages}
+
+When a guarantee fires, the compiler emits an error. The shape
+is consistent:
+
+\begin{lstlisting}
+error: no match for 'operator|' (operand types are X and Y)
+note: candidate: 'requires Z ...'
+note:   constraint not satisfied: 'Z evaluated to false'
+\end{lstlisting}
+
+Read top-down: ``no match'' is the call site; ``candidate'' is
+the overload that almost matched; ``constraint not satisfied''
+is the specific rule. Map the rule to one of the guarantees in
+this chapter; the fix follows.
+
+\section{Guarantees in widget code}
+
+Widget builders can declare their own constraints. If a widget
+requires certain configuration, encode it as a concept:
+
+\begin{lstlisting}
+template <class T>
+concept HasLabel = requires (T t) { { t.label } -> std::convertible_to<std::string_view>; };
+
+template <HasLabel T>
+Element labelled(const T& t, std::string_view extra);
+\end{lstlisting}
+
+Now callers without a \code{label} field get a clear error,
+not an SFINAE wall.
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Pick three of the ten guarantees. For each, write code
+    that violates it, read the resulting error, identify which
+    \code{requires} clause caught it.
+  \item Write a small widget with a concept-constrained
+    parameter. Verify the error message is clear when the
+    concept is violated.
+  \item Read the source of a DSL pipe overload. Confirm the
+    \code{requires} clause is human-readable.
+\end{enumerate}
+
+\begin{recap}
+The DSL gives ten structural guarantees, all enforced at compile
+time. They eliminate whole classes of bugs (silent decorations,
+ambiguous widths, wrong child types). Errors map back to a
+specific \code{requires} clause; the fix is mechanical. The
+trade-off is some DSL complexity; the payoff is a UI that
+compiles is a UI that is structurally sound.
+\end{recap}

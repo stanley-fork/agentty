@@ -1,0 +1,301 @@
+\chapter{Scroll, virtualisation, and viewports}
+\label{ch:scroll}
+
+\begin{aside}
+Sooner or later your UI needs to show more content than fits the
+terminal. The naive answer (render everything, clip what does
+not fit) is wasteful for a list of ten thousand items.
+\maya{}'s scroll model is a small data structure
+(\code{ScrollState}) plus a viewport-aware rendering pattern.
+This chapter walks it.
+\end{aside}
+
+\section{The ScrollState struct}
+
+\file{maya/include/maya/core/scroll\_state.hpp} defines:
+
+\begin{lstlisting}
+struct ScrollState {
+    int offset = 0;          // first visible item index
+    int viewport_size = 0;   // number of rows visible
+    int total_items = 0;     // total number of items in the source
+
+    bool can_scroll_up()   const { return offset > 0; }
+    bool can_scroll_down() const {
+        return offset + viewport_size < total_items;
+    }
+    void scroll_to(int item_index, bool center = false);
+    void scroll_by(int delta);
+    void clamp();
+};
+\end{lstlisting}
+
+Three integers (offset, viewport size, total). Every scrollable
+widget stores one of these in its model. The widget's
+\code{view} renders only items \code{[offset, offset+viewport\_size)}.
+
+\subsection*{Why integers, not pointers}
+
+A scroll position represented as ``a pointer to the visible row''
+breaks the moment the underlying data changes. An integer offset
+into a vector is stable: insertions and deletions can adjust it
+deterministically.
+
+\code{scroll\_to(index, center)} centres or pins the item at
+\code{index}; \code{scroll\_by(delta)} moves by a relative
+amount and clamps; \code{clamp()} ensures the offset is in
+\code{[0, total\_items - viewport\_size]}.
+
+\section{Virtualisation: rendering only what is visible}
+
+A list of 10\,000 items, rendered naively, produces an element
+tree with 10\,000 children. Layout walks them all. The canvas
+diff walks them. ANSI emit walks them. Everything is slow.
+
+The fix: render only the visible slice.
+
+\begin{lstlisting}
+Element render_list(const std::vector<Item>& items,
+                    const ScrollState& s) {
+    std::vector<Element> visible;
+    for (int i = 0; i < s.viewport_size; ++i) {
+        int idx = s.offset + i;
+        if (idx >= s.total_items) break;
+        visible.push_back(render_item(items[idx]));
+    }
+    return v(std::move(visible));
+}
+\end{lstlisting}
+
+The element tree has at most \code{viewport\_size} children, no
+matter how many items the source has. Layout, diff, emit ---
+all proportional to the screen, not the data.
+
+\begin{idea}
+Virtualisation is one of the few optimisations that scales
+\emph{better} than the underlying data structure. A list with a
+million items renders as fast as one with twenty, because only
+the twenty visible are ever materialised as elements.
+\end{idea}
+
+\subsection*{Handling tall items}
+
+If items have variable height, the simple ``visible =
+[offset, offset+viewport\_size)'' breaks: the slice's row count
+depends on which items fall in it. Two approaches:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Constant-height items.} Easy: every item is one
+    row. The slice is exactly \code{viewport\_size} items. This
+    is what tables and pickers use.
+  \item \textbf{Variable-height items.} Maintain a side table of
+    per-item heights. To translate ``which item is on row $r$?''
+    use a prefix sum or a Fenwick tree.
+\end{itemize}
+
+Most \maya{} widgets fix the height to one row. When you need
+multi-row items, the widget either pre-measures or accepts the
+$O($items$)$ pre-pass.
+
+\section{Scroll bars}
+
+The \code{scrollbar} widget reads a \code{ScrollState} and
+renders a thumb:
+
+\begin{lstlisting}
+Element scrollbar(const ScrollState& s, int height) {
+    if (s.total_items <= s.viewport_size) return text(\" \");
+    int thumb_height = std::max(1, height * s.viewport_size / s.total_items);
+    int thumb_y      = height * s.offset / s.total_items;
+    // ... draw a vertical bar with thumb at thumb_y, thumb_height tall
+}
+\end{lstlisting}
+
+The thumb size scales with the fraction of visible content; the
+thumb position with the scroll offset. Standard math.
+
+The scrollbar is decorative; the actual scrolling happens via
+\code{ScrollState} mutations in \code{update}.
+
+\section{Following the cursor}
+
+A common pattern: a list with a current selection. When the
+selection moves, the viewport should follow it.
+
+\begin{lstlisting}
+[&](KeyDown) {
+    if (m.selected < m.items.size() - 1) m.selected++;
+    if (m.selected >= m.scroll.offset + m.scroll.viewport_size)
+        m.scroll.offset = m.selected - m.scroll.viewport_size + 1;
+    return std::pair{m, Cmd<Msg>{}};
+}
+\end{lstlisting}
+
+If the selection moves off the bottom of the viewport, scroll
+down to keep it visible. The same logic applied symmetrically for
+up movement keeps the cursor on-screen.
+
+\subsection*{PageUp/PageDown}
+
+Move the offset by \code{viewport\_size}:
+
+\begin{lstlisting}
+[&](PageDown) {
+    m.scroll.scroll_by(m.scroll.viewport_size);
+    m.selected = std::min(m.items.size() - 1,
+                          m.selected + m.scroll.viewport_size);
+    return std::pair{m, Cmd<Msg>{}};
+}
+\end{lstlisting}
+
+Whether the cursor moves with the page or stays at a fixed
+viewport offset is a UX choice; both are common.
+
+\section{Horizontal scroll}
+
+Some content (wide tables, log lines) extends past the right
+edge. \code{ScrollState} can be reused on the horizontal axis:
+
+\begin{lstlisting}
+struct WideListModel {
+    std::vector<std::string> lines;
+    ScrollState vscroll;  // which rows are visible
+    ScrollState hscroll;  // which columns
+};
+\end{lstlisting}
+
+The render function clips each visible line to the horizontal
+window:
+
+\begin{lstlisting}
+std::string clip_horizontal(std::string_view line, const ScrollState& h) {
+    GraphemeWalker w{line};
+    std::string out;
+    int x = 0;
+    while (auto g = w.next()) {
+        if (x >= h.offset && x < h.offset + h.viewport_size) {
+            out += g->text;
+        }
+        x += g->width;
+        if (x >= h.offset + h.viewport_size) break;
+    }
+    return out;
+}
+\end{lstlisting}
+
+Grapheme-aware, width-aware, allocation-conscious. The
+performance is linear in visible cells, not in total line
+width.
+
+\section{Smooth scrolling}
+
+For animated scroll (the viewport eases to a new position over
+several frames), keep an animation state in the model:
+
+\begin{lstlisting}
+struct Scroll {
+    int target = 0;       // where we want to go
+    double current = 0;   // where we are now (fractional)
+};
+\end{lstlisting}
+
+Each frame, advance \code{current} toward \code{target} by a
+fraction of the gap. Round to integer for \code{offset}. Stop
+when the difference is below 1.
+
+The animation is driven by \code{Sub::animation\_frame}: as long
+as \code{current != target}, the subscription is active.
+
+\begin{warning}
+Smooth scrolling on a terminal can look jittery because the
+cell grid is integer. Snap to integer cells; smooth animations
+of fractional offsets render as the same integer for multiple
+frames in a row, which the user perceives as ``stuck''.
+\end{warning}
+
+\section{Sticky elements}
+
+A header that stays visible while content scrolls under it is a
+stylistic feature with one rule: layout the header separately
+and never include it in the scrolled region.
+
+\begin{lstlisting}
+v(
+  header() | height<1>,            // never scrolls
+  scrolled_list(items, s) | grow<1>
+)
+\end{lstlisting}
+
+The list grows to fill the rest of the column; the header stays
+put.
+
+For columns (a left rail that stays put while the main view
+scrolls), the same pattern works on the horizontal axis.
+
+\section{Snap-to-cell pitfalls}
+
+\begin{warning}
+\textbf{Offsets in graphemes, not bytes.} Scrolling a long line
+horizontally must count graphemes, not bytes, or wide
+characters will partially render.
+\end{warning}
+
+\begin{warning}
+\textbf{Resize and ScrollState.} When the terminal resizes, the
+viewport size changes. Always call \code{clamp()} to keep the
+offset in bounds.
+\end{warning}
+
+\begin{warning}
+\textbf{Dynamic total\_items.} If the source list grows or
+shrinks (e.g. new log lines arrive), update
+\code{total\_items} and clamp. Otherwise the user can scroll
+past the end into empty space.
+\end{warning}
+
+\begin{warning}
+\textbf{Offset becoming stale.} If items are inserted before
+\code{offset}, the user's position drifts. Decide whether the
+user's intent is ``stick with this item'' (adjust offset) or
+``stay at this viewport position'' (keep offset). \maya{}'s
+default is the former; sometimes you want the latter.
+\end{warning}
+
+\section{Performance numbers}
+
+A virtualised list with a million items:
+
+\begin{itemize}[leftmargin=*]
+  \item Element tree size: bounded by viewport (e.g. 24
+    children).
+  \item Layout time: tens of microseconds.
+  \item Diff time: sub-microsecond (only the viewport diffs).
+  \item Bytes emitted per frame: a few hundred for incremental
+    scroll.
+\end{itemize}
+
+The scaling is by viewport, not by source size. This is the
+single optimisation that makes large data feasible in a TUI.
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a list widget that virtualises 10\,000 items.
+    Verify with a profiler that frame time is independent of
+    item count.
+  \item Add a scroll bar to the list using the \code{scrollbar}
+    widget. Verify the thumb size and position match the
+    \code{ScrollState}.
+  \item Implement PageUp/PageDown that keep the selection
+    centred when possible (only push it to the edge near the
+    list bounds).
+\end{enumerate}
+
+\begin{recap}
+\code{ScrollState} is three integers: offset, viewport size,
+total. Virtualisation renders only the visible slice; layout,
+diff, and emit cost are O(viewport). Sticky elements layout
+outside the scrolled region. Animations are driven by signals
+or \code{AnimationFrame}. The model is data; the runtime stays
+unaware.
+\end{recap}

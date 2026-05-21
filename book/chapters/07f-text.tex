@@ -1,0 +1,328 @@
+\chapter{Text, graphemes, and width}
+\label{ch:text}
+
+\begin{aside}
+A terminal puts characters in cells. Two facts make this harder
+than it sounds: not every Unicode codepoint is one character, and
+not every character is one cell wide. \maya{} treats text as a
+grapheme stream and resolves visual width at the boundary between
+the element tree and the canvas. This chapter explains the model.
+\end{aside}
+
+\section{Code units, codepoints, graphemes}
+
+Three terms for three different things:
+
+\begin{itemize}[leftmargin=*]
+  \item A \textbf{code unit} is the smallest piece of an encoded
+    string. For UTF-8, a code unit is a byte. For UTF-16, two
+    bytes. \code{std::string::size()} returns code units.
+  \item A \textbf{codepoint} is a Unicode scalar value
+    (U+0000--U+10FFFF, minus the surrogate range). One codepoint
+    may take one to four UTF-8 bytes.
+  \item A \textbf{grapheme cluster} is what a human would call ``a
+    character'' --- a base character plus any combining marks,
+    joined emoji, and similar. One grapheme may contain several
+    codepoints.
+\end{itemize}
+
+The terminal renders graphemes, but it does not actually know what
+a grapheme is. It writes codepoints sequentially and lets the
+font shaper combine them. If you put two codepoints in two cells
+when they should have combined into one cell, the cursor and the
+rest of the row drift by one.
+
+\subsection*{An example}
+
+The visible character \emph{é} can be encoded two ways:
+
+\begin{itemize}[leftmargin=*]
+  \item U+00E9 (precomposed): one codepoint, one cell.
+  \item U+0065 U+0301 (e + combining acute): two codepoints, one
+    cell.
+\end{itemize}
+
+\maya{} normalises text to a grapheme stream when measuring width
+and emitting cells. \code{std::string} is opaque to all this; the
+text module wraps it.
+
+\begin{funfact}
+Unicode has at least three different forms of \emph{é} when you
+count the precomposed/decomposed variants. Normalisation forms
+(NFC, NFD, NFKC, NFKD) reduce them to canonical representations.
+\maya{} does not normalise inputs; it preserves the user's
+bytes and walks them as graphemes.
+\end{funfact}
+
+\section{East Asian Width}
+
+A second wrinkle: some codepoints take two cells. Chinese,
+Japanese, Korean characters typically do; emoji do; many symbols
+do. Unicode's \emph{East Asian Width} property classifies each
+codepoint as Narrow, Wide, Ambiguous, Fullwidth, Halfwidth, or
+Neutral.
+
+\maya{} ships with a precomputed table in
+\file{maya/include/maya/text/unicode\_width\_table.hpp} mapping
+codepoint to cell width:
+
+\begin{lstlisting}
+int width_of(char32_t cp);
+// 0 for combining marks, zero-width joiners, control chars
+// 1 for narrow / neutral / halfwidth
+// 2 for wide / fullwidth
+\end{lstlisting}
+
+The table is generated from the Unicode 15.x EastAsianWidth
+data. Lookup is a binary search over the table; sub-microsecond.
+
+\subsection*{Why the table is precomputed}
+
+Computing width at runtime would mean walking the Unicode
+character database, which is large. \maya{} ships the table as a
+constexpr array; the lookup is fast and the binary stays
+self-contained.
+
+The trade-off: when Unicode releases a new version with new
+codepoints, \maya{} needs a regenerate. The generator script
+lives at \file{maya/tools/gen\_unicode\_width.py}.
+
+\section{The grapheme walker}
+
+\file{maya/include/maya/text/unicode\_width.hpp} exposes:
+
+\begin{lstlisting}
+class GraphemeWalker {
+public:
+    explicit GraphemeWalker(std::string_view text);
+
+    struct Grapheme {
+        std::string_view text;   // bytes for this grapheme
+        int width;               // 0, 1, or 2
+    };
+
+    std::optional<Grapheme> next();
+    void reset();
+};
+\end{lstlisting}
+
+The walker steps through the input grapheme by grapheme. For
+each grapheme it returns the byte span and the cell width.
+
+\subsection*{Implementation sketch}
+
+The walker is a small state machine driven by Unicode's grapheme
+cluster boundaries:
+
+\begin{itemize}[leftmargin=*]
+  \item Skip combining marks (they belong to the previous
+    grapheme).
+  \item Handle regional indicators (flag emoji are pairs).
+  \item Handle ZWJ sequences (joiner-joined emoji are one
+    grapheme).
+  \item Handle Hangul syllables (\emph{L V T} sequences are one).
+\end{itemize}
+
+The result is a stream of cleanly-bounded graphemes that the
+canvas can lay out cell by cell.
+
+\section{Measuring width}
+
+The most common use:
+
+\begin{lstlisting}
+int display_width(std::string_view text) {
+    GraphemeWalker w{text};
+    int total = 0;
+    while (auto g = w.next()) total += g->width;
+    return total;
+}
+\end{lstlisting}
+
+The layout phase calls this for each text node to get its
+intrinsic width. Cached on the text node so successive frames do
+not repeat the walk.
+
+\subsection*{Ambiguous-width chars}
+
+Some characters have ``ambiguous'' width: 1 cell in Western
+terminals, 2 cells in CJK terminals. \maya{} defaults to 1
+(Western), with a config switch for users on CJK terminals:
+
+\begin{lstlisting}
+maya::set_ambiguous_width(2);  // CJK terminals
+\end{lstlisting}
+
+The cached widths invalidate when the setting changes.
+
+\section{Truncation and wrapping}
+
+When a text node must fit a fixed width, \maya{} provides:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{TextWrap::Truncate}: drop characters from the end,
+    optionally with an ellipsis.
+  \item \code{TextWrap::Wrap}: spill onto the next line at a
+    word boundary.
+  \item \code{TextWrap::WrapAnywhere}: spill at any grapheme
+    boundary, including mid-word.
+\end{itemize}
+
+\subsection*{Truncation with ellipsis}
+
+\begin{lstlisting}
+std::string truncate(std::string_view text, int max_width) {
+    GraphemeWalker w{text};
+    std::string out;
+    int used = 0;
+    while (auto g = w.next()) {
+        if (used + g->width > max_width - 1) {
+            out += \"...\";
+            return out;
+        }
+        out += g->text;
+        used += g->width;
+    }
+    return out;
+}
+\end{lstlisting}
+
+Reserve one cell for the ellipsis itself (well, three for the
+ASCII ``...''; \maya{} can also use U+2026 for one cell).
+
+\subsection*{Word wrapping}
+
+Word wrap is harder. The algorithm:
+
+\begin{enumerate}[leftmargin=*]
+  \item Walk graphemes accumulating into a current line.
+  \item When the line reaches \code{max\_width}, scan backward
+    for the last whitespace and break there. The trailing word
+    becomes the start of the next line.
+  \item If a single word exceeds \code{max\_width}, break it
+    at a grapheme boundary (degrade to WrapAnywhere).
+\end{enumerate}
+
+The result is a vector of lines. The canvas paints each line at
+its computed $y$.
+
+\section{Special characters}
+
+Several Unicode categories deserve special handling.
+
+\subsection*{Tabs}
+
+A tab character (U+0009) advances the cursor to the next tab
+stop, typically every 8 cells. \maya{} expands tabs to spaces
+before measuring; the tab stops are configurable.
+
+\subsection*{Newlines}
+
+\code{\\n} (U+000A) starts a new line. The canvas treats it as a
+forced break: the current row ends; the next grapheme goes to
+column 0 of the next row.
+
+\subsection*{Control characters}
+
+Most control characters (U+0001--U+0008, U+000B--U+001F) are
+zero-width and invisible. \maya{} either drops them or renders a
+caret notation (\code{\textasciicircum A} for U+0001) depending
+on the \code{ControlPolicy} config.
+
+\subsection*{Variation selectors}
+
+U+FE0E (text presentation) and U+FE0F (emoji presentation) modify
+the preceding codepoint. \maya{} honours them: a base character
+followed by U+FE0F becomes the emoji form.
+
+\subsection*{Right-to-left text}
+
+\maya{} does not perform full BiDi (bidirectional) reordering.
+RTL text (Arabic, Hebrew) is rendered in logical order; the
+terminal handles visual order based on its own BiDi
+implementation. This means RTL text inside boxes may align
+unexpectedly. Full BiDi is a planned feature; see the issue
+tracker.
+
+\begin{warning}
+Mixing LTR and RTL in the same text node is a known weak point.
+If you need this, render the RTL portion as its own text node
+and accept the visual quirks.
+\end{warning}
+
+\section{Performance}
+
+Width measurement is fast:
+
+\begin{itemize}[leftmargin=*]
+  \item Grapheme walking: roughly 10ns per grapheme.
+  \item Width lookup: roughly 20ns per codepoint (binary search
+    in the precomputed table).
+  \item Per-line measurement: microseconds for 80-character
+    lines.
+\end{itemize}
+
+For an 80x24 screen of text, total measurement is well under a
+millisecond. \maya{} caches per-text-node width so re-measurement
+across frames is free unless the text changes.
+
+\subsection*{Cache invalidation}
+
+The cache key is the text content plus the ambiguous-width
+setting. If either changes, the cache is dropped.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Using std::string::size() for visual width.} It is the
+byte count, not the cell count. ``hello'' is 5 bytes and 5
+cells, but ``\verb|privet|'' (transliterating six Cyrillic
+letters) is 12 bytes and 6 cells, and a two-character CJK string
+like ``ni hao'' encoded in Chinese is 6 bytes and 4 cells. Use
+\code{display\_width} for any
+visual sizing.
+\end{warning}
+
+\begin{warning}
+\textbf{Calling display\_width every frame.} For text in a tight
+inner loop, the cost adds up. Pre-compute and cache, or trust
+the layout phase to do it once.
+\end{warning}
+
+\begin{warning}
+\textbf{Mixing widths in a single text node.} If a text node
+contains both narrow and wide characters, the layout phase
+handles it. But if you try to truncate at a fixed
+character count instead of cell count, you will get visual
+misalignment. Always truncate by cell count.
+\end{warning}
+
+\begin{warning}
+\textbf{Trailing combining marks.} A grapheme can extend past
+the visual edge of a fixed-width region. The walker handles
+this, but if you slice raw bytes you may split a grapheme. Always
+slice at grapheme boundaries.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a function that takes a \code{std::string\_view}
+    and returns its display width using \code{GraphemeWalker}.
+    Test it on plain ASCII, on emoji, and on CJK text.
+  \item Write a truncator that respects grapheme boundaries.
+    Test it on a string ending in a multi-codepoint emoji.
+  \item Read
+    \file{maya/include/maya/text/unicode\_width\_table.hpp}.
+    Note the size of the table and the structure of its
+    entries.
+\end{enumerate}
+
+\begin{recap}
+Text is a stream of bytes, codepoints, and graphemes; the cell
+grid wants graphemes. \maya{} ships a precomputed width table
+and a grapheme walker that converts. Truncation and wrapping
+respect grapheme boundaries. Tabs, newlines, control characters,
+variation selectors, and ambiguous-width chars have explicit
+policies.
+\end{recap}

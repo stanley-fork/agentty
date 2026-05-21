@@ -1,0 +1,239 @@
+\chapter{Focus and keyboard navigation}
+\label{ch:focus}
+
+\begin{aside}
+A UI with more than one focusable region needs a way to say
+``input goes \emph{here} now''. \maya{} models focus as state in
+your \code{Model}, not as a global property of the runtime.
+That sounds restrictive; it is liberating. Focus becomes data,
+flows through \code{update} like any other state, and is
+testable without a runtime.
+\end{aside}
+
+\section{Why focus is not a global}
+
+Most GUI frameworks store focus as a property of the widget
+tree: a pointer to the ``focused widget'', set by mouse clicks
+and Tab presses, read by event dispatchers. The pattern works
+but it has costs:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Hidden state.} Focus is not visible in your
+    model; it is owned by the framework. Diagnosing ``why did
+    keystrokes go to the wrong place?'' means reading framework
+    internals.
+  \item \textbf{Time-travel breaks.} Restoring an old model does
+    not restore the old focus; the framework's pointer survives.
+  \item \textbf{Concurrency hazards.} Mouse and keyboard handlers
+    might race on the focus pointer.
+\end{itemize}
+
+The Elm fix: focus is just a field in your \code{Model}. The
+runtime never touches it; you decide who has focus by setting
+the field in \code{update}.
+
+\subsection*{The simplest form}
+
+\begin{lstlisting}
+struct Model {
+    int focus;    // 0 = left, 1 = right
+    LeftPanel  left;
+    RightPanel right;
+};
+\end{lstlisting}
+
+The \code{view} renders both panels but highlights only the
+focused one. The keyboard handler routes input based on
+\code{focus}. \code{Tab} flips \code{focus}.
+
+That is the whole pattern. There is no \code{focus\_widget()}
+call.
+
+\section{The FocusManager helper}
+
+For larger apps, naming focus targets by integers gets old.
+\file{maya/include/maya/core/focus.hpp} ships a small helper:
+
+\begin{lstlisting}
+class FocusManager {
+public:
+    using Id = uint32_t;
+
+    Id  register_target();
+    void focus(Id);
+    void focus_next();
+    void focus_prev();
+    bool is_focused(Id) const;
+    Id   current() const;
+
+private:
+    std::vector<Id> order_;
+    Id current_ = 0;
+};
+\end{lstlisting}
+
+Each focusable region calls \code{register\_target()} at
+construction to get a stable ID. \code{focus\_next} cycles
+forward, \code{focus\_prev} cycles back.
+
+The manager itself is plain data --- a vector and an integer.
+You can store one in your \code{Model} and read it from
+\code{view}.
+
+\subsection*{Putting focus in the view}
+
+\begin{lstlisting}
+Element render_panel(const Panel& p, bool focused) {
+    return box(
+        text(p.label) | (focused ? Bold : Dim),
+        text(p.body))
+        | border<focused ? Heavy : Single>;
+}
+\end{lstlisting}
+
+The same panel renders differently when focused. The decision is
+the caller's; no global ``am I focused?'' query.
+
+\subsection*{Keyboard routing}
+
+\begin{lstlisting}
+static std::pair<Model, Cmd<Msg>>
+update(Model m, Msg msg) {
+    return std::visit(overload{
+        [&](KeyPress k) {
+            if (k.key == Tab) {
+                m.focus.focus_next();
+                return std::pair{m, Cmd<Msg>{}};
+            }
+            // Route to the focused panel.
+            if (m.focus.is_focused(m.left.id))
+                return route_to_left(m, k);
+            return route_to_right(m, k);
+        },
+        // ...
+    }, msg);
+}
+\end{lstlisting}
+
+The handler decides who gets the key based on
+\code{focus.current()}. The focused panel's own \code{update}
+processes it.
+
+\section{Tab order}
+
+\code{FocusManager} maintains the registration order. By default
+\code{focus\_next} cycles through it. You can override:
+
+\begin{lstlisting}
+mgr.set_order({sidebar_id, main_id, search_id});
+\end{lstlisting}
+
+Or skip-disabled-elements:
+
+\begin{lstlisting}
+void focus_next_enabled(FocusManager& m, const Model& model) {
+    do {
+        m.focus_next();
+    } while (!model.is_target_enabled(m.current())
+             && m.current() != initial_id);
+}
+\end{lstlisting}
+
+The pattern: focus order is a function of your model, not the
+manager. The manager is a bookkeeping helper; the rules are
+yours.
+
+\section{Mouse focus}
+
+A click can change focus. The hit test
+(Chapter~\ref{ch:elements}) returns the deepest element under
+the cursor; if that element has an associated focus ID, set it:
+
+\begin{lstlisting}
+[&](MouseEvent me) {
+    if (me.kind == MouseKind::Press && me.button == 0) {
+        if (auto id = hit_to_focus_id(m, me.x, me.y)) {
+            m.focus.focus(*id);
+        }
+    }
+    return std::pair{m, Cmd<Msg>{}};
+}
+\end{lstlisting}
+
+The mapping from rect to focus ID lives in your model. The
+runtime does not know which boxes are focusable; you do.
+
+\section{Modal focus}
+
+A modal (a dialog that captures all input) is just a focus stack:
+
+\begin{lstlisting}
+struct Model {
+    FocusManager focus;
+    std::vector<FocusManager> modal_stack;
+};
+\end{lstlisting}
+
+When a modal opens, push a fresh \code{FocusManager}. While the
+stack is non-empty, route keys to the top of the stack. When the
+modal closes, pop.
+
+The visible UI also follows the stack: only the top modal's
+elements are interactive; everything below is dimmed.
+
+\begin{idea}
+Modal focus has been a recurring source of bugs in
+retained-mode GUIs (``why doesn't Tab work in this dialog?'').
+Modelling it as a stack of focus managers is a couple of
+\code{push\_back} / \code{pop\_back} calls; the runtime stays
+unaware.
+\end{idea}
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Focus on a non-rendered element.} If \code{view} hides
+the focused element (visibility, conditional), keystrokes go
+nowhere. Always reconcile after the model changes: if the
+focused id is no longer rendered, advance focus.
+\end{warning}
+
+\begin{warning}
+\textbf{Stable IDs.} If you regenerate focus IDs every frame,
+focus moves randomly. \code{register\_target} should be called
+once, in \code{init} or when the focusable region is created.
+\end{warning}
+
+\begin{warning}
+\textbf{Capturing focus during scroll.} If a focused element
+scrolls out of view, the user can no longer see what they are
+typing into. Either keep the focused element on-screen by
+auto-scrolling, or visually indicate that focus is off-screen.
+\end{warning}
+
+\begin{warning}
+\textbf{Forgetting to update tab order.} Adding a new focusable
+region without inserting it into the order is a frequent
+oversight. Centralise the tab order in one place rather than
+sprinkling \code{register\_target} calls.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a third focusable region to the two-counter app from
+    Chapter~\ref{ch:elm}. Make Tab cycle through all three.
+  \item Add a modal that opens on \code{?} and shows a help
+    screen. While open, all keys should go to the modal.
+  \item Read \file{maya/include/maya/core/focus.hpp}. Identify
+    the data members of \code{FocusManager} and the operations
+    that mutate them.
+\end{enumerate}
+
+\begin{recap}
+Focus is state, not a framework property. A \code{FocusManager}
+tracks IDs and order; \code{view} reads focus to choose styling;
+\code{update} routes input by inspecting focus. Modals stack
+focus managers. Mouse clicks update focus through a hit-test
+mapping. No magic, no global pointer.
+\end{recap}

@@ -754,3 +754,686 @@ rows, columns, wrapping, alignment, justification, and nested boxes.
     phases (measure, distribute, place). Note where the available
     width is subdivided.
 \end{enumerate}
+
+\section{Layout, as a constraint problem}
+
+A layout engine answers one question: given a tree of boxes with
+properties, and a fixed-size terminal, where does each box go?
+It sounds simple. It is not. The complication lives in
+``properties'': intrinsic sizes, min/max constraints, grow/shrink
+factors, padding, borders, gaps, wrapping. A real layout engine
+must resolve all of them simultaneously.
+
+The job has three classical solutions:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Tables} (HTML 4, ASCII art, dialog box managers).
+    Cells in a fixed grid. Excellent for tabular data, terrible
+    for everything else.
+  \item \textbf{Constraints} (Cassowary, Auto Layout, Cocoa).
+    The user expresses ``A.right = B.left + 8'' and the solver
+    finds a satisfying assignment. Powerful, but opaque when it
+    cannot find one --- and the solver is non-trivial.
+  \item \textbf{Flow} (CSS, flexbox, grid). A small set of
+    high-level intents (``these children should share the row
+    equally'') that compile to a deterministic algorithm.
+\end{itemize}
+
+Flexbox is the flow solution. It is what every modern UI
+framework uses (CSS, Yoga in React Native, Taffy in Rust UI
+libraries) because it covers the practical cases with a small
+set of mechanical rules.
+
+\maya{}'s engine is a flexbox solver over integer cells. It is
+smaller than CSS's flexbox (no fractional sizing, no baseline
+alignment, no aspect ratios) but mechanically the same.
+
+\subsection*{Why not the obvious algorithms?}
+
+The naive ``put A next to B'' algorithm works until you have one
+of these:
+
+\begin{itemize}[leftmargin=*]
+  \item A child that has no intrinsic size (a flex spacer).
+  \item Two children that both want all the extra space.
+  \item A row narrower than the sum of its children's preferred
+    sizes.
+  \item Wrapping.
+  \item A box with padding plus a border plus content.
+\end{itemize}
+
+Any of those cases is enough to send a hand-rolled layout into
+special-case soup. Flexbox is the algorithm that handles all of
+them with one set of rules.
+
+\begin{funfact}
+The word ``flexbox'' is short for ``flexible box''. The CSS
+spec uses ``flex container'' and ``flex item''; the shorthand
+stuck. The spec was first drafted in 2009 by Tab Atkins at
+Google and finalised in 2017. Yoga (Facebook's C++ flexbox)
+predates CSS conformance and inspired \maya{}'s solver.
+\end{funfact}
+
+\section{The three phases, expanded}
+
+\maya{}'s layout pass runs in three phases. Each phase produces
+data the next phase consumes; there is no backtracking.
+
+\subsection*{Phase 1: measure}
+
+For each leaf node, compute its intrinsic size. A text node's
+intrinsic width is the longest line; its intrinsic height is the
+number of lines. A box's intrinsic size is computed recursively:
+
+\begin{lstlisting}
+Size measure(const Element& e) {
+    return std::visit(overload{
+        [](const TextElement& t) {
+            auto [w, h] = grapheme_extent(t.text);
+            return Size{w, h};
+        },
+        [](const BoxElement& b) {
+            int w = 0, h = 0;
+            for (auto& c : b.children) {
+                Size cs = measure(c);
+                if (b.layout.direction == Direction::Row) {
+                    w += cs.w;
+                    h = std::max(h, cs.h);
+                } else {
+                    h += cs.h;
+                    w = std::max(w, cs.w);
+                }
+            }
+            // Add padding and border to the box's own size.
+            w += b.padding.horizontal() + (b.border ? 2 : 0);
+            h += b.padding.vertical()   + (b.border ? 2 : 0);
+            return Size{w, h};
+        },
+        [](const ElementList& l) {
+            // Spliced into parent; measure is sum.
+            int w = 0, h = 0;
+            for (auto& c : l.items) {
+                Size cs = measure(c);
+                w = std::max(w, cs.w); h += cs.h;
+            }
+            return Size{w, h};
+        }
+    }, e.v);
+}
+\end{lstlisting}
+
+The phase is bottom-up: leaves first, then their parents, then
+the root. After this phase every node knows ``how big would I be
+if nobody constrained me?''.
+
+\subsection*{Phase 2: distribute}
+
+Given a parent's actual size (constrained by the terminal or its
+own parent), how much does each child get?
+
+For a row of children with grow factors $g_1, g_2, \ldots, g_n$
+and intrinsic widths $w_1, w_2, \ldots, w_n$, and an available
+width $W$:
+
+\[
+  \text{slack} = W - \sum w_i
+\]
+
+If slack is positive (the row has extra room):
+
+\[
+  w_i' = w_i + g_i \cdot \frac{\text{slack}}{\sum g_j}
+\]
+
+If slack is negative (the row is over-budget) and the children
+have \emph{shrink} factors $s_1, \ldots, s_n$:
+
+\[
+  w_i' = w_i - s_i \cdot \frac{|\text{slack}|}{\sum s_j}
+\]
+
+The rounded integer cells must sum to exactly $W$, so the
+remainder is distributed cell by cell to the first children
+that asked for grow.
+
+\subsection*{Phase 3: place}
+
+Now each child has its size. Walk the row again, placing each
+child at the running $x$ position. After placing, recurse into
+the child to lay out \emph{its} children.
+
+\begin{lstlisting}
+void place(const Element& e, Rect rect) {
+    std::visit(overload{
+        [&](const TextElement& t) {
+            // Text occupies its assigned rect.
+            register_text(t, rect);
+        },
+        [&](const BoxElement& b) {
+            Rect inner = shrink(rect, b.padding, b.border);
+            int pos = 0;
+            for (auto& [child, size] : b.children_with_sizes) {
+                Rect child_rect = (b.layout.direction == Direction::Row)
+                    ? Rect{inner.x + pos, inner.y, size.w, inner.h}
+                    : Rect{inner.x, inner.y + pos, inner.w, size.h};
+                place(child, child_rect);
+                pos += (b.layout.direction == Direction::Row) ? size.w : size.h;
+            }
+            register_box(b, rect);
+        },
+        [&](const ElementList& l) {
+            int pos = 0;
+            for (auto& c : l.items) {
+                Rect cr{rect.x, rect.y + pos, rect.w, /* size from phase 2 */};
+                place(c, cr);
+                pos += cr.h;
+            }
+        }
+    }, e.v);
+}
+\end{lstlisting}
+
+After this phase every node has a final \code{Rect}: $x$, $y$,
+width, height. The canvas-drawing phase (Chapter~\ref{ch:canvas})
+consumes those rects.
+
+\section{Every flex property, mechanically}
+
+We will now walk every property on \code{FlexStyle}, with a
+worked example for each.
+
+\subsection*{Direction}
+
+Row or Column. Determines whether children stack horizontally or
+vertically.
+
+\begin{lstlisting}
+FlexStyle{.direction = Direction::Row}     // children stack left-to-right
+FlexStyle{.direction = Direction::Column}  // top-to-bottom
+\end{lstlisting}
+
+The DSL spells these as \code{h(\ldots)} and \code{v(\ldots)}.
+Reverse variants (\code{RowReverse}, \code{ColumnReverse}) flip
+the order without reflowing.
+
+\subsection*{Justify}
+
+Where children sit along the main axis. Six values:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Start}: children at the start; trailing space.
+  \item \code{End}: children at the end; leading space.
+  \item \code{Center}: children centred; equal space on both sides.
+  \item \code{SpaceBetween}: first/last at the edges; equal space
+    between siblings.
+  \item \code{SpaceAround}: equal space around each child
+    (half-gap at the edges).
+  \item \code{SpaceEvenly}: equal gaps everywhere, including
+    edges.
+\end{itemize}
+
+A worked example. Three children of width 3, 4, 5 in a row of
+width 20 (slack = 8):
+
+\begin{terminalbox}
+Start        : AAABBBBCCCCC........\\
+End          : ........AAABBBBCCCCC\\
+Center       : ....AAABBBBCCCCC....\\
+SpaceBetween : AAA....BBBB....CCCCC\\
+SpaceAround  : ..AAA..BBBB..CCCCC..\\
+SpaceEvenly  : ..AAA..BBBB..CCCCC..
+\end{terminalbox}
+
+Notice SpaceAround and SpaceEvenly look identical here because
+the gaps happen to divide evenly. With slightly different numbers
+they diverge (SpaceEvenly always equalises all gaps; SpaceAround
+halves the edge gaps).
+
+\subsection*{Align}
+
+Where children sit along the cross axis. Five values:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Start}: top (for rows) or left (for columns).
+  \item \code{End}: bottom or right.
+  \item \code{Center}: centred along the cross axis.
+  \item \code{Stretch}: child grows to fill the cross axis
+    (default for boxes without an intrinsic cross size).
+  \item \code{Baseline}: align by the baseline of the first
+    text line (not yet implemented in \maya{}; degrades to
+    Start).
+\end{itemize}
+
+Two children of heights 2 and 4 in a row of height 5:
+
+\begin{terminalbox}
+Start   : AB  | AB    Center: AB    Stretch: AAB\\
+          A B | A B           AB             A B\\
+            B |   B          A B             A B\\
+              |              A B               B\\
+              |                B               B
+\end{terminalbox}
+
+\subsection*{Grow}
+
+A non-negative number. Children with positive grow share extra
+space proportionally. \code{grow=0} means ``do not grow''.
+\code{grow=1} and \code{grow=2} split slack 1:2.
+
+Worked example. Two children with intrinsic widths 5 and 5,
+grow 1 and 3, in a row of width 24:
+
+\begin{itemize}[leftmargin=*]
+  \item Slack: $24 - (5+5) = 14$.
+  \item Grow sum: $1 + 3 = 4$.
+  \item Child A: $5 + 14 \cdot 1/4 = 5 + 3.5 \to 5 + 3 = 8$
+    (rounded down).
+  \item Child B: $5 + 14 \cdot 3/4 = 5 + 10.5 \to 5 + 11 = 16$
+    (rounded up to absorb the remainder).
+  \item Total: $8 + 16 = 24$. \checkmark
+\end{itemize}
+
+If $5 + 3 = 8$ and $5 + 10 = 15$, the sum would be 23 ---
+ short by one cell. The remainder distribution awards the
+leftover cell to the first child that grew, which is why
+rounding sometimes favours one side.
+
+\subsection*{Shrink}
+
+The mirror of grow. When the row is over-budget, children with
+shrink absorb the deficit proportionally. \code{shrink=0} means
+``never shrink me; overflow the row instead''.
+
+Default: \code{shrink=1} for all children. This means rows
+naturally accommodate; set \code{shrink=0} on a fixed-width
+element to make it inviolate.
+
+\subsection*{Basis}
+
+The starting size before grow/shrink. If unset, basis = intrinsic
+size. If set, basis overrides the intrinsic measurement.
+
+\begin{lstlisting}
+FlexStyle{.basis = 10, .grow = 1}  // start at 10, grow from there
+\end{lstlisting}
+
+Useful when you want a minimum reservation that may grow but not
+shrink below.
+
+\subsection*{Wrap}
+
+What to do if the row's children exceed the available width:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{NoWrap} (default): try to shrink, otherwise overflow.
+  \item \code{Wrap}: spill onto subsequent rows.
+  \item \code{WrapReverse}: spill, but stack rows from bottom up.
+\end{itemize}
+
+Wrap is what makes a tag-cloud layout possible. The solver places
+as many children as fit on the first line, then starts a new line.
+
+\subsection*{Gap}
+
+Fixed cell-spacing between children. Subtracted from available
+size before distribution:
+
+\begin{lstlisting}
+FlexStyle{.direction = Direction::Row, .gap = 2}
+\end{lstlisting}
+
+With $n$ children in a row of width $W$ and gap $g$, the
+available for children is $W - (n-1) \cdot g$.
+
+\subsection*{Padding}
+
+Per-side integer cells, inside the box. The content area is the
+box area shrunk by padding.
+
+\code{Padding\{.top=1, .right=2, .bottom=1, .left=2\}}, or the
+shorthand \code{Padding::all(1)}, or \code{pad<1, 2>} from the
+DSL.
+
+\subsection*{Border}
+
+Borders take one cell per side. They are not padding but they
+are also subtracted from the content area.
+
+\section{The integer remainder strategy}
+
+The distribution formula gives fractional cell counts. Cells are
+integers. We must round.
+
+The naive strategy (round each independently) often misses the
+target by one cell. We could be one cell short or one over. The
+strategy in \maya{}:
+
+\begin{enumerate}[leftmargin=*]
+  \item For each child, compute floor of the grow-distributed
+    size. Sum the floors.
+  \item Compute the remainder: $r = W - \sum \lfloor w_i' \rfloor$.
+  \item Award one extra cell each, in order, to the first $r$
+    children that had a fractional part. Children with the
+    largest fractional part go first (Hamilton's method, the
+    same algorithm US Congress used to apportion seats).
+\end{enumerate}
+
+This guarantees:
+
+\begin{itemize}[leftmargin=*]
+  \item Sums work out: $\sum w_i' = W$ exactly.
+  \item Stable: rounding favours the children who asked for
+    fractional cells, not arbitrarily.
+  \item Fair: no single child can be more than one cell off
+    from its ideal share.
+\end{itemize}
+
+\begin{idea}
+This is the same problem (and the same solution) that political
+science studies under ``apportionment''. The Alabama paradox
+(adding a state can decrease another state's seats) does not
+apply here because the total $W$ does not change between
+rounds, but the spirit is identical.
+\end{idea}
+
+\section{Four reasons cells are integers, not floats}
+
+A recurring question: why not use floats? The reasons add up.
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Terminals are integer grids.} You cannot draw at
+    x=5.5. The renderer would have to round at the end anyway,
+    and floating-point round can drift.
+  \item \textbf{Determinism.} Integer arithmetic produces
+    bit-identical results across machines. Float arithmetic
+    does not (different FPU modes, different compiler flags).
+    For replay and tests, determinism matters.
+  \item \textbf{Performance.} Integer add/multiply is the same
+    or faster than float; integer comparisons are unambiguous.
+    No NaN, no infinity, no subnormals.
+  \item \textbf{Avoiding fractional-cell bugs.} If your widget
+    expects ``width 30'' and gets ``29.999998'', it might emit
+    one fewer character than expected. With integers, the
+    contract is precise.
+\end{enumerate}
+
+\begin{warning}
+If you ever see \maya{}'s layout produce a non-integer size in
+a debug dump, that is a bug; please file it. The whole pipeline
+is integer-typed.
+\end{warning}
+
+\section{Worked traces: three real layouts}
+
+\subsection*{Trace 1: a status bar}
+
+Source:
+
+\begin{lstlisting}
+h(text("NORMAL") | grow<0>,
+  text("~/file.txt") | grow<1>,
+  text("Ln 12  Col 3") | grow<0>)
+  | width<60>
+\end{lstlisting}
+
+Measure phase:
+
+\begin{itemize}[leftmargin=*]
+  \item Child A ("NORMAL"): intrinsic width 6.
+  \item Child B ("~/file.txt"): intrinsic width 11.
+  \item Child C ("Ln 12  Col 3"): intrinsic width 12.
+  \item Row intrinsic: $6 + 11 + 12 = 29$.
+\end{itemize}
+
+Distribute (W = 60, slack = $60 - 29 = 31$, only B has grow=1):
+
+\begin{itemize}[leftmargin=*]
+  \item A: 6 (no grow).
+  \item B: $11 + 31 = 42$.
+  \item C: 12 (no grow).
+  \item Sum: $6 + 42 + 12 = 60$. \checkmark
+\end{itemize}
+
+Place:
+
+\begin{terminalbox}
+NORMAL ~/file.txt                              Ln 12  Col 3
+\end{terminalbox}
+
+\subsection*{Trace 2: a dashboard}
+
+Source:
+
+\begin{lstlisting}
+h(box(text("left"))   | grow<1>,
+  box(text("middle")) | grow<2>,
+  box(text("right"))  | grow<1>)
+  | width<40>
+\end{lstlisting}
+
+Measure: each box has intrinsic 4 + 2 (padding) + 2 (border) =
+approx 8. Row intrinsic = 24. Slack = 16. Grow sum = 4. Per
+grow-unit: 4.
+
+Distribute:
+
+\begin{itemize}[leftmargin=*]
+  \item Left:   $8 + 4 = 12$.
+  \item Middle: $8 + 8 = 16$.
+  \item Right:  $8 + 4 = 12$.
+  \item Sum: 40. \checkmark
+\end{itemize}
+
+The middle column is twice as wide as the side columns, which is
+what the user asked for.
+
+\subsection*{Trace 3: an over-budget row}
+
+Source:
+
+\begin{lstlisting}
+h(text("hello, world")    | shrink<1>,
+  text("a very long line") | shrink<2>)
+  | width<20>
+\end{lstlisting}
+
+Measure: 12 + 15 = 27. Available 20. Deficit = 7. Shrink sum = 3.
+Per shrink-unit: $7 / 3 \approx 2.33$.
+
+Distribute:
+
+\begin{itemize}[leftmargin=*]
+  \item Child 1: $12 - 1 \cdot 2.33 \approx 10$ (truncated
+    via the wrap policy or ellipsis).
+  \item Child 2: $15 - 2 \cdot 2.33 \approx 10$.
+\end{itemize}
+
+The text is clipped to fit. If a child had \code{shrink=0}, it
+would keep its intrinsic size and the other child would absorb
+the entire deficit.
+
+\section{A debugging ritual}
+
+When a layout looks wrong, four steps:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Dump the tree.} Use the \code{dump} helper from
+    Chapter~\ref{ch:elements}. Confirm the structure matches
+    what you intended.
+  \item \textbf{Print the rects.} \maya{} has a
+    \code{dump\_layout(\ldots)} helper that prints each node's
+    final rect. Look for surprises (a child wider than its
+    parent, a rect with negative width).
+  \item \textbf{Walk the row sums.} For each row, the sum of
+    children's widths plus gaps plus padding plus border must
+    equal the row's width. If it does not, a grow/shrink
+    setting is wrong.
+  \item \textbf{Resize the terminal.} A layout that looks fine
+    at 80 columns but breaks at 100 is a grow-factor mistake.
+    Try several widths.
+\end{enumerate}
+
+A \code{dump\_layout} sample:
+
+\begin{lstlisting}
+box 60x3 at (0,0)
+  text "NORMAL"        6x1 at (0,1)
+  text "~/file.txt"   42x1 at (6,1)
+  text "Ln 12 Col 3"  12x1 at (48,1)
+\end{lstlisting}
+
+Note that the box is 3 high but the text rows are at y=1 ---
+the border takes y=0. If the y were 0 with no border, that would
+be a clue.
+
+\section{Layout recipes}
+
+A gallery of common shapes and how they decompose to flex.
+
+\subsection*{Centred dialog}
+
+\begin{lstlisting}
+v(box(content) | align<Center> | grow<1>);
+\end{lstlisting}
+
+The outer column has one child that grows. Setting
+\code{align=Center} on the column centres the child on the
+cross axis (horizontally, for a column).
+
+\subsection*{Sidebar + main}
+
+\begin{lstlisting}
+h(sidebar | width<24>,
+  main    | grow<1>);
+\end{lstlisting}
+
+Fixed-width sidebar, flexible main area. No special property
+required --- grow does the work.
+
+\subsection*{Header + body + footer}
+
+\begin{lstlisting}
+v(header | height<1>,
+  body   | grow<1>,
+  footer | height<1>);
+\end{lstlisting}
+
+Fixed-height header and footer; body absorbs the rest.
+
+\subsection*{Tag cloud (wrapping row)}
+
+\begin{lstlisting}
+h(tags...) | wrap<Wrap> | gap<1>;
+\end{lstlisting}
+
+Tags flow left to right; when a row fills, the next tag starts
+on a new line.
+
+\subsection*{Two-column form}
+
+\begin{lstlisting}
+v(
+  h(text("Name:")  | width<10>, text(name_value)),
+  h(text("Email:") | width<10>, text(email_value)),
+  h(text("Notes:") | width<10>, text(notes_value))
+);
+\end{lstlisting}
+
+Labels share a fixed left column; values fill the rest. Notice
+the DSL has no ``column'' primitive --- the alignment falls out
+of identical \code{width<10>} on each label.
+
+\subsection*{Centred status with action buttons}
+
+\begin{lstlisting}
+h(
+  text("Saved") | align<Center> | grow<1>,
+  text("[OK]")  | grow<0>
+);
+\end{lstlisting}
+
+Left text centred in the flexible region, right button fixed.
+
+\section{Layout performance}
+
+The whole pass is $O(n)$ in tree size. For a typical UI of a few
+hundred nodes, expect:
+
+\begin{itemize}[leftmargin=*]
+  \item Measure phase: 10--30 microseconds.
+  \item Distribute phase: 5--15 microseconds.
+  \item Place phase: 5--10 microseconds.
+  \item Total: well under 60 microseconds on a modern CPU.
+\end{itemize}
+
+The heavy work is mostly memory: the layout pass allocates one
+flat \code{vector<LayoutNode>} keyed by tree-walk index. The
+vector is reused frame to frame (capacity persists, only size is
+reset), so steady-state allocation is zero.
+
+\begin{aside}
+Flexbox in browsers is slower because CSS adds many properties
+(min/max sizing, baselines, aspect ratios, fractional units,
+writing modes). The simpler integer-cell model in \maya{} cuts
+perhaps 80\% of the work.
+\end{aside}
+
+\section{Pitfalls beyond the obvious}
+
+\begin{warning}
+\textbf{Forgetting that a child without a size hint has zero
+intrinsic.} An empty box with no content and no width has
+intrinsic (0, 0). If you stick it in a row with other children
+and expect it to take space, it will not. Add \code{width<n>}
+or \code{grow<n>}.
+\end{warning}
+
+\begin{warning}
+\textbf{Border + padding + content = total.} If you want a box
+that fits in a row of width 20 with a border, the content must
+fit in $20 - 2 = 18$. Forgetting the border eats two cells you
+will miss.
+\end{warning}
+
+\begin{warning}
+\textbf{Mixing grow with fixed width.} \code{width<10>} sets the
+intrinsic; \code{grow<1>} adds slack on top. Using both gives a
+child that starts at 10 and grows. If you wanted exactly 10,
+omit grow.
+\end{warning}
+
+\begin{warning}
+\textbf{Negative cells from over-shrinking.} If shrink lets a
+child reach width 0, then 1, then -1, things go sideways.
+\maya{} clamps at zero, but the result is invisible. Set
+\code{shrink=0} on children that must keep their minimum size.
+\end{warning}
+
+\begin{warning}
+\textbf{Wrap interacting with grow.} On a wrapping row, grow
+factors operate \emph{within each line}, not across the whole
+row. The first line and the second line both distribute their
+own slack independently.
+\end{warning}
+
+\section{The bigger picture}
+
+Layout is the bridge from the element tree to the canvas. Once
+every node has a \code{Rect}, the canvas-paint phase
+(Chapter~\ref{ch:canvas}) walks the tree and writes packed cells
+at the assigned coordinates.
+
+The layout pass is the most complex single piece of \maya{}'s
+render pipeline, but it is still just $O(n)$ in tree size and
+stays under a millisecond for any reasonable UI. Understanding
+it pays off when you need a non-obvious shape or when you are
+debugging why a child appears in the wrong place.
+
+\begin{recap}
+Flexbox in three phases: measure (bottom-up intrinsic sizes),
+distribute (apportion slack/deficit by grow/shrink), place (assign
+rects). Integer cells throughout, Hamilton apportionment for
+rounding, $O(n)$ in tree size. Eight properties on
+\code{FlexStyle} cover every shape; six recipes cover almost
+every layout you will ever want.
+\end{recap}

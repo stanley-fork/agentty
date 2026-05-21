@@ -1,0 +1,367 @@
+\chapter{Style, theme, and the palette}
+\label{ch:style}
+
+\begin{aside}
+Colours and fonts are the bit users see first. A library that
+treats them carelessly produces UIs that look wrong on half the
+terminals they run on. \maya{}'s style system is more elaborate
+than the typing-friendly DSL might suggest: a palette of named
+roles, a theme that maps roles to colours, a style struct that
+overrides per-element, and a merger that combines them under a
+defined precedence.
+\end{aside}
+
+\section{Three layers of style}
+
+When the renderer paints a cell, the cell's style is the result
+of three layers, applied in order:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Theme.} The application-level palette. Maps named
+    roles (\emph{foreground}, \emph{accent}, \emph{warning})
+    to concrete colours.
+  \item \textbf{Inherited style.} The style applied by parent
+    boxes via the DSL pipe or runtime equivalent.
+  \item \textbf{Local style.} The style attached to the
+    text/box at the leaf.
+\end{enumerate}
+
+Each layer can override the previous. The merge rule
+(Chapter~\ref{ch:elements}) decides per-attribute whether to
+inherit or override.
+
+\subsection*{Why three layers?}
+
+Two layers (theme + override) would work for simple cases. The
+third (inheritance) is what makes ``the whole panel is bold''
+work without setting Bold on every leaf.
+
+The trade-off: more layers means more bookkeeping. \maya{}'s
+merge is a small constant-time operation per cell, so the cost
+is acceptable.
+
+\section{The palette}
+
+A palette is a fixed-size array of \code{Color} values, each
+indexed by a named role. \maya{}'s default palette has 24 slots:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Foreground}, \code{Background}: the default
+    foreground and background.
+  \item \code{Muted}: dim text (timestamps, labels).
+  \item \code{Subtle}: secondary text (placeholders).
+  \item \code{Primary}: the brand colour.
+  \item \code{Accent}: highlight colour.
+  \item \code{Success}, \code{Warning}, \code{Danger},
+    \code{Info}: semantic colours.
+  \item \code{Border}: default border colour.
+  \item \code{Selection}, \code{Cursor}: text-input UI.
+  \item Ten ``user'' slots for application-specific roles.
+\end{itemize}
+
+A palette is just a \code{std::array<Color, 24>}, plus a small
+enum for the indices. Looking up is constant time.
+
+\subsection*{Roles vs colours}
+
+The point of the palette is to decouple ``what the cell means''
+from ``what colour to draw''. Code that wants a warning highlight
+asks for \code{Palette::Warning}; the theme decides whether that
+is amber, orange, or yellow.
+
+This is the same indirection CSS uses (via custom properties) and
+that design systems (Tailwind, Material Design) build whole
+ecosystems around.
+
+\section{The Theme struct}
+
+A theme is a palette plus metadata:
+
+\begin{lstlisting}
+struct Theme {
+    Palette  palette;
+    std::string name;        // "dark", "light", "solarized"
+    bool     is_dark;        // light-mode UIs flip choices
+    Border   default_border; // BorderStyle::Rounded by default
+};
+\end{lstlisting}
+
+\maya{} ships three themes out of the box: \code{Dark} (default),
+\code{Light}, and \code{HighContrast}. Loading a theme replaces
+the palette wholesale.
+
+\subsection*{Defining a theme}
+
+\begin{lstlisting}
+constexpr Theme my_theme = {
+    .palette = {
+        [Role::Foreground] = Color::rgb(220, 220, 240),
+        [Role::Background] = Color::default_(),
+        [Role::Muted]      = Color::rgb(120, 130, 150),
+        [Role::Primary]    = Color::rgb(120, 180, 250),
+        // ...
+    },
+    .name = "midnight",
+    .is_dark = true,
+};
+\end{lstlisting}
+
+Designated initialisers (C++20) let you skip slots you do not
+care about; they retain their default values.
+
+\section{The Style struct, revisited}
+
+\begin{lstlisting}
+struct Style {
+    Color fg = Color::default_();
+    Color bg = Color::default_();
+    Attribute attributes = Attribute::None;
+    std::optional<std::string> hyperlink;
+};
+\end{lstlisting}
+
+We saw this in Chapter~\ref{ch:elements}. The colour fields can
+be a literal RGB, an Ansi16 index, an Ansi256 index, or
+``default'' (let the terminal pick).
+
+A style created from a role:
+
+\begin{lstlisting}
+Style accent_style = Style::from_role(Role::Accent);
+\end{lstlisting}
+
+This is a thin helper that looks up the colour in the current
+theme. The lookup is deferred until paint --- if the theme
+changes between frames, the style picks up the new value.
+
+\subsection*{Attribute, in detail}
+
+\code{Attribute} is a bitset of typographic attributes:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Bold}: SGR 1.
+  \item \code{Dim}: SGR 2.
+  \item \code{Italic}: SGR 3.
+  \item \code{Underline}: SGR 4.
+  \item \code{Blink}: SGR 5. (Rarely supported well; avoid.)
+  \item \code{Reverse}: SGR 7. Swaps fg and bg.
+  \item \code{Strike}: SGR 9.
+  \item \code{DoubleUnderline}: SGR 21.
+  \item \code{Overline}: SGR 53. (Even more rarely supported.)
+\end{itemize}
+
+Stored as a small bitmask. Two attributes combine with bitwise
+OR; this is what makes \code{Bold | Italic} mean ``both''.
+
+\section{Style merge: the precedence rule}
+
+The merge rule, again, with the formal precedence:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Attributes.} Result is the union of both. Bold
+    in either input means Bold in the output.
+  \item \textbf{Colours.} If the inner style sets a non-default
+    colour, the inner wins. Otherwise, the outer's colour
+    propagates.
+  \item \textbf{Hyperlink.} Inner wins if set.
+\end{enumerate}
+
+In code:
+
+\begin{lstlisting}
+Style merge(const Style& outer, const Style& inner) {
+    Style r = outer;
+    r.attributes |= inner.attributes;
+    if (!inner.fg.is_default()) r.fg = inner.fg;
+    if (!inner.bg.is_default()) r.bg = inner.bg;
+    if (inner.hyperlink)        r.hyperlink = inner.hyperlink;
+    return r;
+}
+\end{lstlisting}
+
+The asymmetry (attribute union, colour override) is what makes
+the system intuitive. ``Inherit the Bold from the parent and the
+colour from the child'' is what most users mean.
+
+\begin{idea}
+This is similar to CSS cascade rules, simplified. CSS has six
+levels of specificity; \maya{} has two (outer, inner) and one
+rule (attribute-union, colour-override). The simpler rule wins
+in clarity.
+\end{idea}
+
+\section{Themes at runtime}
+
+To change theme:
+
+\begin{lstlisting}
+maya::set_theme(Theme::Light());  // or any custom theme
+\end{lstlisting}
+
+The pipeline notices on the next frame and reflows. Any style
+that referenced a role updates automatically.
+
+\subsection*{Persisting theme preferences}
+
+If you store the theme name in a config file, you can restore it
+on startup:
+
+\begin{lstlisting}
+auto config = load_config();
+maya::set_theme(themes::by_name(config.theme).value_or(Theme::Dark()));
+\end{lstlisting}
+
+The pipeline does not care where the theme came from; it just
+applies whatever is current.
+
+\section{High-contrast and accessibility}
+
+The \code{HighContrast} theme is designed for users who need
+sharp distinctions: pure black background, pure white foreground,
+saturated accent colours. The palette is calibrated to a minimum
+WCAG-AA-equivalent contrast ratio.
+
+If your app respects \code{NO\_COLOR=1} (an environment variable
+that means ``do not use colour''), \maya{} will use a theme that
+relies on attributes (Bold, Underline) instead of colour:
+
+\begin{lstlisting}
+if (std::getenv("NO_COLOR")) {
+    maya::set_theme(themes::Monochrome());
+}
+\end{lstlisting}
+
+\begin{aside}
+The NO\_COLOR convention was proposed by Jason Boice in 2017 and
+is now widely supported (ls, ripgrep, fd, bat, hyperfine,
+\maya{}). When a user sets it, they mean it: drop all colour.
+\end{aside}
+
+\section{Detecting terminal capabilities}
+
+Not every terminal supports truecolour, or italics, or OSC 8.
+\maya{} detects capabilities at startup:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{COLORTERM=truecolor} or \code{=24bit}: emit
+    full RGB.
+  \item \code{TERM} starts with one of a known set (xterm-256,
+    \emph{etc.}): use 256-colour palette.
+  \item Otherwise: 8/16-colour palette.
+\end{itemize}
+
+The detection happens once in
+\file{maya/include/maya/terminal/terminal.hpp} and the result
+threads through the pipeline as a \code{TerminalCaps} struct.
+
+When the renderer emits a colour, it consults caps:
+
+\begin{itemize}[leftmargin=*]
+  \item RGB asked but only 256 supported: quantise.
+  \item RGB asked but only 16 supported: nearest-neighbour to
+    16-colour palette.
+  \item Default-fg asked: emit nothing (terminal's choice).
+\end{itemize}
+
+\section{Building your own theme}
+
+If you want to ship a theme with your app:
+
+\begin{lstlisting}
+namespace mythemes {
+    inline constexpr Theme Sunset = {
+        .palette = {
+            [Role::Foreground] = Color::rgb(245, 230, 200),
+            [Role::Background] = Color::rgb(40, 25, 35),
+            [Role::Primary]    = Color::rgb(220, 140, 80),
+            [Role::Accent]     = Color::rgb(255, 180, 120),
+            [Role::Warning]    = Color::rgb(255, 200, 100),
+            [Role::Danger]     = Color::rgb(220, 80, 80),
+            [Role::Success]    = Color::rgb(140, 200, 130),
+            [Role::Muted]      = Color::rgb(160, 140, 130),
+            [Role::Border]     = Color::rgb(120, 90, 80),
+        },
+        .name = "sunset",
+        .is_dark = true,
+    };
+}
+\end{lstlisting}
+
+Then set it:
+
+\begin{lstlisting}
+maya::set_theme(mythemes::Sunset);
+\end{lstlisting}
+
+Every styled element using \code{Role::Primary} will use
+RGB(220, 140, 80). No code change required.
+
+\section{Style preset gallery}
+
+Reusable style preset patterns:
+
+\begin{lstlisting}
+constexpr auto H1 = Bold | Underline | Fg<255, 240, 200>;
+constexpr auto H2 = Bold | Fg<200, 220, 240>;
+constexpr auto Body = Style{};
+constexpr auto Code = Italic | Fg<200, 200, 160>;
+constexpr auto Subtle = Dim | Fg<140, 140, 150>;
+constexpr auto Error = Bold | Fg<255, 100, 100>;
+constexpr auto Success = Bold | Fg<100, 200, 130>;
+\end{lstlisting}
+
+Each is a \code{StyTag} at the type level. Reusing them keeps
+your app's appearance consistent and lets you tweak in one
+place.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Hard-coding colours instead of using roles.} If you write
+\code{Fg<255, 200, 100>} everywhere, you cannot theme the app.
+Use \code{role::Warning} (or the equivalent helper) so a theme
+swap actually changes the appearance.
+\end{warning}
+
+\begin{warning}
+\textbf{Setting BG to black on a non-default terminal.} Some
+users have dark grey or off-black backgrounds. Setting your bg
+to RGB(0,0,0) creates a visual line. Use \code{Color::default\_()}
+unless you really need a specific bg.
+\end{warning}
+
+\begin{warning}
+\textbf{Forgetting NO\_COLOR.} If your app relies on colour to
+convey meaning (red = bad, green = good), users with
+\code{NO\_COLOR=1} will lose the cue. Pair colour with text
+or attributes (``[ERR]'', Underline).
+\end{warning}
+
+\begin{warning}
+\textbf{Truecolour quantisation surprises.} A theme that uses
+adjacent RGB values may collapse onto the same Ansi256 cell on
+old terminals. Test your theme on a 256-colour terminal before
+shipping.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Define a \code{Theme} of your own with three named roles.
+    Use it with \code{maya::set\_theme}. Toggle between yours
+    and the default at runtime with a hotkey.
+  \item Inspect what your terminal advertises: print
+    \code{getenv("TERM")} and \code{getenv("COLORTERM")} in a
+    counter app.
+  \item Run with \code{NO\_COLOR=1} set and confirm the app
+    still conveys distinctions through attributes.
+\end{enumerate}
+
+\begin{recap}
+The style system has three layers (theme, inheritance, local) and
+merges with a defined precedence (attribute-union,
+colour-override). The palette decouples roles from colours;
+themes swap palettes wholesale. Truecolour quantisation,
+NO\_COLOR, and capability detection happen at the edges so your
+code can think in roles, not raw RGB.
+\end{recap}

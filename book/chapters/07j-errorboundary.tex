@@ -1,0 +1,322 @@
+\chapter{Error boundaries and recovery}
+\label{ch:errorboundary}
+
+\begin{aside}
+The Elm architecture treats expected failures as messages. But
+what about unexpected ones --- a stray null deref, an assertion
+fired, a third-party library throwing an exception you did not
+plan for? \maya{} provides \emph{error boundaries}: a way to
+isolate a subtree of the UI so that when it fails, only that
+subtree breaks, not the whole app. This chapter explains the
+mechanism and how to use it.
+\end{aside}
+
+\section{What an error boundary is}
+
+An error boundary is a wrapper component that catches exceptions
+thrown by its child's \code{view} or \code{update}. When a
+catch happens, the boundary swaps in a fallback view (typically a
+\emph{something went wrong} message with a retry button) and
+isolates the failure.
+
+The pattern comes from React's \emph{error boundary} concept.
+The mechanics in \maya{} are different (no class hierarchy, no
+\code{componentDidCatch}) but the goal is the same: contain
+failure, do not crash the whole UI.
+
+\subsection*{Without an error boundary}
+
+If \code{view} throws, the runtime catches the exception, prints
+a diagnostic, restores the terminal, and exits. Your user sees
+their app vanish. The reproducer is buried in stdout.
+
+\subsection*{With an error boundary}
+
+If \code{view} of a sub-tree throws, the boundary catches and
+renders a small ``error'' panel in place of that sub-tree. The
+rest of the UI continues. The user can keep working; the developer
+can inspect the error message.
+
+\section{The ErrorBoundary type}
+
+\file{maya/include/maya/app/error\_boundary.hpp} defines:
+
+\begin{lstlisting}
+template <ElementLike Child>
+class ErrorBoundary {
+public:
+    using Fallback = std::function<Element(std::exception_ptr)>;
+
+    ErrorBoundary(Child child, Fallback fallback);
+
+    Element build() &&;   // catches exceptions inside child.build()
+};
+
+template <ElementLike Child, class F>
+auto error_boundary(Child&& child, F&& fallback);
+\end{lstlisting}
+
+The wrapper takes a child and a fallback. \code{build} wraps the
+child's own \code{build} in a \code{try/catch} block:
+
+\begin{lstlisting}
+template <ElementLike Child>
+Element ErrorBoundary<Child>::build() && {
+    try {
+        return std::move(child_).build();
+    } catch (...) {
+        return fallback_(std::current_exception());
+    }
+}
+\end{lstlisting}
+
+If the child's build (which recursively builds the entire
+sub-tree) succeeds, the wrapper passes it through. If it throws
+anywhere, the fallback is rendered instead.
+
+\subsection*{The fallback function}
+
+The fallback receives a \code{std::exception\_ptr} so it can
+extract a message if desired:
+
+\begin{lstlisting}
+auto safe_panel = error_boundary(
+    risky_panel(state),
+    [](std::exception_ptr ep) {
+        std::string msg;
+        try { std::rethrow_exception(ep); }
+        catch (const std::exception& e) { msg = e.what(); }
+        catch (...)                       { msg = \"unknown error\"; }
+        return box(
+            text(\"This panel crashed:\") | Bold | Fg<255, 120, 120>,
+            text(msg) | Dim
+        ) | border<Single> | pad<1>;
+    }
+);
+\end{lstlisting}
+
+A user-friendly fallback hides the exception details by default
+and reveals them on demand. A developer-mode fallback dumps the
+full \code{what()} immediately.
+
+\section{Where boundaries belong}
+
+Not every sub-tree needs a boundary. Adding boundaries
+everywhere defeats the purpose (the runtime becomes lossy). Add
+one where:
+
+\begin{itemize}[leftmargin=*]
+  \item The sub-tree renders user-supplied content (a markdown
+    preview, a code highlighter) where input may be malformed.
+  \item The sub-tree calls third-party code you do not control.
+  \item The sub-tree is independent of the rest of the UI ---
+    losing it does not lose work in progress.
+\end{itemize}
+
+A reasonable rule: the panels of a multi-panel app each get a
+boundary. The whole-app root does not (because if rendering the
+whole app fails, there is nothing useful to show).
+
+\section{Catching during update}
+
+\code{ErrorBoundary} only catches in \code{build}/\code{view}.
+Exceptions in \code{update} are different: they corrupt the
+model.
+
+\maya{} handles update exceptions at the runtime level:
+
+\begin{lstlisting}
+try {
+    auto [m2, c2] = P::update(model, msg);
+    model = std::move(m2);
+    interpret(c2, loop);
+} catch (...) {
+    log_update_exception(std::current_exception(), model, msg);
+    // The model is unchanged from before update was called.
+    // No effects were interpreted.
+}
+\end{lstlisting}
+
+If \code{update} throws, the model is not mutated and no
+commands are issued. The next frame renders the previous model.
+The user might not notice anything happened; the log records it.
+
+This is intentionally conservative: an exception in \code{update}
+indicates a programming bug, not an expected condition. The
+right fix is for the developer to add a branch in \code{update}
+that returns a message, not for the runtime to silently retry.
+
+\begin{warning}
+Do not rely on the runtime's update-exception catching as a
+defence in depth. It exists to keep the program alive while the
+bug is diagnosed, not as a feature.
+\end{warning}
+
+\section{Effect failures}
+
+Failures inside \code{Cmd::task} are wrapped at the boundary:
+
+\begin{lstlisting}
+return Cmd<Msg>::task([url]() -> Msg {
+    try {
+        return FetchOk{do_fetch(url)};
+    } catch (const std::exception& e) {
+        return FetchFailed{e.what()};
+    }
+});
+\end{lstlisting}
+
+The task callable catches its own exceptions and routes them
+through the message type. \code{update} branches on the result.
+No exception ever crosses the task boundary.
+
+If you fail to wrap, \maya{}'s task scheduler catches the
+exception and logs it, but the corresponding message is never
+delivered. Your \code{update} will not see a result. This is a
+silent failure --- bad enough that you should always wrap.
+
+\section{Recovery patterns}
+
+\subsection*{Retry on a timer}
+
+After a failure, schedule a retry:
+
+\begin{lstlisting}
+[&](FetchFailed e) {
+    m.error = e.reason;
+    m.retry_count++;
+    if (m.retry_count < 3) {
+        return std::pair{m,
+            Cmd<Msg>::after(1s * (1 << m.retry_count),
+                            Retry{})};
+    }
+    return std::pair{m, Cmd<Msg>{}};
+}
+\end{lstlisting}
+
+Exponential backoff in three lines.
+
+\subsection*{Reset on user action}
+
+Provide a ``retry'' button in the error UI:
+
+\begin{lstlisting}
+auto error_panel = v(
+    text(error_message) | Fg<255, 120, 120>,
+    text(\"[r] retry  [q] quit\") | Dim
+);
+\end{lstlisting}
+
+Pressing \code{r} fires a \code{Retry} message; \code{update}
+re-issues the original \code{Cmd}.
+
+\subsection*{Degraded mode}
+
+If a feature fails repeatedly, disable it and keep going:
+
+\begin{lstlisting}
+if (m.feature_x_failures >= 3) {
+    m.feature_x_disabled = true;
+}
+\end{lstlisting}
+
+The view checks the flag and renders a placeholder. The rest of
+the app stays alive.
+
+\section{Logging the failure}
+
+A boundary that catches but never reports is worse than no
+boundary at all (you do not even know there was a bug). Pair the
+boundary with a log:
+
+\begin{lstlisting}
+auto safe_panel = error_boundary(
+    risky_panel(state),
+    [&](std::exception_ptr ep) {
+        log_exception(ep, \"risky_panel\");
+        return fallback_ui(ep);
+    }
+);
+\end{lstlisting}
+
+Where \code{log\_exception} writes to a file or sends to a
+telemetry service. For development, \code{std::cerr} is fine.
+For production, write to a debug ring buffer that the user can
+toggle on demand.
+
+\begin{aside}
+A debug ring buffer is a small in-memory log that survives
+crashes. \maya{}'s built-in one keeps the last 1024 messages and
+exposes them via a \code{maya::dump\_log()} call --- useful when
+the user reports ``something looked weird''.
+\end{aside}
+
+\section{Testing error paths}
+
+The boundary itself is testable:
+
+\begin{lstlisting}
+TEST_CASE(\"boundary catches throwing build\") {
+    auto throwing = test::throw_on_build();
+    auto wrapped = error_boundary(throwing, [](auto) {
+        return text(\"fallback\");
+    });
+    Element e = std::move(wrapped).build();
+    REQUIRE(is_text(e, \"fallback\"));
+}
+\end{lstlisting}
+
+A test helper that throws on \code{build}, wrapped in a
+boundary; the result should be the fallback. The runtime is
+not involved.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Catching too broadly.} A boundary that catches all
+exceptions can mask bugs you want to surface. Catch specific
+exception types where possible, and re-throw the ones you do not
+understand.
+\end{warning}
+
+\begin{warning}
+\textbf{Side effects in the fallback.} The fallback is a render
+function; it should not have side effects (file I/O, network).
+If you need to log, do it before returning the fallback element.
+\end{warning}
+
+\begin{warning}
+\textbf{Boundary on a leaf.} Wrapping a single text node in a
+boundary is wasteful (text nodes do not throw). Boundaries pay
+off on subtrees that aggregate work.
+\end{warning}
+
+\begin{warning}
+\textbf{Boundary that itself throws.} If your fallback throws,
+the runtime catches it and you crash anyway. Keep fallbacks
+defensively simple.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Wrap your app's largest panel in an
+    \code{error\_boundary}. Force an exception inside it and
+    verify only that panel is replaced.
+  \item Add a debug overlay that shows the last logged
+    exception when the user presses \code{F12}.
+  \item Read
+    \file{maya/include/maya/app/error\_boundary.hpp}. Identify
+    where the exception is caught and how the fallback is
+    invoked.
+\end{enumerate}
+
+\begin{recap}
+Error boundaries isolate failure. A boundary catches exceptions
+during \code{build}/\code{view} and renders a fallback in place
+of the broken sub-tree. \code{update} exceptions are caught at
+the runtime level and the model is left unchanged. Task
+exceptions must be converted to messages at the task boundary.
+Together these mechanisms keep \maya{} apps alive in the face of
+bugs.
+\end{recap}

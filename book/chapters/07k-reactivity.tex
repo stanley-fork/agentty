@@ -1,0 +1,233 @@
+\chapter{The reactive primitives, previewed}
+\label{ch:reactivity-preview}
+
+\begin{aside}
+Most of \maya{} is plain functions. A handful of places ---
+animations, watched files, derived state --- want \emph{reactive
+primitives}: signals that notify subscribers when their value
+changes. \maya{}'s signal system lives in
+\file{maya/include/maya/core/signal.hpp} and gets a full
+treatment in Chapter~\ref{ch:signals}. This chapter is the
+architectural preview: what they are, why they exist, where the
+Elm architecture leaves room for them.
+\end{aside}
+
+\section{Signals in one paragraph}
+
+A \code{Signal<T>} is a value that notifies subscribers when it
+changes. A \code{Computed<T>} is a derived signal whose value is
+a function of other signals. An \code{Effect} is a callable that
+re-runs whenever one of the signals it reads changes.
+
+If you have used SolidJS, MobX, Vue, Knockout, or Svelte 5, this
+is the same machinery. The mechanics differ; the model is the
+same.
+
+\section{Why signals at all?}
+
+Pure \code{update} works for most of an app. But two patterns
+are awkward without reactive helpers:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Animations.} A counter that ticks once per
+    frame, a loading spinner, a smooth scroll. The state is not
+    business logic; it is presentation.
+  \item \textbf{Derived state.} A search box that filters a
+    list. The filter result is a function of the list and the
+    query; recomputing it inside \code{view} every frame is
+    wasteful.
+\end{itemize}
+
+You could express both with \code{Cmd} and \code{Sub}, and many
+\maya{} apps do. Signals are an alternative for fine-grained
+reactivity without piping every change through the message
+variant.
+
+\subsection*{The trade}
+
+\code{update} is pure and testable. Signals introduce mutable
+shared state. That is a real trade --- but it is bounded: the
+signal graph is small, its subscribers are explicit, and the
+mutation is observable.
+
+For the parts of an app where the signal model is a better fit
+(animations, computed columns, file watches), the cost is worth
+it. For business logic, prefer \code{update}.
+
+\begin{warning}
+The two models can mix in one app, but in any given subsystem
+pick one. Mixing them inside a single widget is a recipe for
+``why did this not re-render?'' bugs.
+\end{warning}
+
+\section{The basic shape}
+
+\begin{lstlisting}
+auto count = Signal{0};
+auto doubled = Computed{[&] { return count() * 2; }};
+
+Effect{[&] {
+    std::cout << \"count=\" << count() << \" doubled=\" << doubled() << \"\\n\";
+}};
+
+count.set(5);   // prints \"count=5 doubled=10\"
+count.set(7);   // prints \"count=7 doubled=14\"
+\end{lstlisting}
+
+Three pieces:
+
+\begin{itemize}[leftmargin=*]
+  \item A \code{Signal<int>} holds a value and tracks subscribers.
+  \item A \code{Computed<int>} is a function over signals. When
+    its inputs change, it recomputes; subscribers of the computed
+    are notified.
+  \item An \code{Effect} runs once at registration, then again
+    whenever any signal it read changes.
+\end{itemize}
+
+Subscriber tracking is automatic. \code{count()} inside the
+effect registers a dependency; \code{count.set(\ldots)} triggers
+re-run.
+
+\section{Why this works without explicit subscribe}
+
+The key trick: while an effect or computed is evaluating,
+\maya{} sets a thread-local current node. Any \code{Signal::get}
+records the current node as a subscriber. When the effect
+finishes, the dependency set is fixed until the next run.
+
+\begin{lstlisting}
+template <class T>
+T Signal<T>::get() {
+    if (auto* node = detail::current_node) {
+        subscribers_.insert(node);
+        node->dependencies.insert(this);
+    }
+    return value_;
+}
+\end{lstlisting}
+
+The dependency graph builds itself. No \code{addEventListener},
+no \code{watch} declarations. The function calls themselves
+register the wiring.
+
+\subsection*{What gets tracked}
+
+Only reads through \code{Signal::get()} (which the call operator
+forwards to). Plain variable reads, function calls, and
+non-signal state are invisible to the tracker.
+
+This means: if you compute a value from a signal and a plain
+variable, only the signal is tracked. Changing the plain variable
+will not re-run the effect; you must read it through a signal
+or wrap it in one.
+
+\section{When to use signals in maya}
+
+\subsection*{Animations}
+
+A spinner is the canonical case:
+
+\begin{lstlisting}
+auto frame = Signal{0};
+
+// somewhere: a 60Hz timer increments frame.
+schedule_every(16ms, [&] { frame.set(frame() + 1); });
+
+// in view:
+Element view(const Model& m) {
+    return text(spinner_frames[frame() % spinner_frames.size()]);
+}
+\end{lstlisting}
+
+The view reads \code{frame()} so it auto-subscribes. The signal
+changes; \maya{}'s render pipeline knows the affected sub-tree
+must re-render. The model is not involved.
+
+\subsection*{Computed columns}
+
+A list with a filter:
+
+\begin{lstlisting}
+auto items = Signal<std::vector<Item>>{};
+auto query = Signal<std::string>{};
+auto filtered = Computed{[&] {
+    std::vector<Item> out;
+    for (auto& i : items()) {
+        if (i.label.contains(query())) out.push_back(i);
+    }
+    return out;
+}};
+\end{lstlisting}
+
+\code{filtered} recomputes only when \code{items} or
+\code{query} changes. The view reads \code{filtered()};
+intermediate frames see the same vector without recomputing.
+
+\subsection*{File watches}
+
+A signal whose value is the contents of a file, automatically
+updated when the file is modified:
+
+\begin{lstlisting}
+auto config = file_signal(\"~/.config/myapp.toml\");
+auto parsed = Computed{[&] { return parse_toml(config()); }};
+\end{lstlisting}
+
+Behind the scenes, \code{file\_signal} uses inotify (Linux),
+kqueue (macOS), or ReadDirectoryChangesW (Windows) to watch the
+file. When it changes, \code{config} updates, \code{parsed}
+recomputes, every subscriber re-renders.
+
+\section{What signals do not replace}
+
+The Elm core stays. \code{update} is still the place for
+business logic. Signals supplement it for the cases above; they
+do not subsume it.
+
+A useful rule: if the state is something a user might want to
+\emph{see in a debugger}, put it in \code{Model}. If the state
+is a synthetic computation (animation frame, derived index),
+\code{Signal} is fine.
+
+\section{The cost}
+
+Signals add:
+
+\begin{itemize}[leftmargin=*]
+  \item Heap allocations: each \code{Signal} stores a
+    \code{std::vector} of subscribers.
+  \item Thread-local state: the dependency tracker.
+  \item Mutable state: signals are by definition not pure.
+  \item Glitches if you do not understand the model: re-running
+    an effect can trigger another effect, which can trigger
+    another\ldots
+\end{itemize}
+
+Used sparingly (a handful of signals per app), the cost is
+negligible. Used as the primary state-management tool, the cost
+adds up --- and you have lost the testability of pure
+\code{update}.
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Create a \code{Signal<int>} and an \code{Effect} that
+    prints the value. Set the signal three times; observe the
+    effect runs four times (once on registration, three on
+    changes).
+  \item Add a \code{Computed} that doubles the signal. Confirm
+    the effect prints both the signal and the computed.
+  \item Read \file{maya/include/maya/core/signal.hpp}. Identify
+    the data members of \code{Signal<T>} and the locks (if any)
+    that protect them.
+\end{enumerate}
+
+\begin{recap}
+Signals, computeds, and effects form a fine-grained reactive
+system. They build a dependency graph automatically through
+\code{get} calls, re-run effects when inputs change, and
+complement (rather than replace) the Elm architecture.
+Chapter~\ref{ch:signals} treats them in full; this chapter
+explains where they fit.
+\end{recap}

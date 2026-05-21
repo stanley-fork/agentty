@@ -1212,3 +1212,643 @@ the DSL itself; the payoff is every \maya{} program you ever write.
     the compiler error. Find the line that says \code{constraints
     not satisfied} and the \code{Cfg.has\_border} that triggered it.
 \end{enumerate}
+
+\section{What is a compile-time program, really?}
+
+The DSL is C++ code that runs while the compiler is running. The
+result is a different C++ program, which is what your CPU
+actually executes. Two languages, one source file. To use the DSL
+well, it helps to see exactly where the line between the two
+languages falls.
+
+\subsection*{The two evaluation contexts}
+
+C++ has, somewhat secretly, two evaluation contexts:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Compile-time} (\code{constexpr},
+    \code{consteval}, template instantiation, non-type template
+    parameters). Code that runs inside the compiler. Inputs and
+    outputs are values known at the point the compiler reads
+    them. No runtime, no heap (well, since C++20 there is a tiny
+    one), no I/O.
+  \item \textbf{Runtime}. Code that runs in the produced
+    executable. Inputs come from arguments, files, the network,
+    the user.
+\end{itemize}
+
+A \code{constexpr} function may run in \emph{either} context. A
+\code{consteval} function may run only at compile time. A regular
+function may run only at runtime (in general). The DSL uses all
+three.
+
+\subsection*{What survives into runtime}
+
+Here is the rule that explains almost every DSL design choice:
+
+\begin{quote}
+A value known at compile time costs zero at runtime. A value not
+known at compile time costs as much as it would have anyway.
+\end{quote}
+
+When you write \code{t<"hello"> | Bold}, the string \code{"hello"}
+and the style \code{Bold} are both compile-time values. The pipe
+is a \code{consteval} function that combines them into a
+\code{TextNode} type whose template parameters encode both. When
+the compiler emits machine code for that expression, there is no
+string copy, no style construction, no allocation. Just a pointer
+to a static byte sequence and a small struct on the stack.
+
+When you write \code{text(my\_string) | Bold}, the string is a
+runtime value. The pipe returns a \code{RuntimeTextNode} that
+holds the string and the style as runtime fields. Now there is
+an allocation (if the string is long), a copy, a struct.
+
+The DSL gives you both spellings on purpose, because both costs
+are appropriate sometimes. Spelling matters.
+
+\begin{aside}
+This is the same trade-off C++ string literals always had:
+\code{"hello"} is a static byte sequence, \code{std::string\{"hello"\}}
+is a heap-allocated copy. The DSL extends the trade to entire
+UI fragments.
+\end{aside}
+
+\section{NTTPs, from zero}
+
+A Non-Type Template Parameter (NTTP) is a value, not a type, that
+appears in a template parameter list. You have seen them since
+C++98:
+
+\begin{lstlisting}
+template <int N>
+struct Array { int data[N]; };
+
+Array<10> a;  // N is the value 10
+\end{lstlisting}
+
+For decades NTTPs were restricted to integral types, pointers,
+and references. You could not pass a string literal, a struct,
+or a floating-point number.
+
+C++20 changed that. An NTTP may now be any \emph{structural
+type}: a type with all-public data members, no user-defined
+equality, trivially comparable. C++26 broadens the rules further.
+
+\subsection*{Why this matters for a DSL}
+
+With structural NTTPs, you can use a value as part of a type.
+The key consequence: two instantiations with the same value
+produce the same type. Two with different values produce
+different types.
+
+\begin{lstlisting}
+template <Str s>  // Str is a structural type wrapping a literal
+struct Tag {};
+
+Tag<"hello">  a;
+Tag<"hello">  b;  // same type as a
+Tag<"world">  c;  // different type
+\end{lstlisting}
+
+This is the fundamental trick \maya{} uses to put strings,
+styles, and box configurations into the type system. Once a
+value is part of a type, the compiler can reason about it: it
+can deduce, compare, dispatch, and overload.
+
+\subsection*{The Str type}
+
+\maya{}'s \code{Str} wraps a fixed-size character array so that a
+string literal can become an NTTP:
+
+\begin{lstlisting}
+template <std::size_t N>
+struct Str {
+    char data[N];
+    constexpr Str(const char (&s)[N]) {
+        for (std::size_t i = 0; i < N; ++i) data[i] = s[i];
+    }
+    constexpr std::string_view view() const {
+        return {data, N - 1};  // strip trailing \0
+    }
+};
+\end{lstlisting}
+
+A literal \code{"hello"} has type \code{const char[6]}. The
+constructor copies its bytes into the \code{data} array of a
+\code{Str<6>} value. Two \code{Str<6>} instances with the same
+bytes are equal under member-wise comparison, so they are the
+same NTTP value, so they instantiate the same type.
+
+This is what makes \code{t<"hello">} work: \code{t} is a template
+that takes a \code{Str} NTTP, and the literal is implicitly
+constructed.
+
+\begin{funfact}
+The \code{Str} pattern is sometimes called \emph{cstring NTTP}
+or \emph{template string literal}. It first showed up in C++20
+proposals and is now widely used in libraries like fmt (for
+compile-time format-string checking).
+\end{funfact}
+
+\subsection*{Compile-time style: CTStyle}
+
+The same trick gives us compile-time styles. \code{CTStyle} is a
+structural type holding flags and colours:
+
+\begin{lstlisting}
+struct CTStyle {
+    bool bold      = false;
+    bool dim       = false;
+    bool italic    = false;
+    bool underline = false;
+    // ... fg, bg, ...
+};
+\end{lstlisting}
+
+A style tag is a template wrapping a \code{CTStyle} NTTP:
+
+\begin{lstlisting}
+template <CTStyle S>
+struct StyTag {};
+
+constexpr StyTag<CTStyle{.bold = true}>       Bold;
+constexpr StyTag<CTStyle{.italic = true}>     Italic;
+constexpr StyTag<CTStyle{.underline = true}>  Underline;
+\end{lstlisting}
+
+Now \code{Bold} is a value of a specific type, distinct from
+\code{Italic}, and combining them by pipe is overload resolution
+on types --- not a runtime branch.
+
+\subsection*{Composing styles: pipe between StyTags}
+
+What does \code{Bold | Italic} mean? It is operator-pipe applied
+to two style tags:
+
+\begin{lstlisting}
+template <CTStyle A, CTStyle B>
+constexpr auto operator|(StyTag<A>, StyTag<B>) {
+    constexpr CTStyle merged = merge(A, B);
+    return StyTag<merged>{};
+}
+\end{lstlisting}
+
+\code{merge} is a \code{constexpr} function that walks the two
+\code{CTStyle}s field by field and produces a third. The whole
+computation happens in the compiler; the resulting program just
+has a single \code{StyTag} value of the merged type.
+
+\subsection*{Truecolour: Fg and Bg as templates}
+
+Foreground and background colours arrive the same way:
+
+\begin{lstlisting}
+template <uint8_t R, uint8_t G, uint8_t B>
+constexpr auto Fg = StyTag<CTStyle{.fg = {R, G, B}}>{};
+\end{lstlisting}
+
+So \code{Fg<255, 100, 50>} is a style tag whose type encodes
+an exact RGB triple. Combining it with \code{Bold} gives a tag
+that encodes both --- still entirely in the type system.
+
+The convenience macro \code{fg<"\#FF6432">} parses a hex literal
+at compile time. The parser is a \code{constexpr} function over
+a \code{Str}; the output is the same \code{Fg<R, G, B>}.
+
+\begin{warning}
+MSVC used to (and may still, depending on version) refuse to
+deduce \code{Fg} as a variable template across some translation
+units. \maya{}'s workaround is the \code{detail\_rgb} namespace
+--- an explicit factory function that MSVC handles. If you see
+surprising errors only on Windows, this is usually the cause.
+\end{warning}
+
+\section{Every pipe overload, by left-hand-side type}
+
+The pipe \code{|} is overloaded many times. Each overload is
+selected by the type of the left operand. Below is the full
+table of overloads, organised by LHS.
+
+\subsection*{LHS: TextNode (compile-time text)}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{TextNode<S> | StyTag<St>} $\to$ \code{TextNode<S, St>}.
+    Attaches style to the text. Compile-time only.
+  \item \code{TextNode<S> | pad\_t<P>} $\to$ \code{BoxNode<\ldots>}.
+    Wraps the text in a padded box. The padding is compile-time.
+  \item \code{TextNode<S> | width\_t<W>} $\to$
+    \code{BoxNode<\ldots>}. Clips/extends the text to a fixed
+    width.
+\end{itemize}
+
+\subsection*{LHS: RuntimeTextNode}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{RuntimeTextNode \& | StyTag<St>} $\to$
+    \code{RuntimeTextNode} with style copied in. Runtime fields
+    get a runtime style attached. The compile-time style is
+    flattened into the runtime struct.
+  \item \code{RuntimeTextNode \& | pad\_t<P>} $\to$ runtime box.
+\end{itemize}
+
+\subsection*{LHS: BoxNode}
+
+A box node can take more decoration than a leaf text node, so it
+has many pipe overloads:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{BoxNode<Cfg> | border\_t<B>}. Adds a border. Only
+    valid if \code{Cfg.has\_border == false} (cannot add a border
+    twice). Compile error otherwise.
+  \item \code{BoxNode<Cfg> | bcol<R, G, B>}. Sets border colour.
+    Only valid if \code{Cfg.has\_border == true}. Compile error
+    otherwise.
+  \item \code{BoxNode<Cfg> | pad\_t<P>}. Adds padding inside the
+    box.
+  \item \code{BoxNode<Cfg> | width\_t<W>}. Sets a fixed width.
+  \item \code{BoxNode<Cfg> | height\_t<H>}. Sets a fixed height.
+  \item \code{BoxNode<Cfg> | StyTag<St>}. Applies style to the
+    box's content.
+  \item \code{BoxNode<Cfg> | flex\_t<G>}. Sets flex-grow factor.
+\end{itemize}
+
+Each overload is gated by a \code{requires} clause that checks
+the \code{Cfg} for compatibility. The clauses are what produce
+the friendly compile errors.
+
+\subsection*{LHS: MapNode, WhenNode, VisibleNode}
+
+These wrappers carry through the pipe overloads from their
+inner type. \code{when(cond, child) | Bold} is equivalent to
+\code{when(cond, child | Bold)}. The wrapping is transparent.
+
+\begin{recap}
+The pipe is not one operator; it is dozens. Each overload is
+specific to a (LHS, RHS) pair. The compiler picks the right one
+by type. There is no virtual dispatch, no runtime branching ---
+the whole pipeline is one type, fully resolved by the time the
+backend sees it.
+\end{recap}
+
+\section{The type-state machine}
+
+The DSL is a \emph{type-state machine}: each node type encodes
+what operations are currently legal on it. As you compose, the
+type changes; the set of legal next operations changes with it.
+
+Think of \code{BoxNode<Cfg>} as a state. The \code{Cfg} contains
+flags like \code{has\_border}, \code{has\_width},
+\code{has\_border\_colour}. Each pipe overload requires certain
+flags to be set or unset, and (if it succeeds) flips one or more
+flags in the output type.
+
+A transition diagram:
+
+\begin{lstlisting}
+start: BoxNode<{has_border=0, has_bcol=0, has_pad=0}>
+  | border<Rounded>   --> BoxNode<{has_border=1, has_bcol=0, has_pad=0}>
+  | bcol<60,65,80>    --> compile error (has_border==0)
+
+after border:
+  BoxNode<{has_border=1, has_bcol=0, has_pad=0}>
+  | bcol<60,65,80>    --> BoxNode<{has_border=1, has_bcol=1, has_pad=0}>
+  | border<Double>    --> compile error (has_border==1)
+  | pad<1>            --> BoxNode<{has_border=1, has_bcol=1, has_pad=1}>
+\end{lstlisting}
+
+Illegal moves do not become runtime errors --- they fail to
+compile, with a message naming the unsatisfied constraint. This
+is what we mean when we say ``the DSL pushes errors into the
+build''.
+
+\begin{idea}
+Type-state has been used in Rust's typestate proposals, in
+Phantom-typed APIs in Haskell, and in fluent builders in Java
+(``you can only call \code{build()} after setting all required
+fields''). \maya{}'s version uses C++26 NTTPs to make the state a
+first-class structural value instead of a phantom tag.
+\end{idea}
+
+\section{Decoding compile errors, expanded}
+
+When a constraint fails, the compiler produces a message. Modern
+compilers (GCC 13+, Clang 17+) print the unsatisfied \code{requires}
+clause inline. Here are five real errors and how to read them.
+
+\subsection*{Error 1: border colour without border}
+
+Source:
+
+\begin{lstlisting}
+auto bad = box(text("hi")) | bcol<60, 65, 80>;
+\end{lstlisting}
+
+GCC error excerpt:
+
+\begin{lstlisting}
+error: no match for 'operator|' (operand types are 'BoxNode<...>'
+                                  and 'bcol_t<60, 65, 80>')
+note: candidate: 'requires (Cfg.has_border) ...'
+note:   constraint not satisfied: 'Cfg.has_border == true'
+\end{lstlisting}
+
+Read: ``the candidate \code{operator|} for box+border-colour
+exists, but its \code{requires} clause needs
+\code{Cfg.has\_border == true}, and your box has
+\code{has\_border == false}.'' Fix: pipe \code{border<...>} in
+first.
+
+\subsection*{Error 2: negative padding}
+
+Source:
+
+\begin{lstlisting}
+auto bad = text("hi") | pad<-1>;
+\end{lstlisting}
+
+Error excerpt:
+
+\begin{lstlisting}
+error: template argument deduction/substitution failed:
+note:   value '-1' does not satisfy 'PadValue' (must be >= 0)
+\end{lstlisting}
+
+Read: ``the \code{pad} template expects a non-negative value;
+$-1$ fails the concept check.'' Fix: use a non-negative literal,
+or compute the padding at runtime via \code{dyn\_pad(\ldots)}.
+
+\subsection*{Error 3: wrong child type}
+
+Source:
+
+\begin{lstlisting}
+auto bad = h(42, text("hi"));
+\end{lstlisting}
+
+Error excerpt:
+
+\begin{lstlisting}
+error: no matching function for call to 'h(int, TextNode<...>)'
+note:   constraint not satisfied: 'ElementLike<int>'
+\end{lstlisting}
+
+Read: ``\code{h} (horizontal layout) requires all children to
+satisfy the \code{ElementLike} concept; \code{int} does not.''
+Fix: wrap with \code{text(std::to\_string(42))} if you wanted to
+render the number.
+
+\subsection*{Error 4: a Str that is not constexpr}
+
+Source:
+
+\begin{lstlisting}
+std::string s = compute_label();
+auto bad = t<s>;
+\end{lstlisting}
+
+Error excerpt:
+
+\begin{lstlisting}
+error: 's' is not a constant expression
+note:   's' was not declared 'constexpr'
+\end{lstlisting}
+
+Read: ``the template argument must be a constant expression;
+\code{s} is not.'' Fix: use \code{text(s)} instead --- the runtime
+version.
+
+\subsection*{Error 5: pipe order ambiguity}
+
+Source:
+
+\begin{lstlisting}
+auto bad = text("hi") | width<10> | Bold | width<20>;
+\end{lstlisting}
+
+Error excerpt:
+
+\begin{lstlisting}
+error: 'width' has already been set on this BoxNode
+note:   each modifier may be applied at most once
+\end{lstlisting}
+
+Read: ``the type-state forbids setting \code{width} twice.''
+Fix: keep one \code{width}. If you really want to override,
+create a new node and pipe again.
+
+\subsection*{A reading strategy}
+
+When the DSL produces an error:
+
+\begin{enumerate}[leftmargin=*]
+  \item Find the line that says \code{constraint not satisfied}
+    or \code{candidate ignored}. This names the failing rule.
+  \item Read the rule. It is usually a short \code{requires}
+    clause that mentions one or two flags or concepts.
+  \item Map the rule back to your source. The compiler usually
+    points at the operator, not the offending pipe; the offending
+    pipe is the previous one.
+  \item Fix the order, or fix the value, or move to a runtime
+    variant.
+\end{enumerate}
+
+\begin{aside}
+If the error trace is overwhelming, set \code{-fconcepts-diagnostics-depth=2}
+on GCC. The deep depth dumps every level of template substitution;
+depth 2 keeps the message focused on the user-visible constraint.
+\end{aside}
+
+\section{What .build() does, per node kind}
+
+Every node has a \code{build()} method that converts the
+compile-time tree into a runtime \code{Element}. The work it does
+depends on the node kind. Tracing the cost by kind reveals where
+the DSL's runtime overhead actually lives.
+
+\subsection*{TextNode<S, St>::build()}
+
+The text is a literal, the style is a value. \code{build} produces
+an \code{Element\{Text\{view\_of\_S, runtime\_style\_of\_St\}\}}.
+No allocation; the view points into the static string and the
+style is a small POD.
+
+Cost: one struct construction. Microseconds for a screen of text.
+
+\subsection*{RuntimeTextNode::build()}
+
+The text is an owned \code{std::string}, the style is a value.
+\code{build} moves the string into the \code{Text} variant and
+attaches the style. If the string was small (SSO), no allocation;
+otherwise the original heap buffer is transferred.
+
+Cost: a move (cheap) or, if you handed in a temporary,
+zero moves.
+
+\subsection*{BoxNode<Cfg>::build()}
+
+The most complex case. \code{build} walks the children, calling
+\code{build()} on each, then assembles a \code{Box} struct with
+the assembled children, the layout style derived from \code{Cfg},
+and any decoration (border, padding, colour).
+
+Cost: $O(n)$ in the number of descendant nodes, plus one
+allocation for the children vector. For a typical UI tree of a
+few hundred nodes, this is on the order of microseconds.
+
+\subsection*{MapNode<F>::build()}
+
+Map is a wrapper that lifts child messages through a function.
+\code{build} calls the child's \code{build}, then attaches the
+function so that the runtime event system can apply it. The
+function itself is a \code{std::function} (so there is one
+allocation for the closure if it captures).
+
+\subsection*{WhenNode::build()}
+
+A conditional. If the condition is \code{true}, build the child;
+otherwise return an empty \code{Element}. The runtime cost is
+zero when the condition is false; when true, it is the cost of
+the child.
+
+\subsection*{VisibleNode::build()}
+
+Like \code{WhenNode} but the child is always built and only its
+visibility flag is set. Use when you want the layout to reserve
+space even when the element is hidden.
+
+\begin{recap}
+The runtime cost of the DSL is one tree walk and a handful of
+allocations per frame. The compile-time machinery is invisible at
+runtime. If you measure your frame and it is microseconds, the
+DSL is doing its job.
+\end{recap}
+
+\section{Recipe gallery}
+
+A tour of small, useful patterns. Each is one screen of code and
+shows a different facet of the DSL.
+
+\subsection*{Titled panel}
+
+\begin{lstlisting}
+auto panel = box(
+    v(text("Title") | Bold | Underline,
+      t<"---------"> | Dim,
+      text("body line 1"),
+      text("body line 2")))
+    | border<Rounded> | pad<1>;
+\end{lstlisting}
+
+A border, padding, and a divided header. All compile-time; the
+runtime sees a fully assembled tree.
+
+\subsection*{Two-column layout}
+
+\begin{lstlisting}
+auto two_col = h(
+    box(text(left_text))  | flex<1>,
+    t<" | "> | Dim,
+    box(text(right_text)) | flex<1>);
+\end{lstlisting}
+
+Two flex children share the row equally. The divider takes its
+intrinsic width.
+
+\subsection*{Status bar}
+
+\begin{lstlisting}
+auto bar = h(
+    text(mode_label)  | Bold | Bg<0,80,150>,
+    text(" " + file)  | flex<1>,
+    text(line_col)    | Dim)
+    | height<1>;
+\end{lstlisting}
+
+A fixed-height row with three regions: a coloured mode tag, a
+flexible file name, and a dim line/column indicator.
+
+\subsection*{Spinner}
+
+\begin{lstlisting}
+constexpr std::array frames = {
+    "upper-left", "upper-right", "lower-right", "lower-left"};
+auto spinner = text(frames[tick % 4]) | Bold;
+\end{lstlisting}
+
+A tiny animation. The frame list is static; the indexing is
+runtime; the styling is compile-time.
+
+\subsection*{Conditional element}
+
+\begin{lstlisting}
+auto maybe_help = when(show_help,
+    box(text("press q to quit")) | border<Single> | pad<1>);
+\end{lstlisting}
+
+If \code{show\_help} is false, the element costs nothing to
+render. If true, the panel appears.
+
+\subsection*{List with separators}
+
+\begin{lstlisting}
+auto list = v(
+    items                  // a std::vector<Element>
+    | std::views::join_with(t<" --- "> | Dim));
+\end{lstlisting}
+
+Using C++23 ranges, intersperse a divider between elements. The
+divider is compile-time, the items are runtime.
+
+\subsection*{Style preset}
+
+\begin{lstlisting}
+constexpr auto Heading = Bold | Underline | Fg<200, 220, 255>;
+auto h1 = text("Chapter 1") | Heading;
+auto h2 = text("Chapter 2") | Heading;
+\end{lstlisting}
+
+A reusable style. \code{Heading} is itself a \code{StyTag} whose
+type encodes all three properties. The pipe combines them
+lexically; the runtime sees one merged style.
+
+\subsection*{Width-clipped text}
+
+\begin{lstlisting}
+auto clipped = text(very_long_string) | width<40>;
+\end{lstlisting}
+
+Forces the text to occupy exactly 40 columns, truncating with an
+ellipsis if longer. Good for table cells and status lines.
+
+\section{When the DSL is not enough}
+
+Not every UI shape fits the compile-time pipeline:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Dynamic tree structure.} If you do not know the
+    set of children until runtime (e.g. a file tree), you build
+    a \code{std::vector<Element>} at runtime and pass it to
+    \code{v(\ldots)}. The static pipeline still wraps the dynamic
+    leaves.
+  \item \textbf{User-themable styles.} If the user picks colours
+    in a settings menu, you cannot encode the colour in the type.
+    Use the runtime \code{Style} struct and apply it with
+    \code{styled(\ldots)}.
+  \item \textbf{Loaded layouts.} If the layout comes from a
+    config file, the structure cannot be encoded statically.
+    The DSL is still useful for sub-trees; the top-level becomes
+    a hand-built \code{Element}.
+\end{itemize}
+
+The DSL is one of several tools. Use it where types can carry
+the weight; fall back to plain \code{Element} construction where
+they cannot.
+
+\begin{warning}
+There is a temptation to encode \emph{everything} at compile time.
+Resist it for dynamic data. The runtime variants exist for a
+reason --- they will save you from a wall of
+\code{constexpr}-related compile errors when the requirement
+changes.
+\end{warning}

@@ -1,0 +1,278 @@
+\chapter{Accessibility and inclusive design}
+\label{ch:a11y}
+
+\begin{aside}
+A TUI is often the most accessible kind of UI: screen readers
+work with it, low-vision users can configure terminal fonts and
+contrast, and there is no mouse-only flow. But ``most accessible
+by default'' is not ``always accessible''. A few choices in your
+app design can welcome or exclude users with disabilities. This
+chapter walks the considerations and the patterns.
+\end{aside}
+
+\section{Why TUIs start accessible}
+
+A typical TUI:
+
+\begin{itemize}[leftmargin=*]
+  \item Renders text, which screen readers can read.
+  \item Uses high-contrast cells (the user picks the colours).
+  \item Has keyboard navigation by default.
+  \item Avoids animation that distracts.
+  \item Works with the user's chosen font size.
+\end{itemize}
+
+These are wins by default. The patterns to maintain them
+require thought.
+
+\section{Screen readers}
+
+Modern screen readers (Orca on Linux, JAWS / NVDA on Windows,
+VoiceOver on macOS) can read terminal output, but they only see
+what is on the screen \emph{after} ANSI escapes are interpreted.
+
+A few principles:
+
+\begin{itemize}[leftmargin=*]
+  \item Information conveyed by colour alone is invisible to
+    screen reader users. Pair it with a text marker.
+  \item Status indicators that flash (using SGR 5 blink) are
+    not announced. Use static markers.
+  \item Boxes drawn with Unicode borders read as random
+    characters. Provide an option to hide borders or use the
+    \code{ASCII} border style.
+\end{itemize}
+
+\subsection*{Live regions}
+
+When the UI updates rapidly (a log streaming, a chat coming
+in), screen readers can drop messages. Patterns:
+
+\begin{itemize}[leftmargin=*]
+  \item Only announce new lines (no re-reads of the whole
+    panel).
+  \item Provide a ``pause output'' toggle so the user can
+    catch up.
+  \item Offer a transcript view that does not auto-scroll.
+\end{itemize}
+
+\section{Colour and contrast}
+
+\code{NO\_COLOR=1} is a hint, not a request. Honour it
+strictly:
+
+\begin{lstlisting}
+if (std::getenv(\"NO_COLOR\")) {
+    cfg.theme = themes::Monochrome();
+}
+\end{lstlisting}
+
+The monochrome theme uses only attributes (Bold, Underline,
+Dim) for distinction. Information that was conveyed by colour
+is still distinguishable.
+
+\subsection*{Contrast ratios}
+
+WCAG 2.1 defines contrast ratios:
+
+\begin{itemize}[leftmargin=*]
+  \item AA Normal text: 4.5:1.
+  \item AA Large text: 3:1.
+  \item AAA Normal text: 7:1.
+\end{itemize}
+
+For a TUI, ``large text'' rarely applies (cells are uniform).
+Aim for 4.5:1 minimum on default themes; provide a
+high-contrast option at 7:1 for users who need it.
+
+\subsection*{Colour blindness}
+
+About 8\% of men and 0.5\% of women have some form of colour
+blindness. Common patterns:
+
+\begin{itemize}[leftmargin=*]
+  \item Do not rely on red vs green alone. Pair with shapes
+    (\code{[+]} vs \code{[-]}).
+  \item Use distinct hues, not adjacent ones (red + blue, not
+    red + orange).
+  \item Test palettes in a simulator (Color Oracle, Sim Daltonism).
+\end{itemize}
+
+\section{Keyboard navigation}
+
+A TUI cannot rely on a mouse; mouse support is a convenience.
+The keyboard must reach every interactive element.
+
+\subsection*{Tab order}
+
+Document the tab order explicitly. The visible order should
+match the logical order:
+
+\begin{itemize}[leftmargin=*]
+  \item Top to bottom.
+  \item Left to right (or right to left in RTL languages).
+  \item Skip non-interactive elements.
+\end{itemize}
+
+\maya{}'s \code{FocusManager} (Chapter~\ref{ch:focus}) stores
+order explicitly. Set it to match the visual order; do not
+rely on registration order alone.
+
+\subsection*{Shortcut redundancy}
+
+For every shortcut, ask: can the user discover it? Patterns:
+
+\begin{itemize}[leftmargin=*]
+  \item A help overlay listing all bindings.
+  \item Status bar hints (e.g. \code{[q] quit  [/] search}).
+  \item A command palette (Ctrl-P) so commands are discoverable
+    by name even if the user does not know the binding.
+\end{itemize}
+
+\section{Animation and motion}
+
+Animation can:
+
+\begin{itemize}[leftmargin=*]
+  \item Distract or trigger discomfort for users with motion
+    sensitivity.
+  \item Mask important information.
+  \item Slow down task completion.
+\end{itemize}
+
+Honour \code{prefers-reduced-motion}:
+
+\begin{lstlisting}
+if (std::getenv(\"MAYA_REDUCED_MOTION\")) {
+    cfg.animations_enabled = false;
+}
+\end{lstlisting}
+
+When disabled, spinners become static markers, smooth scrolling
+becomes instant, transitions are skipped.
+
+\subsection*{Avoid blinking}
+
+SGR 5 (blink) was deprecated in many terminals and is generally
+considered hostile. Do not use it.
+
+\section{Font size and readability}
+
+The user controls font size at the terminal level. Your app
+should:
+
+\begin{itemize}[leftmargin=*]
+  \item Adapt to any terminal width (no hard-coded 80 columns).
+  \item Wrap or truncate gracefully.
+  \item Avoid tiny indicator characters (a single \code{x}
+    when a clearer indicator like \code{[done]} is available).
+\end{itemize}
+
+\section{Time-sensitive UI}
+
+If something requires the user to act quickly:
+
+\begin{itemize}[leftmargin=*]
+  \item Default timeouts should be generous.
+  \item Provide a way to extend.
+  \item Show the remaining time clearly.
+\end{itemize}
+
+Patterns like a confirmation prompt that closes after 5 seconds
+are hostile to users who read slowly.
+
+\section{Error messages}
+
+Error messages should:
+
+\begin{itemize}[leftmargin=*]
+  \item Be visible to screen readers (not just colour).
+  \item Persist long enough to read.
+  \item Suggest a remedy (\emph{press r to retry}).
+  \item Not blame the user.
+\end{itemize}
+
+A pattern: errors in a status bar with a fixed duration plus a
+\code{[?]} indicator that opens a detail panel.
+
+\section{Cognitive load}
+
+Reduce things to remember:
+
+\begin{itemize}[leftmargin=*]
+  \item Consistent terminology across screens.
+  \item Visible state (don't hide what mode you are in).
+  \item Confirmations for destructive actions.
+  \item Undo for everything reversible.
+\end{itemize}
+
+The Elm architecture's explicit \code{Model} is a gift here:
+the state is a value the user can be shown.
+
+\section{Internationalisation revisited}
+
+Translation (Chapter~\ref{ch:i18n}) is an accessibility
+concern: users whose first language is not the app's default
+need translations.
+
+The pattern: wrap all UX strings; ship at least one alternate
+locale to prove the wrapping works.
+
+\section{Test with assistive tech}
+
+A few practical tests:
+
+\begin{itemize}[leftmargin=*]
+  \item Try the app with a screen reader.
+  \item Try with no colour (\code{NO\_COLOR=1}).
+  \item Try with a 16-colour terminal.
+  \item Try with a 40-column-wide terminal.
+  \item Try with motion disabled.
+\end{itemize}
+
+If any of these break the app, the app is not accessible.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Colour-only status indicators.} The most common
+mistake: a red dot to mean ``error''. Add text or a shape so
+non-colour users can see it.
+\end{warning}
+
+\begin{warning}
+\textbf{Hard-coded narrow widths.} Apps that assume 80 columns
+or 120 columns break at other sizes. \maya{}'s flex layout
+helps; do not undo it with \code{width<80>}.
+\end{warning}
+
+\begin{warning}
+\textbf{Rapid auto-updates.} A log scrolling past faster than
+the user can read is hostile. Provide a pause toggle.
+\end{warning}
+
+\begin{warning}
+\textbf{Modal dialogs that grab focus.} A modal that prevents
+\code{Ctrl-C} from quitting traps the user. Always allow the
+quit hotkey, even inside modals.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Run your app with \code{NO\_COLOR=1}. Identify every
+    place colour-only conveyed meaning. Add text or shapes.
+  \item Test the app with Orca (Linux) or NVDA (Windows).
+    Note which controls are not announced.
+  \item Add a help overlay that lists every keyboard shortcut.
+    Trigger it on \code{F1} or \code{?}.
+\end{enumerate}
+
+\begin{recap}
+TUIs start accessible by default. Maintain that with: text
+markers paired with colour, monochrome theme on NO\_COLOR,
+explicit tab order, discoverable shortcuts, generous timeouts,
+motion controls, persistent and respectful error messages.
+Test with assistive tech. The Elm architecture's explicit
+state makes accessibility easier, not harder.
+\end{recap}

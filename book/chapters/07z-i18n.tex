@@ -1,0 +1,249 @@
+\chapter{Internationalisation and locale}
+\label{ch:i18n}
+
+\begin{aside}
+A TUI library used outside one language and one terminal soon
+encounters every weird edge of internationalisation: non-ASCII
+text, right-to-left scripts, locale-dependent number
+formatting, time zones. \maya{} does not try to solve every i18n
+problem (no library does), but it gives you primitives that
+play well with the standard C++ approaches. This chapter is the
+guide.
+\end{aside}
+
+\section{Three i18n axes}
+
+International apps face three orthogonal concerns:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Translation.} The text shown to the user is in
+    their language.
+  \item \textbf{Locale formatting.} Numbers, dates, currencies
+    follow local conventions.
+  \item \textbf{Text rendering.} Non-Latin scripts, RTL, complex
+    glyphs render correctly.
+\end{itemize}
+
+Each is a separate problem with its own tools.
+
+\section{Translation}
+
+The canonical pattern: wrap user-visible strings in a function
+that looks up the translation:
+
+\begin{lstlisting}
+std::string_view _(const char* key);  // looks up by key
+
+auto label = text(_(\"open_file\"));
+\end{lstlisting}
+
+\code{\_} (underscore) is the conventional name. The key is a
+short identifier; the actual text comes from a translation
+table indexed by current locale.
+
+\subsection*{Loading translations}
+
+\begin{lstlisting}
+struct Translations {
+    std::unordered_map<std::string, std::string> strings;
+
+    static Expected<Translations, std::string>
+    load(std::string_view lang_tag);
+};
+\end{lstlisting}
+
+Translation files are typically JSON or PO format. Load once at
+startup; hold in a global (or in the model).
+
+\subsection*{Plurals}
+
+English has two plural forms (one, many); some languages have
+six. The standard solution is the CLDR plural rules:
+
+\begin{lstlisting}
+std::string_view ngettext(const char* key, int n);
+\end{lstlisting}
+
+The function picks the right form based on $n$ and the current
+locale's plural rule. \maya{} does not ship one; use a library
+(\code{boost::locale}, ICU) or roll your own.
+
+\section{Locale formatting}
+
+Numbers, dates, currencies follow locale conventions. C++26's
+\code{std::format} respects the current locale by default:
+
+\begin{lstlisting}
+std::string s = std::format(\"{:L}\", 1234567);
+// en-US: \"1,234,567\"
+// de-DE: \"1.234.567\"
+// fr-FR: \"1 234 567\"
+\end{lstlisting}
+
+The \code{L} format specifier enables locale awareness.
+
+\subsection*{Setting the locale}
+
+\begin{lstlisting}
+std::locale::global(std::locale{\"de_DE.UTF-8\"});
+\end{lstlisting}
+
+Setting the global locale affects \code{format}, \code{ostream},
+and the C functions that read the locale. Set it once at
+startup based on the user's environment.
+
+\subsection*{Time zones}
+
+C++20 introduced \code{std::chrono::zoned\_time}:
+
+\begin{lstlisting}
+auto now = std::chrono::system_clock::now();
+auto local = std::chrono::zoned_time{std::chrono::current_zone(), now};
+std::cout << local << \"\\n\";
+\end{lstlisting}
+
+The output respects the system time zone. \maya{} apps that
+display timestamps should always use \code{zoned\_time}
+through the user's local zone, not the system clock directly.
+
+\section{Text rendering}
+
+\maya{}'s grapheme walker (Chapter~\ref{ch:text}) handles
+non-Latin scripts correctly. The width table covers all
+codepoints. But two complications remain.
+
+\subsection*{Bidirectional text}
+
+Arabic and Hebrew are read right-to-left. Modern terminals
+(GNOME Terminal, Konsole, Alacritty) implement BiDi rendering;
+\maya{} relies on this and emits text in logical order.
+
+The catch: \emph{mixed} LTR/RTL inside a single text node is
+where edge cases live. If the line contains both English and
+Arabic, the visual order depends on the terminal's BiDi
+implementation. \maya{} does not attempt to predict it.
+
+\subsection*{Complex shaping}
+
+Devanagari, Arabic ligatures, vowel marks --- these require
+the font shaper to combine sequences into glyphs. The terminal's
+font handles this, not \maya{}. The grapheme walker counts the
+cells correctly; the terminal renders the glyphs.
+
+\section{Identifying the locale}
+
+\begin{lstlisting}
+std::string detect_locale() {
+    if (auto* l = std::getenv(\"LANG\")) return l;
+    if (auto* l = std::getenv(\"LC_ALL\")) return l;
+    return \"C\";
+}
+\end{lstlisting}
+
+POSIX uses \code{LANG} and \code{LC\_*} variables. Win32 uses
+\code{GetUserDefaultLocaleName}. The platform abstraction can
+unify them.
+
+\section{Number input}
+
+When parsing user-typed numbers, the locale matters. \code{1,5}
+is one and a half in German, fifteen in English. The cleanest
+approach: pick a canonical form for storage, convert only at
+display.
+
+\begin{lstlisting}
+double parse_locale_number(std::string_view s);  // tolerant
+std::string format_locale_number(double n);       // locale-aware
+
+// Internally: always double.
+double value = parse_locale_number(user_input);
+display = format_locale_number(value);
+\end{lstlisting}
+
+The model holds the unambiguous form; the view formats for
+display.
+
+\section{Plural-aware UIs}
+
+For status messages with counts:
+
+\begin{lstlisting}
+auto msg = std::format(\"{} {}\",
+                       std::format(\"{:L}\", count),
+                       ngettext(\"file_singular\", \"file_plural\", count));
+\end{lstlisting}
+
+The translation table has separate entries for the singular and
+plural forms. The format pulls the right one.
+
+\section{The C locale}
+
+The default C locale (\code{LC\_ALL=C}) is the lowest common
+denominator: ASCII only, no comma separators, English. For
+servers and scripts, this is intentional --- predictable.
+
+For an interactive TUI, default to the user's locale. Honour
+\code{LC\_ALL=C} as an explicit opt-out.
+
+\section{Right-to-left UI shells}
+
+If the entire UI is in Arabic or Hebrew, you may want the
+\emph{layout} flipped (sidebar on the right). This is
+deliberate; the flexbox model supports it via
+\code{Direction::RowReverse}:
+
+\begin{lstlisting}
+auto root = h(...) | (rtl ? direction<RowReverse> : direction<Row>);
+\end{lstlisting}
+
+Each row places its children in reverse order; columns are
+unaffected.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Hard-coded English in widget defaults.} If your
+widget shows ``OK'' and ``Cancel'', those strings need
+translation. Avoid hard-coded UX strings; route them through
+\code{\_(\ldots)}.
+\end{warning}
+
+\begin{warning}
+\textbf{Assuming character width.} A name field that allocates
+20 characters works for English ``Alice'' but fails for the
+six-cell ``\\verb|ya-ma-da|'' (a CJK transliteration). Allocate
+by cell, not by character count.
+\end{warning}
+
+\begin{warning}
+\textbf{Date formatting in strings.} Hard-coding ``MM/DD/YYYY''
+breaks for users who expect ``DD.MM.YYYY''. Use
+\code{std::format} with a locale-aware specifier.
+\end{warning}
+
+\begin{warning}
+\textbf{Truncating at byte boundaries.} A UTF-8 truncation at
+byte $n$ might split a multi-byte character. Always truncate at
+grapheme boundaries (Chapter~\ref{ch:text}).
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a small translation table to a counter app. Switch
+    locales at runtime; verify the strings change.
+  \item Format a number with \code{std::format}'s \code{L}
+    specifier in three locales. Note the differences.
+  \item Type Arabic text in a text input widget. Verify the
+    cells are counted correctly even if the visual order is
+    terminal-dependent.
+\end{enumerate}
+
+\begin{recap}
+i18n is three problems: translation, locale formatting, text
+rendering. \code{std::format} handles locale numbers and dates;
+the grapheme walker handles non-Latin text; the terminal handles
+shaping and BiDi. \maya{} stays out of the way; you compose the
+right tools. Default to the user's locale, opt out only when you
+need predictability.
+\end{recap}

@@ -1,0 +1,337 @@
+\chapter{Runtime internals: a guided tour}
+\label{ch:runtime}
+
+\begin{aside}
+We have described \code{maya::run} as ``the runtime''. Plural,
+really --- there are several cooperating subsystems behind the
+single \code{run} call. This chapter is a guided tour of the
+internals: what each piece does, where it lives in the source,
+and how they fit together. By the end you should be able to
+open any header in \file{maya/include/maya/app/} and know what
+you are reading.
+\end{aside}
+
+\section{The roadmap}
+
+A \maya{} runtime is six cooperating pieces:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Context.} The bundle of platform handles,
+    config, capabilities, and stats.
+  \item \textbf{Event loop.} The driver that waits for events,
+    dispatches them, and runs the pipeline.
+  \item \textbf{Event source.} The platform abstraction (epoll,
+    kqueue, WaitForMultipleObjects) that produces events.
+  \item \textbf{Subscription manager.} The diff of declared
+    subscriptions versus active OS-level wires.
+  \item \textbf{Command interpreter.} The interpreter that walks
+    \code{Cmd<Msg>} variants and effects them.
+  \item \textbf{Renderer.} The pipeline that turns elements into
+    ANSI bytes.
+\end{enumerate}
+
+Each lives behind its own header. \code{maya::run} composes them.
+
+\section{Context}
+
+\file{maya/include/maya/app/context.hpp} defines:
+
+\begin{lstlisting}
+struct Context {
+    Config            config;
+    platform::Terminal& terminal;
+    TerminalCaps      caps;
+    SignalDispatcher& signals;
+    WakeFd&           wake;
+    Stats             stats;
+    std::optional<Logger> logger;
+};
+\end{lstlisting}
+
+The context is constructed at startup and passed by reference
+into every subsystem. Subsystems read what they need; the
+context owns nothing they own.
+
+\subsection*{Why a context, not globals?}
+
+Globals would work, but:
+
+\begin{itemize}[leftmargin=*]
+  \item Two simultaneous \maya{} runtimes in one process (a test
+    runner, for example) would clobber each other.
+  \item Threading is harder to reason about with hidden state.
+  \item Tests cannot vary the context without resetting globals.
+\end{itemize}
+
+A context is a small ceremony for a real benefit.
+
+\section{Event loop}
+
+The driver in \file{maya/include/maya/app/app.hpp}:
+
+\begin{lstlisting}
+template <Program P>
+int run(Config cfg) {
+    auto ctx = make_context(cfg);
+    auto loop = EventLoop{ctx};
+    auto renderer = Renderer{ctx};
+    auto interpreter = Interpreter{ctx, loop};
+
+    auto [model, init_cmd] = P::init();
+    interpreter.interpret(init_cmd);
+
+    while (loop.running()) {
+        renderer.frame(P::view(model));
+        loop.update_subscriptions(P::subscribe(model));
+
+        Event ev = loop.wait();
+        if (auto msg = to_message<typename P::Msg>(ev)) {
+            try {
+                auto [m2, c2] = P::update(model, *msg);
+                model = std::move(m2);
+                interpreter.interpret(c2);
+            } catch (...) {
+                log_update_exception(ctx, std::current_exception());
+            }
+        }
+    }
+    return 0;
+}
+\end{lstlisting}
+
+The pattern is the loop we walked in Chapter~\ref{ch:elm}, now
+with the supporting classes named.
+
+\subsection*{Composition over inheritance}
+
+\code{EventLoop}, \code{Renderer}, and \code{Interpreter} are
+plain classes that take a \code{Context\&} in their constructor.
+There is no \code{class App} hierarchy. The runtime is the
+\code{run} function plus the helpers it instantiates.
+
+\begin{idea}
+Composition keeps the runtime debuggable. Each subsystem is a
+file; each file is a class; each class has a clear contract.
+You can read the runtime by reading six files in order, without
+following virtual dispatches.
+\end{idea}
+
+\section{Event source}
+
+The OS-level pump (Chapter~\ref{ch:platform}). It produces
+\code{Event} values: \code{KeyPress}, \code{MouseEvent},
+\code{Resize}, \code{Wakeup}, \code{Timeout}.
+
+The event loop calls \code{source.wait(timeout)} and translates
+the result into a message via the active subscription set.
+
+\subsection*{The Event variant}
+
+\begin{lstlisting}
+using Event = std::variant<
+    KeyPress, MouseEvent, Resize, Paste,
+    Timeout, Wakeup, Unknown>;
+\end{lstlisting}
+
+The same overload pattern from Chapter~\ref{ch:elements} matches
+each kind. The subscription manager (next section) handles the
+match.
+
+\section{Subscription manager}
+
+The subscriber tracks which \code{Sub} alternatives are active
+and how to translate events into messages:
+
+\begin{lstlisting}
+class SubscriptionManager {
+public:
+    void update(const Sub<Msg>& new_sub);
+    std::optional<Msg> dispatch(const Event& ev);
+};
+\end{lstlisting}
+
+\code{update} takes the new \code{Sub} from
+\code{P::subscribe(model)} and diffs it against the previous one.
+Subscriptions added are installed; subscriptions removed are
+torn down. Subscriptions present in both are kept.
+
+\code{dispatch} takes an event and returns a message if any
+subscription matches. The matching is by event kind and any
+subscription-specific filters.
+
+\subsection*{Diffing subscriptions}
+
+The diff uses structural equality on a flattened list of
+(kind, parameters) tuples. Two \code{Every(50ms, Tick\{\})}
+subscriptions are equal regardless of how they were constructed.
+The fingerprint comparison is O(n) in subscription count, but
+subscription counts are tiny (typically under ten).
+
+\section{Command interpreter}
+
+\file{maya/include/maya/app/} also houses the interpreter:
+
+\begin{lstlisting}
+class Interpreter {
+public:
+    void interpret(const Cmd<Msg>& cmd);
+
+private:
+    void interpret_none(None);
+    void interpret_quit(Quit);
+    void interpret_after(After<Msg>);
+    void interpret_task(Task<Msg>);
+    void interpret_batch(Batch<Msg>);
+    // ... one per alternative
+};
+\end{lstlisting}
+
+Each \code{interpret\_X} performs the real-world side effect
+corresponding to that alternative. \code{interpret\_quit} sets a
+flag on the event loop. \code{interpret\_after} schedules a
+timer on the event source. \code{interpret\_task} hands the
+callable to the worker pool.
+
+The dispatch is a single \code{std::visit}:
+
+\begin{lstlisting}
+void Interpreter::interpret(const Cmd<Msg>& cmd) {
+    std::visit([this](auto& alt) { this->do_interpret(alt); }, cmd.v);
+}
+\end{lstlisting}
+
+Adding a new \code{Cmd} alternative is two steps: add to the
+variant, add an \code{interpret} overload. No existing callers
+change.
+
+\subsection*{The worker pool}
+
+\code{Task} and \code{IsolatedTask} run on threads. \maya{}
+ships with a small fixed-size pool plus the option for isolated
+threads. The pool size is configurable (default: thread::hardware
+concurrency divided by two; minimum one).
+
+A pool worker, when its callable returns, writes the resulting
+message to a lock-free queue and signals the wake fd. The main
+loop's event source picks up the wake; \code{dispatch} pulls the
+message from the queue.
+
+\begin{aside}
+The wake-fd pattern is what makes \maya{} able to deliver
+worker-thread messages without polling. The cost is one byte
+written and one byte read per cross-thread message.
+\end{aside}
+
+\section{The renderer}
+
+\file{maya/include/maya/render/renderer.hpp} houses:
+
+\begin{lstlisting}
+class Renderer {
+public:
+    explicit Renderer(Context&);
+    void frame(Element root);
+    void force_redraw();
+    void set_caps(TerminalCaps);
+};
+\end{lstlisting}
+
+\code{frame(Element)} runs the six-stage pipeline from
+Chapter~\ref{ch:pipeline}: layout, paint, diff, serialise,
+write. \code{force\_redraw} discards the cache. \code{set\_caps}
+updates capability detection (e.g. on terminal-type change).
+
+The renderer owns the previous canvas (for the diff) and the
+output buffer. Each frame is amortised; the buffer's capacity
+persists across frames.
+
+\section{Shutdown}
+
+When \code{Cmd::Quit} is interpreted, the event loop sets its
+running flag to false. The main \code{while} exits on the next
+iteration. Destructors restore the terminal:
+
+\begin{enumerate}[leftmargin=*]
+  \item \code{Renderer}'s destructor flushes any pending bytes.
+  \item \code{Interpreter}'s destructor joins worker threads.
+  \item \code{EventLoop}'s destructor closes the event source.
+  \item \code{Terminal}'s destructor calls \code{leave\_raw\_mode}.
+\end{enumerate}
+
+The order matters: flush bytes \emph{before} restoring raw mode
+(so the final frame appears), join workers \emph{before}
+destroying the queue (so writes do not race), and so on. RAII
+takes care of this if the construction order is right.
+
+\subsection*{Signal-driven shutdown}
+
+If the user presses Ctrl-C, the signal handler writes a special
+\code{InterruptedSignal} message to the queue. \code{update}
+sees it (most apps handle it as ``quit''); the rest is the
+normal shutdown path.
+
+If the signal handler cannot reach \code{update} (e.g. the
+runtime is stuck in a long computation), the OS will eventually
+kill the process. The terminal restore happens in
+\code{atexit}-registered handlers as a last resort.
+
+\section{Concurrency model summary}
+
+\begin{itemize}[leftmargin=*]
+  \item Main thread: event loop, renderer, interpreter,
+    \code{update}, \code{view}, \code{subscribe}.
+  \item Worker threads: \code{Task} callables.
+  \item Isolated threads: \code{IsolatedTask} callables.
+  \item Signal-disposition thread (on Win32): the console
+    control handler.
+\end{itemize}
+
+The handoff between worker and main is via the wake fd and the
+message queue. The main thread is the only one that touches
+\code{Model}, \code{view}, or the renderer.
+
+\begin{warning}
+Do not share mutable state across the worker/main boundary
+without synchronisation. The whole architecture is built on the
+idea that \code{Model} is owned by the main thread; if you
+violate that, races are likely.
+\end{warning}
+
+\section{Reading the source}
+
+A suggested order for reading \maya{}'s runtime:
+
+\begin{enumerate}[leftmargin=*]
+  \item \file{maya/include/maya/app/app.hpp} (the \code{run}
+    function and the main loop).
+  \item \file{maya/include/maya/app/context.hpp}.
+  \item \file{maya/include/maya/app/sub.hpp}.
+  \item \file{maya/include/maya/core/cmd.hpp}.
+  \item \file{maya/include/maya/app/events.hpp}.
+  \item \file{maya/include/maya/render/renderer.hpp}.
+\end{enumerate}
+
+Six files. Combined, around 2000 lines of (heavily commented)
+source. That is the entire runtime.
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Open \file{maya/include/maya/app/app.hpp} and identify
+    every subsystem class instantiated in \code{run}.
+  \item Trace what happens when the user presses Ctrl-C from
+    the terminal to the program's exit. Note each thread
+    boundary crossed.
+  \item Try implementing a simple\code{trace\_all} mode that
+    logs every event, message, and command. Decide which
+    subsystem you would hook into.
+\end{enumerate}
+
+\begin{recap}
+The runtime is a composition of six subsystems: context, event
+loop, event source, subscription manager, command interpreter,
+renderer. Each lives behind its own header; \code{run} composes
+them. The main thread owns the model; worker threads communicate
+via a wake-fd and message queue. RAII handles shutdown order.
+The whole thing is around 2000 lines of source.
+\end{recap}

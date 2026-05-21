@@ -1,0 +1,352 @@
+\chapter{Message routing and dispatch internals}
+\label{ch:dispatch}
+
+\begin{aside}
+Behind \code{std::visit} and \code{Cmd::map}, there is a real
+dispatch machinery that turns variant types into jump tables and
+threaded function pointers. This chapter opens the hood and walks
+through what the compiler actually emits, how dispatch costs
+compare across alternatives, and why \maya{}'s sum-type approach
+beats both inheritance and \code{std::function} in practice.
+\end{aside}
+
+\section{The dispatch options C++ gives us}
+
+Three mainstream ways to dispatch a message to a handler:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Virtual functions.} Classic OOP. A vtable pointer
+    per object, a vtable per class, one indirect call.
+  \item \textbf{std::function or function pointer.} A type-erased
+    callable; storage is heap-allocated for non-trivial
+    closures.
+  \item \textbf{Sum type + visit.} A discriminator integer plus
+    inline storage; visit compiles to a switch.
+\end{enumerate}
+
+\maya{} uses option 3 throughout. The trade-offs are subtle but
+real.
+
+\subsection*{Virtual functions: the cost model}
+
+\begin{lstlisting}
+class Handler {
+public:
+    virtual void handle(Msg) = 0;
+};
+
+class Counter : public Handler {
+public:
+    void handle(Msg) override;
+};
+
+Handler* h = new Counter();
+h->handle(msg);
+\end{lstlisting}
+
+The call \code{h->handle(msg)}:
+
+\begin{itemize}[leftmargin=*]
+  \item Load \code{h} (likely cached).
+  \item Load vtable pointer at \code{*h} (one extra cache line).
+  \item Load \code{handle} slot from vtable.
+  \item Indirect call.
+\end{itemize}
+
+Costs: typically 2--5 cycles in the best case (vtable cached),
+20+ cycles in the worst (vtable cold). Plus the heap allocation
+for \code{new Counter()}.
+
+\subsection*{std::function: the cost model}
+
+\begin{lstlisting}
+std::function<void(Msg)> handler = [](Msg m) { /* ... */ };
+handler(msg);
+\end{lstlisting}
+
+Costs:
+
+\begin{itemize}[leftmargin=*]
+  \item If the captured state is small-object-optimised, two
+    indirect calls (the \code{function} dispatches via vtable
+    too).
+  \item If the captured state exceeds SBO, one heap allocation
+    plus the indirection.
+  \item Inlining is rare; the compiler cannot prove
+    \code{handler} points to a specific function.
+\end{itemize}
+
+Plus the heap allocation cost amortised across calls.
+
+\subsection*{Sum type + visit: the cost model}
+
+\begin{lstlisting}
+std::variant<MsgA, MsgB, MsgC> msg = MsgA{};
+std::visit([](auto& m) { /* ... */ }, msg);
+\end{lstlisting}
+
+Costs:
+
+\begin{itemize}[leftmargin=*]
+  \item Read the discriminator (one byte).
+  \item Switch on the discriminator (jump table).
+  \item Direct call to the matched branch.
+  \item Inlining is common; the compiler sees every branch.
+\end{itemize}
+
+Costs: 1--3 cycles in the typical case. No heap allocation.
+
+\section{What the compiler emits}
+
+Let us look at the assembly.
+
+\subsection*{Virtual call disassembly}
+
+\begin{lstlisting}
+; h->handle(msg)
+mov rax, qword ptr [rdi]            ; load vtable ptr
+mov rdx, qword ptr [rax]            ; load handle slot
+jmp rdx                              ; indirect tail call
+\end{lstlisting}
+
+Three instructions, two memory loads, one indirect call. The
+branch predictor must learn the target.
+
+\subsection*{std::visit disassembly}
+
+\begin{lstlisting}
+; std::visit(f, v)
+movzx eax, byte ptr [rdi + 16]      ; load discriminator
+cmp eax, 3                           ; bounds check
+jae default
+jmp qword ptr [jump_table + rax*8]  ; jump-table dispatch
+
+case_0:
+    ; inlined body for MsgA
+    ret
+case_1:
+    ; inlined body for MsgB
+    ret
+case_2:
+    ; inlined body for MsgC
+    ret
+\end{lstlisting}
+
+A jump table the size of the variant. Each case is inlined
+where possible. The branch predictor learns the table entries.
+
+\subsection*{The point}
+
+The compiler can specialise the visit much more aggressively
+than the virtual call. Inlining a variant case eliminates
+function-call overhead; inlining a virtual call requires
+devirtualisation, which is rare.
+
+\section{Cmd::map: closure threading}
+
+\code{Cmd::map} is more involved. It transforms a
+\code{Cmd<ChildMsg>} into a \code{Cmd<ParentMsg>} via a
+function. The implementation walks the variant and rebuilds it:
+
+\begin{lstlisting}
+template <class A, class B, class F>
+Cmd<B> map(Cmd<A> cmd, F f) {
+    return std::visit(overload{
+        [&](None)      -> Cmd<B> { return Cmd<B>::none(); },
+        [&](Quit)      -> Cmd<B> { return Cmd<B>::quit(); },
+        [&](After<A> a) -> Cmd<B> {
+            return Cmd<B>::after(a.delay, f(a.message));
+        },
+        [&](Task<A> t) -> Cmd<B> {
+            auto fn = std::move(t.fn);
+            auto f2 = std::move(f);
+            return Cmd<B>::task([fn = std::move(fn), f = std::move(f2)]() mutable -> B {
+                return f(fn());
+            });
+        },
+        // ... one branch per alternative
+    }, cmd.v);
+}
+\end{lstlisting}
+
+\code{None}, \code{Quit}: no payload to transform; return the
+same shape in the new type.
+
+\code{After<A>}: transform the payload message via \code{f}.
+
+\code{Task<A>}: build a new closure that runs the old task and
+applies \code{f} to its result.
+
+The cost: one allocation for \code{Task} (the closure storing
+\code{f}); zero for the simpler alternatives.
+
+\section{Why visit, not switch}
+
+We could write \code{visit} by hand:
+
+\begin{lstlisting}
+switch (msg.index()) {
+    case 0: handle(std::get<MsgA>(msg)); break;
+    case 1: handle(std::get<MsgB>(msg)); break;
+    case 2: handle(std::get<MsgC>(msg)); break;
+}
+\end{lstlisting}
+
+This compiles to the same assembly as \code{std::visit} ---
+but with two problems:
+
+\begin{itemize}[leftmargin=*]
+  \item Adding an alternative breaks the switch; the compiler
+    does not warn unless you enable \code{-Wswitch}.
+  \item \code{std::get<MsgA>} can throw if the variant is not
+    \code{MsgA}; \code{visit}'s callable cannot.
+\end{itemize}
+
+\code{std::visit} is the type-safe spelling that the compiler
+enforces. It is also the recipe the overload pattern targets.
+
+\section{The exhaustiveness check}
+
+When the variant grows, \code{std::visit} requires the visitor
+to cover every alternative. If you forget one, the compiler
+emits a clear error:
+
+\begin{lstlisting}
+error: no matching function for call to 'operator()' with 'MsgD'
+\end{lstlisting}
+
+For an overload-pattern visitor:
+
+\begin{lstlisting}
+error: 'overload<...>::operator()(MsgD)' is not callable
+\end{lstlisting}
+
+Either way: a new alternative without a corresponding handler
+fails the build. You cannot ship a half-implemented message
+variant.
+
+\subsection*{When you want a catch-all}
+
+Sometimes you want a default. An \code{auto} lambda matches any
+alternative:
+
+\begin{lstlisting}
+std::visit(overload{
+    [](MsgA a) { /* specific */ },
+    [](MsgB b) { /* specific */ },
+    [](auto)   { /* default */ }
+}, msg);
+\end{lstlisting}
+
+The compiler picks the most-specialised overload for each
+alternative; \code{auto} catches the rest. Use sparingly ---
+it defeats exhaustiveness.
+
+\section{Tagged union vs raw union}
+
+\code{std::variant} is a tagged union: a discriminator plus
+storage. A raw \code{union} has no discriminator; you must
+track it yourself.
+
+\begin{lstlisting}
+union Msg {
+    MsgA a;
+    MsgB b;
+    MsgC c;
+};
+
+// You must remember which one is active.
+\end{lstlisting}
+
+The trade-off:
+
+\begin{itemize}[leftmargin=*]
+  \item Variant: safer, slightly larger (one byte for tag plus
+    alignment).
+  \item Union: smaller, requires manual bookkeeping.
+\end{itemize}
+
+For one-off micro-optimisations a hand-rolled union can shave
+bytes; for application code, the variant's safety wins every
+time.
+
+\section{Inlining and the optimiser}
+
+Three factors determine how well the optimiser inlines visit:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Visibility.} If the visitor and the visit call
+    are in the same translation unit, the compiler can see all
+    branches.
+  \item \textbf{Constness.} A \code{const} variant is easier to
+    reason about.
+  \item \textbf{Branch count.} Above 10--12 branches, the
+    compiler switches from inlined cases to a jump table; both
+    are fast.
+\end{enumerate}
+
+In practice, \maya{}'s visit calls inline cleanly. The
+generated code is competitive with hand-rolled switches.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Visit returning different types.} Each branch must
+return a type the others convert to. If one returns
+\code{int} and another \code{string}, the visit does not
+compile. Wrap in \code{std::variant} or a base type.
+\end{warning}
+
+\begin{warning}
+\textbf{Recursive visit.} Visiting from inside another visit
+can be confusing. Capture the inner type clearly; write each
+visit as its own named function and call them in sequence rather
+than nesting visits at the call site.
+\end{warning}
+
+\begin{warning}
+\textbf{Sharing state across visits.} The visitor lambda
+captures by reference; the closure lives as long as the visit
+returns. Do not store the visit-returned value beyond the
+visitor's scope without copying.
+\end{warning}
+
+\begin{warning}
+\textbf{Performance pessimism for small variants.}
+\code{std::variant<int, double>} adds a byte. For tight inner
+loops over millions of items, that byte can matter. Profile;
+do not assume.
+\end{warning}
+
+\section{What the runtime emits per frame}
+
+A typical \maya{} update loop has ten to twenty visit calls per
+frame (one for the main message, one for each Cmd
+interpretation, several for tree walks). The total dispatch
+cost is microseconds, dominated by the actual work in each
+branch, not by the dispatch itself.
+
+If you ever profile a frame and the dispatch shows up high in
+the flamegraph, the message variant is probably too large
+(hundreds of alternatives) or the visit is in a tight loop
+where it should not be. Move the visit outside the loop.
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a small program with a 5-alternative variant and
+    a \code{std::visit}. Compile with optimisation; inspect the
+    assembly. Identify the jump table.
+  \item Add a sixth alternative. Confirm the compiler errors
+    on the visitor.
+  \item Replace the visit with a \code{switch} on
+    \code{msg.index()}. Confirm the assembly is identical.
+\end{enumerate}
+
+\begin{recap}
+Sum types plus visit are the dispatch mechanism throughout
+\maya{}. They compile to jump tables, inline cleanly, avoid
+heap allocations, and enforce exhaustiveness. Virtual functions
+and \code{std::function} have higher overhead and weaker static
+guarantees. The choice is not stylistic; it is mechanical.
+\end{recap}

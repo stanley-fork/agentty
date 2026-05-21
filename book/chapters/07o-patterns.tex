@@ -1,0 +1,382 @@
+\chapter{Patterns: the architecture in practice}
+\label{ch:patterns}
+
+\begin{aside}
+The architecture chapters showed primitives. Real apps combine
+the primitives in patterns that recur across many projects. This
+chapter is a tour: ten common patterns, each with the
+architectural shape, the trade-offs, and the code skeleton.
+\end{aside}
+
+\section{Pattern 1: master-detail}
+
+\textbf{Shape.} A list on the left, a detail view on the right.
+Selecting an item updates the detail.
+
+\textbf{Model.}
+
+\begin{lstlisting}
+struct Model {
+    std::vector<Item> items;
+    int selected = 0;
+};
+\end{lstlisting}
+
+\textbf{View.}
+
+\begin{lstlisting}
+Element view(const Model& m) {
+    auto list = render_list(m.items, m.selected);
+    auto detail = m.items.empty()
+        ? text(\"(no items)\") | Dim
+        : render_detail(m.items[m.selected]);
+    return h(list | width<30>, detail | grow<1>);
+}
+\end{lstlisting}
+
+\textbf{Update.} Arrow keys move \code{selected}; Enter triggers
+a detail-specific action.
+
+\textbf{Trade-offs.}
+
+\begin{itemize}[leftmargin=*]
+  \item Simple to write; works for small datasets.
+  \item Re-renders the detail on every selection change; OK as
+    long as detail rendering is cheap.
+\end{itemize}
+
+\section{Pattern 2: tabbed pages}
+
+\textbf{Shape.} Several distinct pages, switched by Tab or by
+keystrokes. Each page has its own state.
+
+\textbf{Model.}
+
+\begin{lstlisting}
+struct Model {
+    int active_tab = 0;
+    HomePage home;
+    InboxPage inbox;
+    SettingsPage settings;
+};
+\end{lstlisting}
+
+\textbf{View.}
+
+\begin{lstlisting}
+Element view(const Model& m) {
+    return v(
+        render_tab_bar(m.active_tab),
+        switch_tab(m.active_tab,
+            home_view(m.home),
+            inbox_view(m.inbox),
+            settings_view(m.settings))
+    );
+}
+\end{lstlisting}
+
+\textbf{Trade-offs.}
+
+\begin{itemize}[leftmargin=*]
+  \item Each page keeps state across tab switches.
+  \item Memory cost: all pages' models live even when not
+    visible.
+  \item Pages can be tested independently.
+\end{itemize}
+
+\section{Pattern 3: wizard / stepper}
+
+\textbf{Shape.} Several screens in sequence; each collects input,
+the final screen submits.
+
+\textbf{Model.}
+
+\begin{lstlisting}
+enum class Step { Welcome, Name, Email, Confirm, Done };
+struct Model {
+    Step step = Step::Welcome;
+    std::string name, email;
+};
+\end{lstlisting}
+
+\textbf{Update.} Next and Back transitions step the enum;
+typing fills fields.
+
+\textbf{Trade-offs.}
+
+\begin{itemize}[leftmargin=*]
+  \item Clean linear flow; easy to test (one path per step).
+  \item Adding a step is local: enum value, view branch, update
+    branch.
+\end{itemize}
+
+\section{Pattern 4: undo/redo}
+
+\textbf{Shape.} Every state-changing message creates a new model
+that is pushed onto an undo stack.
+
+\textbf{Model.}
+
+\begin{lstlisting}
+struct Doc { /* the actual document state */ };
+struct Model {
+    Doc current;
+    std::vector<Doc> undo_stack;
+    std::vector<Doc> redo_stack;
+};
+\end{lstlisting}
+
+\textbf{Update.} Each mutation pushes the previous \code{current}
+to \code{undo\_stack}; an \code{Undo} message pops back, pushing
+the now-current state to \code{redo\_stack}.
+
+\textbf{Trade-offs.}
+
+\begin{itemize}[leftmargin=*]
+  \item Memory grows with the undo history. Cap the stack length
+    to bound memory.
+  \item Trivially correct because models are values --- no
+    fiddly ``do I have a deep copy?''.
+\end{itemize}
+
+\section{Pattern 5: incremental search}
+
+\textbf{Shape.} A search box and a filtered result list; results
+update on every keystroke without blocking.
+
+\textbf{Model.}
+
+\begin{lstlisting}
+struct Model {
+    std::string query;
+    std::vector<Item> all_items;
+    std::vector<size_t> filtered_indices;
+    int debounce_token = 0;
+};
+\end{lstlisting}
+
+\textbf{Update.} A keystroke updates \code{query} and issues
+\code{Cmd::after(50ms, Filter\{debounce++\})}. The filter, when
+it fires, checks whether \code{debounce\_token} matches; if not,
+the keystroke fired again and the filter is stale.
+
+\textbf{Trade-offs.}
+
+\begin{itemize}[leftmargin=*]
+  \item Debouncing avoids re-filtering on every key.
+  \item Stale-result rejection avoids race-y UI flashes.
+  \item More complex \code{update} logic; tests are essential.
+\end{itemize}
+
+\section{Pattern 6: side-effecting buttons}
+
+\textbf{Shape.} A button that, when clicked, performs an effect
+(network call, file write) and updates UI based on the result.
+
+\textbf{Model.}
+
+\begin{lstlisting}
+enum class Status { Idle, Pending, Ok, Failed };
+struct Model { Status status = Status::Idle; std::string error; };
+\end{lstlisting}
+
+\textbf{Update.} On click, set status to \code{Pending}, issue
+\code{Cmd::task}. On result, transition to \code{Ok} or
+\code{Failed}.
+
+\textbf{View.} The button shows ``Save'', ``Saving\ldots'',
+``Saved!'', or ``Failed (retry)'' depending on status.
+
+\textbf{Trade-offs.}
+
+\begin{itemize}[leftmargin=*]
+  \item User sees feedback immediately.
+  \item No blocking on the main thread.
+  \item Status enum makes the four states explicit; no
+    \code{is\_loading} + \code{is\_error} bool combinations.
+\end{itemize}
+
+\section{Pattern 7: long-running stream}
+
+\textbf{Shape.} A widget consumes a stream of events (log lines,
+tokens from an LLM, network packets) and appends them to a
+display.
+
+\textbf{Model.}
+
+\begin{lstlisting}
+struct Model {
+    std::vector<std::string> lines;
+    ScrollState scroll;
+    bool autoscroll = true;
+};
+\end{lstlisting}
+
+\textbf{Update.} Each incoming line via \code{Cmd::task}
+(reading from a pipe) is appended. If \code{autoscroll}, adjust
+the offset to follow.
+
+\textbf{Trade-offs.}
+
+\begin{itemize}[leftmargin=*]
+  \item Use virtualisation (Chapter~\ref{ch:scroll}) for
+    large logs.
+  \item Cap the vector length to bound memory.
+  \item Autoscroll-while-following is a UX pattern users love;
+    pair with ``stop following on manual scroll''.
+\end{itemize}
+
+\section{Pattern 8: keyboard-driven palette}
+
+\textbf{Shape.} A command palette (Ctrl-P style): a text field, a
+filtered list, Enter to execute the selected command.
+
+\textbf{Model.}
+
+\begin{lstlisting}
+struct Command { std::string label; std::function<Cmd<Msg>()> action; };
+struct Model {
+    bool open = false;
+    std::string query;
+    int selected = 0;
+    std::vector<Command> commands;
+};
+\end{lstlisting}
+
+\textbf{Update.} Open/close on Ctrl-P; arrow keys move
+selection; Enter dispatches the command's action.
+
+\textbf{Trade-offs.}
+
+\begin{itemize}[leftmargin=*]
+  \item Commands are first-class values; new ones add as a
+    push\_back.
+  \item Filter is a simple substring match; full-text fuzzy
+    match is a deeper rabbit hole.
+\end{itemize}
+
+\section{Pattern 9: split-pane editor}
+
+\textbf{Shape.} Two editors side by side; focus moves between
+them with a hotkey.
+
+\textbf{Model.}
+
+\begin{lstlisting}
+struct Model {
+    textarea::Model left;
+    textarea::Model right;
+    bool focus_right = false;
+};
+\end{lstlisting}
+
+\textbf{Update.} Keystrokes route to the focused editor; Tab
+toggles focus.
+
+\textbf{Trade-offs.}
+
+\begin{itemize}[leftmargin=*]
+  \item Two editors compose by message-tagging
+    (\code{ToLeft}/\code{ToRight}).
+  \item Resizing splits the width evenly; flex handles it.
+\end{itemize}
+
+\section{Pattern 10: themed multi-screen app}
+
+\textbf{Shape.} A full app combining several of the patterns
+above: tabs at the top, a sidebar, a main area with master-
+detail, a status bar, a palette overlay.
+
+\textbf{Composition.}
+
+\begin{lstlisting}
+struct App {
+    struct Model {
+        Theme theme;
+        int active_tab;
+        SidebarModel sidebar;
+        MasterDetailModel main;
+        StatusModel status;
+        std::optional<PaletteModel> palette;
+    };
+    // ... Msg with one alt per subsystem
+    // ... update routes by alt
+    // ... view composes the layout
+    // ... subscribe collects every subsystem's subs
+};
+\end{lstlisting}
+
+\textbf{Trade-offs.} The model is a struct of structs; the message
+is a variant of variants; the update is a visitor that routes
+to subsystems. The complexity is real but bounded: each
+subsystem stays small and testable, and the wiring is
+mechanical.
+
+\section{When patterns conflict}
+
+Two patterns might pull in opposite directions. Examples:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Undo + long-running stream.} A growing log
+    polluting the undo stack is a memory leak. Skip
+    appended-log messages from the undo recording.
+  \item \textbf{Tabs + palette.} The palette is a modal; while
+    open, tab switching is disabled. Handle modality at the
+    top-level update.
+  \item \textbf{Wizard + autosave.} A wizard step that goes
+    back must restore the prior step's input. Save on every
+    transition.
+\end{itemize}
+
+Patterns are tools, not rules. Read the situation; pick the
+right combination.
+
+\section{Anti-patterns}
+
+\begin{warning}
+\textbf{God model.} A single \code{Model} with hundreds of
+fields. Symptom: \code{update} grows to thousands of lines.
+Refactor by splitting into sub-models, one per concern.
+\end{warning}
+
+\begin{warning}
+\textbf{Message explosion.} A \code{Msg} variant with hundreds
+of alternatives. Symptom: every keystroke routes through a
+massive visitor. Use sub-component patterns to push detail into
+sub-modules.
+\end{warning}
+
+\begin{warning}
+\textbf{Imperative inside view.} \code{view} calls a function
+that performs file I/O. Symptom: the program hangs on render.
+Move the I/O into a \code{Cmd::task}.
+\end{warning}
+
+\begin{warning}
+\textbf{Subscribe of doom.} A monolithic \code{subscribe} with
+dozens of always-on subscriptions. Symptom: removing one event
+source causes mysterious freezes. Make subscriptions conditional
+on relevant model state.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Pick one of the ten patterns and build a small app
+    around it.
+  \item Combine two patterns (tabs + master-detail) in one
+    app. Note where the patterns share state and where they
+    are independent.
+  \item Take a god-model from an old codebase and refactor it
+    into three sub-models. The new \code{update} routes by
+    message variant.
+\end{enumerate}
+
+\begin{recap}
+Patterns are recurring combinations of the architectural
+primitives. Master-detail, tabbed pages, wizards, undo, search,
+side-effecting buttons, log streams, palettes, split panes,
+multi-screen apps --- each combines a model shape, an update
+strategy, and a view. Pick patterns intentionally; combine them
+carefully; avoid the anti-patterns.
+\end{recap}

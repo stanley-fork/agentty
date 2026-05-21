@@ -1,0 +1,299 @@
+\chapter{Performance, profiling, and the budget}
+\label{ch:perf}
+
+\begin{aside}
+A TUI feels good when frames land in time. A 60Hz cycle gives
+16.67ms; a 30Hz cycle 33.3ms. Most of that budget is the
+terminal's own latency. \maya{}'s work fits in microseconds, but
+only if you stay in the lanes the architecture invites. This
+chapter is the budget: where the cycles go, how to measure,
+how to fix what you find.
+\end{aside}
+
+\section{The frame budget}
+
+A modern terminal commits a frame when:
+
+\begin{enumerate}[leftmargin=*]
+  \item Your program writes bytes to stdout.
+  \item The terminal's render loop wakes (typically every
+    frame).
+  \item The GPU draws.
+\end{enumerate}
+
+The terminal contributes most of the latency: 5--15 ms is
+normal. \maya{}'s pipeline runs in well under 1 ms. If your
+frame total exceeds 16 ms, the work is almost certainly yours
+(in \code{update} or \code{view}), not the library's.
+
+\subsection*{Where the budget breaks down}
+
+For a typical UI:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{view}: 100--500 \textmu s.
+  \item Layout: 20--100 \textmu s.
+  \item Paint: 5--50 \textmu s.
+  \item Diff: 1--10 \textmu s.
+  \item Serialise: 5--50 \textmu s.
+  \item Write to stdout: 50--200 \textmu s.
+  \item Terminal latency: 5--15 ms.
+\end{itemize}
+
+Your work is the 100--500 \textmu s in \code{view}. The rest is
+fixed cost.
+
+\begin{idea}
+The biggest single optimisation for most apps is moving
+expensive computation out of \code{view} and into \code{update}
+(cached in the model). \code{view} runs every frame; \code{update}
+runs once per relevant message.
+\end{idea}
+
+\section{Profiling the right way}
+
+Three measurement layers, from coarse to fine.
+
+\subsection*{The pipeline stats}
+
+\maya{}'s pipeline exposes per-frame timings via the \code{Stats}
+struct. Enable the overlay:
+
+\begin{lstlisting}
+maya::config().show_render_stats = true;
+\end{lstlisting}
+
+A small widget appears in a corner with \code{view\_time},
+\code{layout\_time}, \code{diff\_time}, \code{serialize\_time},
+and frame total. Watch which number changes when you do
+something.
+
+\subsection*{Sampling profiler}
+
+For deeper analysis, run under \code{perf} (Linux) or
+\code{Instruments} (macOS):
+
+\begin{lstlisting}
+perf record -g ./my_maya_app
+perf report
+\end{lstlisting}
+
+The flamegraph reveals which functions consume CPU. \code{view}
+calls dominate; below them, the cost lives in your business
+logic or in \code{element::build}.
+
+\subsection*{Per-frame log}
+
+For occasional spikes, log per-frame timings to a file:
+
+\begin{lstlisting}
+maya::config().log_frame_times = \"/tmp/frames.log\";
+\end{lstlisting}
+
+The log writes one line per frame with the timings. Grep for
+outliers; correlate with what the user was doing.
+
+\section{Optimisation playbook}
+
+When you find a slow frame, the playbook in order:
+
+\subsection*{1. Move work to update}
+
+If \code{view} parses a string, formats a number, or walks a
+big list, do it once in \code{update} and cache the result:
+
+\begin{lstlisting}
+// Bad: parses every frame.
+Element view(const Model& m) {
+    auto parsed = parse_huge_thing(m.input);
+    return render(parsed);
+}
+
+// Good: cached in the model.
+struct Model {
+    std::string input;
+    ParsedThing cached;  // refreshed in update when input changes
+};
+\end{lstlisting}
+
+\subsection*{2. Virtualise long lists}
+
+If \code{view} renders thousands of items, only render the
+visible slice (Chapter~\ref{ch:scroll}). The layout pass scales
+with the rendered count, not the source size.
+
+\subsection*{3. Use compile-time DSL where possible}
+
+A static structure built at compile time has fewer allocations
+than the same structure built at runtime. For panels with fixed
+shape, the DSL pays for itself.
+
+\subsection*{4. Reuse buffers}
+
+If a widget allocates a large vector every frame, capture the
+vector in the widget's state and reset (\code{vec.clear()})
+instead of reconstructing. Capacity persists; allocations
+disappear.
+
+\subsection*{5. Reduce allocations in update}
+
+Update is hot. Every \code{std::string} concatenation allocates;
+every \code{std::vector} push that exceeds capacity allocates.
+Profile, then move construction outside hot loops.
+
+\subsection*{6. Cache derived state}
+
+Computed values that depend on slow inputs deserve a cache.
+\code{Signal} + \code{Computed} (Chapter~\ref{ch:reactivity-preview})
+gives you automatic recomputation only on change.
+
+\subsection*{7. Tune the cache fingerprint}
+
+If your tree is huge but mostly stable, the fingerprint walk is
+the bottleneck. Two options: split the tree into smaller
+sub-trees (each fingerprinted independently) or mark stable
+sub-trees as \emph{frozen} (skipped in the walk).
+
+\section{Memory budget}
+
+A \maya{} app's resident memory:
+
+\begin{itemize}[leftmargin=*]
+  \item Model: usually small (KB). Watch for large vectors
+    that grow unbounded (logs, history).
+  \item Element tree: KB to low MB. Freshly allocated each
+    frame; garbage-collected by RAII at frame end.
+  \item Canvas: width $\times$ height $\times$ cell\_size. For
+    80x24, that is 1920 cells $\times$ 8--16 bytes = a few KB
+    each (current + previous = two copies).
+  \item Style pool: a few KB.
+  \item Renderer buffers: KB.
+\end{itemize}
+
+A small \maya{} app sits at 5--20 MB resident, dominated by the
+binary itself. If you see hundreds of MB, look for unbounded
+vectors in the model.
+
+\subsection*{Allocations per frame}
+
+A well-tuned app makes a handful of allocations per frame:
+
+\begin{itemize}[leftmargin=*]
+  \item Element tree allocations: a vector per box,
+    \code{string\_view}s for literals.
+  \item Layout vector resize (cap reused).
+  \item Render buffer resize (cap reused).
+\end{itemize}
+
+\code{strace -c -e brk,mmap} on a running app shows the rate.
+If it climbs into the thousands per second, hunt the
+allocation sources.
+
+\section{Latency vs throughput}
+
+The pipeline optimises for \emph{latency} (frame-to-frame
+time), not throughput (frames per second). The trade-offs:
+
+\begin{itemize}[leftmargin=*]
+  \item Low-priority diff: skip if last frame was less than
+    16ms ago. Reduces CPU on busy apps; adds latency.
+  \item Triple buffering: render frame N+2 while frame N is on
+    the wire. Adds latency; increases throughput.
+\end{itemize}
+
+\maya{}'s defaults favour latency. If you have a soft-realtime
+requirement (audio visualiser, game), tune the renderer
+explicitly.
+
+\section{Common slowdowns}
+
+\subsection*{Reading large files in view}
+
+The classic. \code{view} opens a file, reads it, formats it,
+returns the element. Every frame. The file is re-read 60 times
+a second. Cache the contents in the model and refresh only when
+the file changes (use \code{Cmd::task} with a file-watch).
+
+\subsection*{Heavy regex in view}
+
+Regex compilation and matching are slow. Cache the compiled
+pattern; cache the match results.
+
+\subsection*{Recursive view functions}
+
+A \code{view} that calls itself deeply on a recursive data
+structure can blow stack and time. Convert to iterative;
+materialise levels separately.
+
+\subsection*{Mouse events firing on every move}
+
+\code{OnMouse} fires for every motion event, which can be
+thousands per second on a fast trackpad. Throttle the message
+delivery (\code{Sub::throttle(30ms, OnMouse)}) or filter at the
+handler.
+
+\subsection*{Style pool exhaustion}
+
+The style pool interns styles to small IDs. If you generate
+thousands of distinct styles (e.g. one per character of a
+gradient), the pool grows and dispatches slow down. Reuse a
+few common styles where possible.
+
+\section{When to give up tuning}
+
+If you have:
+
+\begin{itemize}[leftmargin=*]
+  \item Frame time under 5 ms.
+  \item No visible jank to the user.
+  \item No CPU usage during idle.
+\end{itemize}
+
+\ldots{} you are done. Further optimisation is anti-economic.
+
+\maya{}'s architecture lets you stop tuning earlier than other
+frameworks because the defaults are aggressive: cache
+fingerprints, SIMD diff, batched serialise. Profile only the
+remaining hot spots in your own code.
+
+\begin{aside}
+Donald Knuth's ``premature optimisation is the root of all evil''
+is often misquoted to argue against any optimisation. The full
+quote ends ``yet we should not pass up our opportunities in that
+critical 3\%''. Identify the 3\%; tune it; leave the rest.
+\end{aside}
+
+\section{Benchmarking widgets}
+
+For widgets you ship to others, include a benchmark:
+
+\begin{lstlisting}
+BENCHMARK(\"render textarea with 1000 lines\") {
+    Model m = make_model_with_lines(1000);
+    return view(m);
+}
+\end{lstlisting}
+
+The benchmark suite measures across compilers, terminal sizes,
+and content. Track regressions over time.
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Enable \code{show\_render\_stats} on a small app.
+    Note the per-stage timings. Identify which stage dominates.
+  \item Add a deliberately slow function to \code{view} (e.g.
+    \code{std::this\_thread::sleep\_for(10ms)}). Watch the
+    frame time rise.
+  \item Profile a real app under \code{perf}. Identify the top
+    three functions; fix the slowest one.
+\end{enumerate}
+
+\begin{recap}
+The pipeline runs in microseconds; user work is the variable
+cost. Move expensive computation from \code{view} to
+\code{update} with caching. Virtualise long lists. Reuse
+buffers. Avoid recomputing what has not changed. Memory budget
+is small. The defaults are aggressive; tune only the residual
+hot spots.
+\end{recap}

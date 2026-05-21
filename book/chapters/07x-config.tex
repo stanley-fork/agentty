@@ -1,0 +1,339 @@
+\chapter{Configuration and persistence}
+\label{ch:config}
+
+\begin{aside}
+Every non-trivial app reads configuration from somewhere ---
+defaults, environment variables, command-line flags, a config
+file, a database. Persisting state across runs follows the same
+pattern in reverse. \maya{} does not impose a config system, but
+the architecture invites a specific pattern: read at startup,
+hold in the model, never re-read inside the loop.
+\end{aside}
+
+\section{The startup pipeline}
+
+A typical \maya{} app does the following before \code{run}:
+
+\begin{enumerate}[leftmargin=*]
+  \item Parse command-line arguments.
+  \item Load the config file.
+  \item Read relevant environment variables.
+  \item Apply precedence: CLI overrides env overrides file
+    overrides defaults.
+  \item Construct the initial \code{Model} including the merged
+    config.
+  \item Hand the model to \code{run}.
+\end{enumerate}
+
+The startup pipeline is the only place that touches the
+filesystem for config. Inside the loop, the model carries
+everything.
+
+\subsection*{Why not reload on demand?}
+
+A frequent temptation: ``read the config file every few seconds
+so changes take effect''. The Elm-style approach: model the
+file as state, watch it with a \code{Cmd::task}, and turn
+changes into messages. The runtime is the same; the contract
+stays clean.
+
+\section{Defaults}
+
+A small struct with sensible defaults:
+
+\begin{lstlisting}
+struct Config {
+    bool   show_help      = true;
+    int    history_size   = 100;
+    Theme  theme          = themes::Dark();
+    std::string log_path  = \"~/.cache/myapp/log\";
+    std::chrono::milliseconds idle_timeout{5000};
+};
+
+constexpr Config default_config{};
+\end{lstlisting}
+
+The struct holds everything user-tunable. Designated init
+allows partial override:
+
+\begin{lstlisting}
+Config cfg{
+    .theme = themes::Light(),
+    .history_size = 500,
+};
+\end{lstlisting}
+
+Fields not mentioned retain their defaults.
+
+\section{Config files}
+
+\subsection*{Format}
+
+TOML, YAML, JSON, INI --- pick one. \maya{} examples use TOML
+because:
+
+\begin{itemize}[leftmargin=*]
+  \item Human-readable.
+  \item Strict parser available (\code{toml++}).
+  \item No indentation sensitivity (unlike YAML).
+  \item Comments allowed.
+\end{itemize}
+
+\subsection*{Loading}
+
+\begin{lstlisting}
+Expected<Config, std::string> load_config(std::string_view path) {
+    return file::read(path)
+        .transform_error([](auto& e) { return e.context; })
+        .and_then(parse_toml)
+        .transform(toml_to_config);
+}
+\end{lstlisting}
+
+A monadic chain (Chapter~\ref{ch:expected}): read, parse,
+convert. Each step can fail; the chain handles propagation.
+
+\subsection*{Default location}
+
+XDG conventions on Linux:
+
+\begin{lstlisting}
+std::string config_path() {
+    if (auto* x = std::getenv(\"XDG_CONFIG_HOME\")) {
+        return std::string{x} + \"/myapp/config.toml\";
+    }
+    return std::string{std::getenv(\"HOME\")}
+        + \"/.config/myapp/config.toml\";
+}
+\end{lstlisting}
+
+On macOS, \code{\$HOME/Library/Application Support/myapp/}; on
+Windows, \code{\%APPDATA\%\textbackslash myapp\textbackslash}.
+The platform abstraction layer (Chapter~\ref{ch:platform}) can
+provide the helper.
+
+\section{Environment variables}
+
+For machine-specific overrides, env vars are common:
+
+\begin{lstlisting}
+if (auto* t = std::getenv(\"MYAPP_THEME\")) {
+    cfg.theme = themes::by_name(t).value_or(cfg.theme);
+}
+if (auto* l = std::getenv(\"MYAPP_LOG\")) {
+    cfg.log_path = l;
+}
+\end{lstlisting}
+
+Convention: prefix env vars with your app name to avoid
+collisions.
+
+\subsection*{Standard variables to honour}
+
+A small list of variables most users expect:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{NO\_COLOR}: disable colour output.
+  \item \code{FORCE\_COLOR}: enable colour even on non-tty.
+  \item \code{COLORTERM}: terminal colour capabilities.
+  \item \code{TERM}: terminal type.
+  \item \code{HOME}, \code{XDG\_CONFIG\_HOME}, etc.: paths.
+  \item \code{LANG}, \code{LC\_*}: locale (affects width tables).
+\end{itemize}
+
+\section{Command-line flags}
+
+The simplest parser is hand-written; more elaborate apps use
+\code{argparse} or \code{cxxopts}:
+
+\begin{lstlisting}
+int main(int argc, char** argv) {
+    Config cfg = default_config;
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+        if (arg == \"--theme\" && i + 1 < argc) {
+            cfg.theme = themes::by_name(argv[++i]).value_or(cfg.theme);
+        } else if (arg == \"--help\") {
+            print_help();
+            return 0;
+        }
+    }
+    return maya::run<App>(cfg);
+}
+\end{lstlisting}
+
+For complex apps with subcommands, use a library. The patterns
+are the same.
+
+\section{Precedence}
+
+CLI overrides env overrides file overrides defaults. In code:
+
+\begin{lstlisting}
+Config build_config(int argc, char** argv) {
+    Config cfg = default_config;
+    if (auto file_cfg = load_config(config_path())) {
+        merge(cfg, file_cfg.value());
+    }
+    apply_env(cfg);
+    apply_cli(cfg, argc, argv);
+    return cfg;
+}
+\end{lstlisting}
+
+Each step layered on top. \code{merge} is field-by-field
+override; only fields explicitly set in the higher layer
+replace the lower layer.
+
+\section{Persisting state}
+
+The flip side of config: state that survives across runs.
+Examples:
+
+\begin{itemize}[leftmargin=*]
+  \item Window size (the app should reopen at the same size).
+  \item Last opened file.
+  \item Cursor position.
+  \item Command history.
+\end{itemize}
+
+The pattern:
+
+\begin{enumerate}[leftmargin=*]
+  \item On startup, load a state file (often JSON or binary).
+  \item Restore the state into the model.
+  \item On meaningful changes, write the state back (debounced
+    to avoid thrashing the filesystem).
+  \item On quit, write a final state.
+\end{enumerate}
+
+\subsection*{Write strategy: debounced}
+
+\begin{lstlisting}
+[&](StateChanged) {
+    m.dirty = true;
+    return std::pair{m, Cmd<Msg>::after(2s, FlushState{})};
+}
+
+[&](FlushState) {
+    if (!m.dirty) return std::pair{m, Cmd<Msg>{}};
+    m.dirty = false;
+    return std::pair{m, save_state_cmd(m.persistable_state())};
+}
+\end{lstlisting}
+
+A change sets a flag and schedules a flush. The flush, when it
+fires, checks the flag and writes. Multiple changes within the
+window collapse to one write.
+
+\subsection*{Write atomically}
+
+To avoid corrupted state files (if the app crashes mid-write):
+
+\begin{lstlisting}
+Expected<void, IoError> atomic_write(std::string_view path, std::string_view data) {
+    std::string tmp = std::string{path} + \".tmp\";
+    auto w = file::write(tmp, data);
+    if (!w) return std::unexpect, w.error();
+    return file::rename(tmp, path);
+}
+\end{lstlisting}
+
+Write to a temp file, then atomically rename. The rename is
+atomic on POSIX; on Win32 you need \code{ReplaceFileW}.
+
+\section{Schema migration}
+
+State files persist across versions. If you add a field or
+change a type, old state files must still load. Two strategies:
+
+\subsection*{Versioned schemas}
+
+\begin{lstlisting}
+struct StateV1 { int cursor; };
+struct StateV2 { int cursor; std::string filename; };
+
+StateV2 migrate(StateV1 s) {
+    return StateV2{.cursor = s.cursor, .filename = \"\"};
+}
+\end{lstlisting}
+
+Read the version field; pick the right struct; migrate forward.
+
+\subsection*{Tolerant readers}
+
+Each field is optional; missing fields use defaults:
+
+\begin{lstlisting}
+struct State {
+    int cursor = 0;
+    std::string filename = \"\";
+    // ... older versions had fewer fields
+};
+\end{lstlisting}
+
+The deserialiser accepts any TOML object and populates known
+fields. Unknown fields are ignored (or logged).
+
+\section{Secrets}
+
+Some config values are sensitive (API keys, tokens). The
+patterns:
+
+\begin{itemize}[leftmargin=*]
+  \item Read from a file that only the user can read
+    (mode 0600).
+  \item Read from a system keychain (libsecret, Keychain
+    Services).
+  \item Read from an environment variable that the user sets
+    in their shell config.
+\end{itemize}
+
+Do not write secrets to the state file. If the user wants to
+persist them, that is a separate, deliberate choice.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Reading config inside view or update.} The config
+should be loaded once at startup and stored in the model.
+Re-reading mid-loop is slow and racy.
+\end{warning}
+
+\begin{warning}
+\textbf{Tight coupling to file format.} If your model is a
+TOML-shaped struct, swapping to JSON requires changing the
+model. Keep the on-disk shape separate from the in-memory
+model.
+\end{warning}
+
+\begin{warning}
+\textbf{Saving on every keystroke.} The filesystem will hate
+you. Debounce; consider write barriers.
+\end{warning}
+
+\begin{warning}
+\textbf{Forgetting to validate.} A config file written by a
+human can contain garbage. Validate on load; reject with a
+clear error.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a small config struct with five fields. Load
+    defaults; override one from an env var; verify in the
+    model.
+  \item Add atomic writes for a state file. Force-kill the
+    app mid-write; verify the file is not corrupted.
+  \item Implement schema migration from a V1 state file to a
+    V2. Write a unit test for the migration.
+\end{enumerate}
+
+\begin{recap}
+Read config once at startup; carry it in the model; never re-
+read inside the loop. Files in TOML or JSON, environment
+variables for overrides, CLI flags for ad-hoc tweaks. Persist
+state debounced and atomically. Migrate schemas across
+versions. Secrets stay out of state files.
+\end{recap}

@@ -1,0 +1,352 @@
+\chapter{Glossary and reference}
+\label{ch:glossary}
+
+\begin{aside}
+Part II has introduced a lot of vocabulary. This chapter is a
+reference: every term in one place, with a one-paragraph
+explanation and a cross-reference back to its detailed chapter.
+Use it as a refresher before tackling Parts III and IV.
+\end{aside}
+
+\section{Architecture terms}
+
+\textbf{Element.} The unit of UI tree. A sum of
+\code{BoxElement}, \code{TextElement}, \code{ElementList}.
+Chapter~\ref{ch:elements}.
+
+\textbf{Model.} The application state. A struct holding every
+piece of state the app needs. Pure data; no pointers, no
+shared state. Chapter~\ref{ch:elm}.
+
+\textbf{Msg.} The alphabet of state transitions. A
+\code{std::variant} where each alternative is one kind of
+event the program responds to. Chapter~\ref{ch:elm}.
+
+\textbf{Cmd<Msg>.} A description of side effects. A sum type
+whose alternatives include \code{None}, \code{Quit},
+\code{Task}, \code{After}, etc. Interpreted by the runtime.
+Chapter~\ref{ch:elm}.
+
+\textbf{Sub<Msg>.} A description of event sources the program
+listens to. A sum type whose alternatives include \code{OnKey},
+\code{OnMouse}, \code{Every}, etc. Chapter~\ref{ch:elm}.
+
+\textbf{view.} A pure function from \code{Model} to
+\code{Element}. Called every frame. Chapter~\ref{ch:elm}.
+
+\textbf{update.} A pure function from
+$(\text{Model}, \text{Msg})$ to $(\text{Model}, \text{Cmd})$.
+Drives state transitions. Chapter~\ref{ch:elm}.
+
+\textbf{subscribe.} A pure function from \code{Model} to
+\code{Sub}. Declares which event sources are active.
+Chapter~\ref{ch:elm}.
+
+\textbf{init.} A pure function returning the initial
+\code{Model} and \code{Cmd}. Called once on startup.
+Chapter~\ref{ch:elm}.
+
+\textbf{Program.} A concept aggregating the four functions
+and their types. \code{maya::run} takes a \code{Program}.
+Chapter~\ref{ch:concepts}.
+
+\section{Rendering terms}
+
+\textbf{Pipeline.} The six-stage transformation from
+\code{Element} to ANSI bytes: view, layout, paint, diff,
+serialize, write. Chapter~\ref{ch:pipeline}.
+
+\textbf{Layout.} The phase that assigns each node a final
+\code{Rect}. Uses a flexbox-style algorithm with integer cells.
+Chapter~\ref{ch:layout}.
+
+\textbf{Canvas.} A flat grid of packed cells, sized to the
+terminal. Painted from the layout result. Chapter~\ref{ch:pipeline}.
+
+\textbf{Packed cell.} A 64-bit struct holding a codepoint, a
+style ID, and flags. Chapter~\ref{ch:pipeline}.
+
+\textbf{Diff.} The phase that compares the current canvas to
+the previous one and produces a per-row dirty range. SIMD-
+accelerated. Chapter~\ref{ch:pipeline}.
+
+\textbf{Serialize.} The phase that turns the diff into a
+minimal sequence of ANSI bytes: cursor moves, SGR sequences,
+cell writes. Chapter~\ref{ch:pipeline}.
+
+\textbf{Style pool.} An intern table mapping unique
+\code{Style} structs to small integer IDs. Used to keep packed
+cells small. Chapter~\ref{ch:pipeline}.
+
+\textbf{Cache fingerprint.} A 64-bit hash of the element
+tree. Equal fingerprints mean the renderer can skip the entire
+pipeline. Chapter~\ref{ch:pipeline}.
+
+\textbf{Force redraw.} A \code{Cmd} alternative that discards
+the cache and emits every cell on the next frame. Used after
+terminal disturbances. Chapter~\ref{ch:elm}.
+
+\section{DSL terms}
+
+\textbf{NTTP.} Non-Type Template Parameter. A value (not a
+type) that appears in a template parameter list. C++20
+relaxed the rules so structural types (\code{Str},
+\code{CTStyle}) can be NTTPs. Chapter~\ref{ch:dsl}.
+
+\textbf{consteval.} A function that must run at compile time.
+The compiler errors on runtime invocation. The DSL's pipe
+operators are typically \code{consteval}. Chapter~\ref{ch:constexpr-deep}.
+
+\textbf{constexpr.} A function that may run at compile time if
+its arguments are constant expressions. May also run at runtime.
+Chapter~\ref{ch:constexpr-deep}.
+
+\textbf{Str.} A structural type wrapping a fixed-size character
+array. Lets string literals appear as NTTPs.
+Chapter~\ref{ch:dsl}.
+
+\textbf{CTStyle.} A compile-time style struct holding boolean
+flags and colour fields. Forms the payload of \code{StyTag}.
+Chapter~\ref{ch:dsl}.
+
+\textbf{StyTag.} A wrapper template indexed by a \code{CTStyle}
+NTTP. Two \code{StyTag} values with the same \code{CTStyle}
+have the same type. Chapter~\ref{ch:dsl}.
+
+\textbf{TextNode.} A compile-time element wrapping a literal
+string and an optional style. Pipe operators on it remain
+compile-time. Chapter~\ref{ch:dsl}.
+
+\textbf{RuntimeTextNode.} The runtime counterpart of
+\code{TextNode}. Holds an owning string and style.
+Chapter~\ref{ch:dsl}.
+
+\textbf{BoxNode.} A compile-time element representing a box
+with children. Indexed by a \code{BoxCfg} NTTP.
+Chapter~\ref{ch:dsl}.
+
+\textbf{Type-state machine.} The pattern where the type of a
+DSL node encodes which operations are legal on it. The pipe
+overloads have \code{requires} clauses that enforce the
+transitions. Chapter~\ref{ch:dsl}.
+
+\textbf{Concept.} A named compile-time predicate on a type. Used
+to constrain template parameters. Chapter~\ref{ch:concepts}.
+
+\section{Effect and event terms}
+
+\textbf{Task.} A \code{Cmd} alternative that runs a callable on
+a worker thread; its return value becomes a message.
+Chapter~\ref{ch:elm}.
+
+\textbf{IsolatedTask.} Like \code{Task} but on a dedicated
+thread, not the pool. For long blocking work.
+Chapter~\ref{ch:elm}.
+
+\textbf{Batch.} A \code{Cmd} or \code{Sub} alternative that
+groups multiple effects or sources. Chapter~\ref{ch:elm}.
+
+\textbf{After.} A \code{Cmd} alternative that delivers a
+message after a duration. Used for debounce, retry backoff,
+toast expiry. Chapter~\ref{ch:elm}.
+
+\textbf{Every.} A \code{Sub} alternative that delivers a
+periodic message. Used for animations and polling.
+Chapter~\ref{ch:elm}.
+
+\textbf{AnimationFrame.} A \code{Sub} alternative that delivers
+a message after each render frame. Used for frame-synchronised
+animation. Chapter~\ref{ch:elm}.
+
+\textbf{OnKey, OnMouse, OnResize, OnPaste.} \code{Sub}
+alternatives for the various input events. Chapter~\ref{ch:elm}.
+
+\textbf{Cmd::map.} A function that lifts a
+\code{Cmd<ChildMsg>} into a \code{Cmd<ParentMsg>} via a
+mapping function. The mechanism for composing components.
+Chapter~\ref{ch:elm}.
+
+\section{Style and theme terms}
+
+\textbf{Style.} A struct holding fg, bg, attributes, and
+optional hyperlink. The per-cell colouring directive.
+Chapter~\ref{ch:style}.
+
+\textbf{Attribute.} A bitset of typographic flags (Bold, Dim,
+Italic, etc.). Combine with bitwise OR. Chapter~\ref{ch:style}.
+
+\textbf{Color.} A sum type representing default, Ansi16,
+Ansi256, or Rgb. Quantises if the terminal does not support
+the requested form. Chapter~\ref{ch:elements}.
+
+\textbf{Theme.} A palette plus metadata. Maps named roles to
+colours. Swappable at runtime. Chapter~\ref{ch:style}.
+
+\textbf{Palette.} An array of \code{Color} values indexed by
+\code{Role}. The application-level colour vocabulary.
+Chapter~\ref{ch:style}.
+
+\textbf{Role.} A named slot in the palette: Foreground,
+Background, Primary, Accent, Warning, etc. Decouples ``what
+the colour means'' from ``what the colour is''.
+Chapter~\ref{ch:style}.
+
+\section{Layout terms}
+
+\textbf{FlexStyle.} The layout parameters on a box: direction,
+justify, align, grow, shrink, basis, wrap, gap, padding,
+border. Chapter~\ref{ch:layout}.
+
+\textbf{Direction.} Row or Column. Determines main axis.
+Chapter~\ref{ch:layout}.
+
+\textbf{Justify.} Where children sit along the main axis:
+Start, End, Center, SpaceBetween, SpaceAround, SpaceEvenly.
+Chapter~\ref{ch:layout}.
+
+\textbf{Align.} Where children sit along the cross axis:
+Start, End, Center, Stretch, Baseline. Chapter~\ref{ch:layout}.
+
+\textbf{Grow.} A non-negative number; children with positive
+grow share extra space proportionally. Chapter~\ref{ch:layout}.
+
+\textbf{Shrink.} A non-negative number; children with positive
+shrink absorb deficit proportionally. Chapter~\ref{ch:layout}.
+
+\textbf{Basis.} The starting size before grow/shrink.
+Chapter~\ref{ch:layout}.
+
+\textbf{Wrap.} What to do when children overflow: NoWrap, Wrap,
+WrapReverse. Chapter~\ref{ch:layout}.
+
+\textbf{Gap.} Fixed cell spacing between children.
+Chapter~\ref{ch:layout}.
+
+\textbf{Padding.} Per-side integer cells, inside the box.
+Chapter~\ref{ch:layout}.
+
+\textbf{Border.} A decoration around a box; takes one cell per
+side. Chapter~\ref{ch:elements}.
+
+\section{Runtime terms}
+
+\textbf{Context.} A bundle of runtime resources (platform
+handles, config, caps, logger, stats) passed to subsystems.
+Chapter~\ref{ch:runtime}.
+
+\textbf{EventLoop.} The driver that waits for events and drives
+the pipeline. Chapter~\ref{ch:runtime}.
+
+\textbf{EventSource.} The platform abstraction for the
+underlying OS event mechanism (epoll, kqueue,
+WaitForMultipleObjects). Chapter~\ref{ch:platform}.
+
+\textbf{SubscriptionManager.} The component that diffs the
+declared subscription set against the active OS-level wires.
+Chapter~\ref{ch:runtime}.
+
+\textbf{Interpreter.} The component that walks
+\code{Cmd<Msg>} variants and performs the side effects.
+Chapter~\ref{ch:runtime}.
+
+\textbf{Renderer.} The component that runs the six-stage
+pipeline and writes to stdout. Chapter~\ref{ch:runtime}.
+
+\textbf{Wake fd.} A self-pipe used by worker threads to wake
+the main loop. Chapter~\ref{ch:platform}.
+
+\section{Reactivity terms}
+
+\textbf{Signal<T>.} A value that notifies subscribers when it
+changes. Chapter~\ref{ch:reactivity-preview}.
+
+\textbf{Computed<T>.} A derived signal whose value is a
+function of other signals. Recomputes on input change.
+Chapter~\ref{ch:reactivity-preview}.
+
+\textbf{Effect.} A callable that re-runs whenever any signal it
+reads changes. Chapter~\ref{ch:reactivity-preview}.
+
+\section{Other terms}
+
+\textbf{Expected<T, E>.} A value-typed sum of success and
+error. \maya{}'s value-typed error handling type.
+Chapter~\ref{ch:expected}.
+
+\textbf{IoError.} A struct describing an I/O failure: code,
+context, syscall name. The default error type for boundary
+operations. Chapter~\ref{ch:expected}.
+
+\textbf{Error boundary.} A wrapper that catches exceptions in
+\code{build}/\code{view} and renders a fallback element.
+Chapter~\ref{ch:errorboundary}.
+
+\textbf{FocusManager.} A small helper that tracks focus IDs
+and order. Stored in the model.
+Chapter~\ref{ch:focus}.
+
+\textbf{ScrollState.} A small struct (offset, viewport,
+total) representing scroll position. Used for virtualisation.
+Chapter~\ref{ch:scroll}.
+
+\textbf{GraphemeWalker.} An iterator over Unicode grapheme
+clusters. Cell-width-aware. Chapter~\ref{ch:text}.
+
+\textbf{Widget.} A reusable UI component. May be a pure
+renderer, a stateful component, or a reactive widget.
+Chapter~\ref{ch:widget-arch}.
+
+\textbf{Z-stack.} A composition mode where children render at
+the same position; the last one wins on conflict. Used for
+modals, overlays. Chapter~\ref{ch:end-to-end}.
+
+\textbf{Hot reload.} Restarting an app while preserving its
+model. Chapter~\ref{ch:lifecycle}.
+
+\textbf{NO\_COLOR.} An environment variable that, when set,
+asks programs to disable colour. \maya{} honours it via the
+monochrome theme. Chapter~\ref{ch:a11y}.
+
+\textbf{OSC 8.} The ANSI escape for clickable hyperlinks.
+\maya{}'s \code{TextElement::hyperlink} emits it.
+Chapter~\ref{ch:elements}.
+
+\textbf{Kitty Keyboard Protocol.} An extended keyboard reporting
+mode supported by modern terminals. Provides better key
+disambiguation. Foundations chapter (Part I).
+
+\textbf{Bracketed paste.} A terminal mode where pasted text is
+wrapped in escape sequences, distinguishable from typed input.
+Chapter~\ref{ch:elm}.
+
+\textbf{Inline mode.} A rendering mode where \maya{} draws to
+the existing terminal scrollback without taking over the screen.
+Treated fully in Chapter~\ref{ch:inline}.
+
+\section{Index of cross-references}
+
+Each chapter has a \code{\textbackslash label}; cross-references
+use \code{\textbackslash ref}. To find where a term is treated
+in depth, look up the term here and follow the chapter link.
+
+For online reading, the PDF is hyperlinked; clicking a chapter
+reference jumps to the target. For print reading, the page
+numbers in the TOC are the navigation tool.
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Pick five terms from this glossary you cannot define
+    from memory. Re-read the relevant chapter sections.
+  \item Map each term to its position in the architecture
+    diagram on page xxx (the architecture overview).
+  \item For each \code{Cmd} alternative listed in the glossary,
+    write the smallest possible app that uses it.
+\end{enumerate}
+
+\begin{recap}
+The glossary collects every term Part II introduced. Use it as
+a reference when reading later parts. Three sentences from the
+previous chapter summarise the architecture; this chapter is
+the vocabulary supporting those sentences.
+\end{recap}

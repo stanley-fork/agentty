@@ -1,0 +1,236 @@
+\chapter{The element identity story}
+\label{ch:identity}
+
+\begin{aside}
+Two element trees that look the same may or may not be the same.
+The renderer needs to know which: identical trees mean ``skip
+the work''; different trees mean ``diff and emit''. The story
+of how \maya{} establishes identity --- and why it matters ---
+is more subtle than ``the trees are equal''.
+\end{aside}
+
+\section{Three notions of identity}
+
+For an element tree, identity could mean:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Pointer identity.} Same address.
+  \item \textbf{Structural identity.} Same shape, same contents.
+  \item \textbf{Semantic identity.} Same shape, same contents,
+    same focus / cursor / scroll positions.
+\end{itemize}
+
+Different renderer stages care about different ones. The cache
+fingerprint cares about (2). The hit-tester cares about (1).
+The animation system cares about (3).
+
+\section{Pointer identity in the DSL}
+
+The DSL builds a fresh tree every frame. The root pointer
+changes; the children pointers change. Pointer identity is
+useless for cross-frame reasoning.
+
+If you need to keep state across frames keyed by ``the same
+button'', use a stable ID:
+
+\begin{lstlisting}
+struct Button {
+    int id;            // stable across frames
+    std::string label;
+};
+\end{lstlisting}
+
+The ID lives in your model. The element produced by rendering
+the button gets the ID as a property; the runtime uses it for
+focus, hit-test, animation state.
+
+\section{Structural identity: the cache fingerprint}
+
+The cache fingerprint (Chapter~\ref{ch:pipeline}) is structural
+identity. Two trees with identical contents produce identical
+fingerprints; two different trees produce different ones (with
+high probability).
+
+The fingerprint is computed by walking the tree and mixing each
+leaf's content into a hash:
+
+\begin{lstlisting}
+uint64_t fingerprint(const Element& e) {
+    XXH64State state;
+    walk(e, [&](const TextElement& t) {
+        XXH64_update(&state, t.text.data(), t.text.size());
+        XXH64_update(&state, &t.style, sizeof(t.style));
+    });
+    walk(e, [&](const BoxElement& b) {
+        XXH64_update(&state, &b.layout, sizeof(b.layout));
+        // children handled by recursion
+    });
+    return XXH64_digest(&state);
+}
+\end{lstlisting}
+
+The walk is depth-first, left-to-right. Two trees that differ
+only in child order produce different fingerprints.
+
+\subsection*{Collision probability}
+
+A 64-bit hash collides at roughly the square-root rate: two
+different trees out of $2^{32}$ are expected to share a
+fingerprint. For a \maya{} app that produces at most a few
+thousand distinct trees, the probability of a false ``no-change''
+verdict in any given session is negligible.
+
+If collision matters (e.g. you ship a long-running server with
+millions of users), use a 128-bit hash. \maya{}'s fingerprint
+is parameterised; switching is a one-line change.
+
+\section{Semantic identity: keys and reconciliation}
+
+When trees change, the renderer wants to preserve cursor
+positions, scroll offsets, animation states. Naively, ``the
+third child is now in position four'' would lose this state.
+
+The fix: attach \emph{keys} to children. A key is a stable
+identifier on an element that the reconciler uses to match
+across frames.
+
+\begin{lstlisting}
+v(
+    keyed(\"item-42\", render_item(items[42])),
+    keyed(\"item-43\", render_item(items[43])),
+    keyed(\"item-44\", render_item(items[44]))
+);
+\end{lstlisting}
+
+The reconciler matches by key, not position. Inserting a new
+item at the top does not shift the existing items' state.
+
+\subsection*{When keys matter most}
+
+\begin{itemize}[leftmargin=*]
+  \item Lists where items can reorder.
+  \item Lists with per-item animation state (slide-in,
+    fade-out).
+  \item Forms where input focus must follow a moving row.
+\end{itemize}
+
+For static lists, position-based reconciliation works fine.
+
+\section{Identity in the layout phase}
+
+Layout assigns each node a final rect. The rects are derived
+from the tree, not from any cross-frame identity. Two frames
+with the same tree produce the same rects.
+
+This is intentional: layout is a pure function. There is no
+``layout cache'' keyed by node identity. If you want the layout
+to be different from frame to frame, the tree must differ.
+
+\section{Identity in the canvas}
+
+The canvas is a flat grid of cells. Cells have no identity
+across frames; each frame produces a fresh canvas, and the diff
+compares them cell-by-cell.
+
+This means: cell-level animations (a single character pulsing)
+are tracked at the cell level, not the element level. The
+canvas does not know about elements.
+
+\section{Identity in the focus system}
+
+Focus is keyed by ID, not by element pointer. A focused button
+keeps focus across re-renders because its ID is stable. If you
+generate fresh IDs each frame, focus moves randomly --- the
+classic ``why is focus jumping?'' bug.
+
+\section{Identity in the signal system}
+
+Signals are objects with their own identity. Subscribing to a
+signal is keyed by the signal's address. A signal whose address
+changes across frames cannot be subscribed to reliably; keep
+signals in long-lived containers (the model, a long-lived
+struct).
+
+\section{When identity breaks down}
+
+A few patterns cause identity to misbehave:
+
+\subsection*{Anonymous lambdas as keys}
+
+\begin{lstlisting}
+auto button = [&] { return text(\"click\"); };
+// Each frame, button is a different lambda --- different type, different identity.
+\end{lstlisting}
+
+Capture the lambda's expression, not the lambda itself. Or
+better, write a function.
+
+\subsection*{Index-based keys for reorderable lists}
+
+\begin{lstlisting}
+for (int i = 0; i < items.size(); ++i) {
+    rows.push_back(keyed(std::to_string(i), render(items[i])));
+}
+\end{lstlisting}
+
+When an item is inserted at the front, every key shifts. Use the
+item's own stable ID, not the position.
+
+\subsection*{Mutable state in element fields}
+
+If an element carries mutable state via a captured reference,
+the fingerprint may not detect changes (the data the reference
+points to is not part of the element's bytes). Either include
+the data by value in the element or mark the element as
+``do not cache''.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Forgetting keys in reorderable lists.} Symptoms:
+focus jumps to a different row, animation restarts, scroll
+position drifts. Fix: add keys.
+\end{warning}
+
+\begin{warning}
+\textbf{Keys that are not unique.} Two children with the same
+key under one parent break the reconciler. Use IDs from
+your model.
+\end{warning}
+
+\begin{warning}
+\textbf{Cache fingerprint false negatives.} If your tree
+references external mutable state, the fingerprint may not
+change when the rendered output should. Make the data part
+of the model, not external.
+\end{warning}
+
+\begin{warning}
+\textbf{Cache fingerprint false positives.} If two visually
+distinct trees somehow produce the same fingerprint
+(collision), the renderer skips a real update. Vanishingly
+rare with 64-bit hashes for typical app sizes; switch to
+128-bit if you ship long-running services.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a list of three items. Add a keyed item at the
+    top. Confirm the bottom two items keep their state (focus,
+    scroll).
+  \item Replace the keys with the position index. Add another
+    item at the top. Observe the state drift.
+  \item Compute the fingerprint of a tree by hand (small one).
+    Confirm two different trees yield different fingerprints.
+\end{enumerate}
+
+\begin{recap}
+Identity in \maya{} has three notions: pointer (per frame),
+structural (cross-frame, by content hash), and semantic
+(cross-frame, by key). The renderer uses each appropriately.
+Keys preserve focus, scroll, and animation state across
+re-renders. The fingerprint enables ``skip everything'' on no
+change. Mistakes in identity usually surface as visible state
+loss.
+\end{recap}

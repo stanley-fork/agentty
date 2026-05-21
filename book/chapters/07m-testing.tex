@@ -1,0 +1,366 @@
+\chapter{Testing maya applications}
+\label{ch:testing}
+
+\begin{aside}
+A library architecture is only worth the cost it imposes if the
+benefits show up in tests. \maya{}'s purity discipline pays off
+here: most of an app is testable without a terminal, a renderer,
+or even a runtime. This chapter is a playbook of testing
+patterns that work with the architecture.
+\end{aside}
+
+\section{What is and is not testable directly}
+
+\code{update} is a pure function. So is \code{view}. So is the
+fingerprint computation, the layout pass, and the diff. These
+are testable with plain function calls and assertions; no setup.
+
+The things that are \emph{not} directly testable are anything
+that touches the OS:
+
+\begin{itemize}[leftmargin=*]
+  \item The event loop blocking on epoll.
+  \item The renderer writing bytes to a terminal.
+  \item Tasks spawning worker threads.
+  \item Signals delivered to signalfd.
+\end{itemize}
+
+For these, you mock the boundary. \maya{} ships a test harness
+that wraps the runtime with a controllable event source and
+captured-byte renderer.
+
+\section{Unit testing update}
+
+The simplest test pattern:
+
+\begin{lstlisting}
+TEST_CASE(\"counter increments\") {
+    auto m0 = Counter::init().first;
+    auto [m1, cmd] = Counter::update(m0, Counter::Inc{});
+    REQUIRE(m1.count == 1);
+    REQUIRE(std::holds_alternative<None>(cmd.v));
+}
+\end{lstlisting}
+
+Direct function call. No runtime, no terminal, no setup. The
+test is the specification.
+
+\subsection*{Testing a sequence}
+
+A useful helper:
+
+\begin{lstlisting}
+template <Program P>
+auto fold(std::initializer_list<typename P::Msg> msgs) {
+    auto m = P::init().first;
+    std::vector<Cmd<typename P::Msg>> cmds;
+    for (auto& msg : msgs) {
+        auto [m2, c] = P::update(m, msg);
+        m = std::move(m2);
+        cmds.push_back(c);
+    }
+    return std::pair{std::move(m), std::move(cmds)};
+}
+
+TEST_CASE(\"three increments and a decrement\") {
+    auto [m, _] = fold<Counter>({
+        Counter::Inc{}, Counter::Inc{}, Counter::Inc{},
+        Counter::Dec{}
+    });
+    REQUIRE(m.count == 2);
+}
+\end{lstlisting}
+
+The fold is the playback. The final model is the assertion target.
+
+\subsection*{Testing emitted commands}
+
+When \code{update} returns a non-trivial \code{Cmd}, assert
+against the variant:
+
+\begin{lstlisting}
+TEST_CASE(\"save schedules a clipboard write\") {
+    auto [m, cmd] = MyApp::update(
+        MyApp::Model{.body = \"hello\"}, MyApp::Save{});
+    auto* wc = std::get_if<WriteClipboard<MyApp::Msg>>(&cmd.v);
+    REQUIRE(wc != nullptr);
+    REQUIRE(wc->text == \"hello\");
+}
+\end{lstlisting}
+
+\code{std::get\_if} returns a pointer or null; testing for null
+is the cleanest pattern.
+
+\section{Testing view}
+
+\code{view} returns an \code{Element}. You can assert against
+its structure with a visitor:
+
+\begin{lstlisting}
+TEST_CASE(\"counter view contains the count\") {
+    auto e = Counter::view(Counter::Model{.count = 42});
+    bool found = false;
+    walk(e, [&](const TextElement& t) {
+        auto s = text_view(t);
+        if (s.find(\"42\") != std::string_view::npos) found = true;
+    });
+    REQUIRE(found);
+}
+\end{lstlisting}
+
+\code{walk} is a tree-walker helper. You assert on the presence
+or absence of text, not on the exact rendering. The exact bytes
+depend on the terminal capabilities.
+
+\subsection*{Snapshot tests}
+
+For UIs that are mostly stable, snapshot tests work well:
+
+\begin{lstlisting}
+TEST_CASE(\"counter view snapshot\") {
+    auto e = Counter::view(Counter::Model{.count = 42});
+    auto dump = dump_element(e);
+    REQUIRE(dump == load_snapshot(\"counter_view_42.txt\"));
+}
+\end{lstlisting}
+
+\code{dump\_element} produces a textual representation; the
+snapshot file is checked into source control. Differences are
+visible in code review.
+
+The risk: snapshot tests catch every change, including
+intentional ones. Update them deliberately, not reflexively.
+
+\section{Property tests}
+
+Pure functions are gold for property-based testing:
+
+\begin{lstlisting}
+PROPERTY(\"increment then decrement is identity\", Counter::Model m) {
+    auto [m1, _] = Counter::update(m, Counter::Inc{});
+    auto [m2, __] = Counter::update(m1, Counter::Dec{});
+    REQUIRE(m2.count == m.count);
+}
+
+PROPERTY(\"any sequence preserves count >= 0\", std::vector<Counter::Msg> seq) {
+    auto m = Counter::init().first;
+    for (auto& msg : seq) {
+        auto [m2, _] = Counter::update(m, msg);
+        m = std::move(m2);
+    }
+    REQUIRE(m.count >= 0);
+}
+\end{lstlisting}
+
+The framework (rapidcheck, Catch2 generators) supplies the
+inputs. Counterexamples are minimised automatically. Bugs that
+would never appear in hand-written tests show up.
+
+\subsection*{Generating Msg variants}
+
+For a \code{Msg = std::variant<\ldots>}, the generator needs to
+sample each alternative. Custom generators are straightforward:
+
+\begin{lstlisting}
+template <>
+struct Arbitrary<Counter::Msg> {
+    static Gen<Counter::Msg> arbitrary() {
+        return gen::oneOf<Counter::Msg>(
+            gen::just(Counter::Inc{}),
+            gen::just(Counter::Dec{}),
+            gen::just(Counter::Quit{})
+        );
+    }
+};
+\end{lstlisting}
+
+For variants with payload, generate the payload with
+\code{gen::build}.
+
+\section{Testing the layout phase}
+
+The layout pass is a pure function from
+\code{(Element, Size)} to a layout tree:
+
+\begin{lstlisting}
+TEST_CASE(\"flex row distributes width\") {
+    auto e = h(
+        text(\"abc\") | grow<1>,
+        text(\"def\") | grow<2>
+    );
+    auto layout = compute_layout(e, Size{30, 1});
+    REQUIRE(rect_of_child(layout, 0).w == 10);
+    REQUIRE(rect_of_child(layout, 1).w == 20);
+}
+\end{lstlisting}
+
+The layout helper exposes the post-layout rects so you can
+assert against them.
+
+\section{Testing the diff and serialise stages}
+
+These are pure too, but assertions become byte-counting:
+
+\begin{lstlisting}
+TEST_CASE(\"changing one cell emits a minimal diff\") {
+    Canvas a = canvas_of(\"hello world\");
+    Canvas b = canvas_of(\"hello WORLD\");
+    auto diff = compute_diff(a, b);
+    auto bytes = serialise(diff);
+    REQUIRE(bytes.size() < 30);  // cursor move + 5 cells + reset
+}
+\end{lstlisting}
+
+The exact byte count depends on the serialiser strategy; the
+contract is ``less than full redraw''.
+
+\section{End-to-end with a fake terminal}
+
+For tests that exercise the runtime end-to-end:
+
+\begin{lstlisting}
+TEST_CASE(\"app handles quit message\") {
+    test::FakeTerminal term;
+    test::EventQueue events;
+    events.push(Event::KeyPress{'q'});
+
+    auto rc = test::run<Counter>(term, events);
+    REQUIRE(rc == 0);
+    REQUIRE(term.last_frame_contains(\"Count: 0\"));
+}
+\end{lstlisting}
+
+The fake terminal records every byte written. The event queue
+delivers events in order. The test runner exits when the program
+returns. The terminal's \code{last\_frame\_contains} is a
+helper for fuzzy assertions.
+
+\subsection*{Time control}
+
+Real-time-dependent tests use a virtual clock:
+
+\begin{lstlisting}
+test::FakeClock clock;
+events.push_at(clock.now() + 1s, Event::KeyPress{'a'});
+
+auto rc = test::run<MyApp>(term, events, clock);
+\end{lstlisting}
+
+The virtual clock advances only when the event queue asks for
+a wait. Tests that need to verify ``300ms later, the toast
+expired'' run instantly.
+
+\section{Testing animation}
+
+Animation tests use \code{AnimationFrame} subscriptions and
+the virtual clock:
+
+\begin{lstlisting}
+TEST_CASE(\"spinner advances each frame\") {
+    test::FakeTerminal term;
+    test::EventQueue events;
+    test::FakeClock clock;
+
+    // Advance 10 frames.
+    for (int i = 0; i < 10; ++i) {
+        events.push_animation_frame();
+    }
+
+    test::run<App>(term, events, clock, /*max_frames=*/10);
+    REQUIRE(term.frame_count() == 10);
+    // Each frame should show a different spinner glyph.
+}
+\end{lstlisting}
+
+The \code{max\_frames} parameter prevents infinite loops in
+tests that would otherwise run forever.
+
+\section{Testing concurrency}
+
+\code{Cmd::task} runs on a thread. To test deterministically,
+use a synchronous task pool:
+
+\begin{lstlisting}
+auto ctx = test::Context{.task_pool = test::SyncTaskPool{}};
+\end{lstlisting}
+
+Synchronous tasks run inline on the main thread; the assertion
+about their result happens after the dispatch.
+
+\subsection*{Testing race conditions}
+
+Race-condition tests are the hardest. \maya{} ships a
+\code{ThreadSanitizer}-aware build mode that flags races at
+runtime; pair it with the test suite by running tests with
+\code{-fsanitize=thread}.
+
+\begin{warning}
+Race tests are necessarily probabilistic. A test that passes
+once does not prove the absence of races; it only proves the
+race did not happen on that run. Loop the test a few thousand
+times for confidence.
+\end{warning}
+
+\section{Coverage and confidence}
+
+For a \maya{} app, aim for:
+
+\begin{itemize}[leftmargin=*]
+  \item 100\% statement coverage on \code{update}.
+  \item Property tests for any invariant the model maintains.
+  \item A handful of view snapshot tests for visual regressions.
+  \item One or two end-to-end tests per major user flow.
+\end{itemize}
+
+The first two are cheap because \code{update} is pure. The last
+two are the expensive ones; budget them deliberately.
+
+\section{Pitfalls}
+
+\begin{warning}
+\textbf{Testing the renderer's exact output.} Different
+terminals produce different bytes for the same content. Test
+the content, not the bytes.
+\end{warning}
+
+\begin{warning}
+\textbf{Snapshot fragility.} A snapshot that changes on every
+unrelated UI tweak teaches the team to update snapshots without
+reading them. Keep snapshots focused; cover one component at a
+time.
+\end{warning}
+
+\begin{warning}
+\textbf{Flaky timing tests.} If your end-to-end test sleeps for
+real wall-clock time, it will be flaky on slow machines. Use
+the virtual clock for any timing-dependent assertion.
+\end{warning}
+
+\begin{warning}
+\textbf{Tests that depend on terminal capabilities.} A test
+that checks ``truecolour bytes were emitted'' will fail on a
+fake terminal with caps disabled. Either configure caps for
+the test or assert against the more general behaviour.
+\end{warning}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write five unit tests for the two-counter app from
+    Chapter~\ref{ch:elm}: each verifies one branch of
+    \code{update}.
+  \item Add a property test asserting that the counter never
+    overflows under any sequence of messages.
+  \item Configure your CI to fail on snapshot mismatches and to
+    update snapshots only on a deliberate flag.
+\end{enumerate}
+
+\begin{recap}
+The Elm architecture pays for itself most in tests.
+\code{update} and \code{view} are pure and test directly with
+function calls. The layout and serialise stages are pure too.
+End-to-end tests use a fake terminal, an event queue, and a
+virtual clock. Property tests cover the invariants the model
+maintains. Concurrency tests need patience and a synchronous
+pool.
+\end{recap}

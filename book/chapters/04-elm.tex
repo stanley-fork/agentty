@@ -1355,3 +1355,1020 @@ result is a program whose business logic is trivially testable.
     one-line \code{main}) that pumps three \code{Inc}s through
     \code{update} and checks the final count.
 \end{enumerate}
+
+\section{A formal model: the Elm calculus}
+
+If the architecture feels slippery, it helps to write it down
+formally. We can describe an entire \maya{} program as a four-tuple
+\[
+  \mathcal{P} = (M,\ \Sigma,\ \delta,\ \rho)
+\]
+where
+\begin{itemize}[leftmargin=*]
+  \item $M$ is the set of all possible \emph{models} --- every
+    value the application state can ever take.
+  \item $\Sigma$ is the alphabet of \emph{messages} --- every
+    event the runtime might deliver.
+  \item $\delta : M \times \Sigma \to M \times \mathrm{Cmd}(\Sigma)$
+    is the \emph{transition function} (your \code{update}).
+    It is total, deterministic, and pure.
+  \item $\rho : M \to \mathrm{Element}$ is the \emph{rendering}
+    function (your \code{view}). Also pure.
+\end{itemize}
+
+A run of the program is a sequence
+\[
+  m_0 \xrightarrow{\sigma_1} m_1 \xrightarrow{\sigma_2} m_2
+  \xrightarrow{\sigma_3} \cdots
+\]
+where $m_0$ is \code{init()} and each $\sigma_i$ is delivered by
+the runtime in response to either a subscription firing, a command
+completing, or a user input.
+
+This is not academic decoration. Once you see your program as
+$(M, \Sigma, \delta, \rho)$, several things become obvious:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Replay is free.} Given $(m_0, \sigma_1, \sigma_2,
+    \ldots)$, the entire history is reconstructible. There is no
+    hidden state.
+  \item \textbf{Time-travel debugging is free.} Step $\delta$
+    backwards by retaining old $m_i$ values; the runtime never
+    needs to undo a side effect, because the side effects were
+    described as values, not performed during transition.
+  \item \textbf{Property testing is free.} You can quantify over
+    $M$ and $\Sigma$ directly. ``For all models $m$ and messages
+    $\sigma$, $\delta(m, \sigma)$ preserves the invariant
+    $I(m)$'' is a sentence you can hand to a fuzzer.
+  \item \textbf{The view is a fold.} $\rho$ is a pure function
+    from $M$ to a tree; the tree is then folded by the layout
+    engine. There is no imperative drawing.
+\end{itemize}
+
+\begin{aside}
+The formalism is not enforced by the type system in any deep way.
+Nothing stops you from putting a \code{std::mutex} in \code{Model}
+or calling \code{std::system()} inside \code{update}. The type
+system cannot detect impurity in C++. The discipline is yours to
+keep --- but the architecture only pays off if you keep it.
+\end{aside}
+
+\section{What is a side effect, precisely?}
+
+We keep saying ``pure'' and ``effect'' as if everyone agrees on
+the terms. They do not. Let us be concrete.
+
+A function $f : A \to B$ is \emph{pure} if:
+
+\begin{enumerate}[leftmargin=*]
+  \item For every $a \in A$, calling $f(a)$ always produces the
+    same $b \in B$. (Determinism.)
+  \item Calling $f(a)$ has no observable effect outside the
+    returned value. (No side effects.)
+  \item The act of calling $f$ is interchangeable with the value
+    it returns. (Referential transparency.)
+\end{enumerate}
+
+A \emph{side effect} is anything that violates (2): writing a
+file, reading the clock, mutating a global, throwing into an
+exception handler the caller did not opt into, sending bytes to a
+socket, allocating memory in a way that other code can observe.
+
+Look at this function:
+
+\begin{lstlisting}
+int next_id() {
+    static int counter = 0;
+    return ++counter;
+}
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=*]
+  \item It is not pure: two successive calls return different
+    values, so determinism is broken.
+  \item It has an observable effect: the static counter is
+    visible (indirectly) to any other caller.
+  \item It is not referentially transparent: replacing
+    \code{next\_id()} with \code{1} changes program behaviour.
+\end{itemize}
+
+Now look at this one:
+
+\begin{lstlisting}
+std::pair<int, int> next_id(int state) {
+    return {state + 1, state + 1};
+}
+\end{lstlisting}
+
+The ID generation has been turned into a pure transformation
+``current state $\to$ (new state, new ID)''. This is exactly the
+trick \maya{} plays for the whole application.
+
+\begin{funfact}
+This transformation has a name in functional programming: the
+\emph{state monad}. A computation that reads and writes state of
+type $S$ producing a value of type $A$ has the shape
+$S \to (S, A)$. \code{update}'s signature
+$M \times \Sigma \to M \times \mathrm{Cmd}(\Sigma)$ is the state
+monad with the message as input and a free monad of effects as
+output. We do not need to invoke the M-word to use it, but it is
+there if you ever want to reason about composition formally.
+\end{funfact}
+
+\section{The runtime as an interpreter}
+
+Think of \code{Cmd<Msg>} as a tiny program in a tiny language. The
+language has a handful of instructions:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{None} --- the empty program (no-op).
+  \item \code{Quit} --- stop the runtime cleanly.
+  \item \code{After(dt, msg)} --- sleep, then deliver \code{msg}.
+  \item \code{SetTitle(s)} --- ask the terminal to set its title.
+  \item \code{WriteClipboard(s)} --- copy \code{s} to the OS
+    clipboard.
+  \item \code{Task(f)} --- run the callable \code{f} on a worker
+    thread; its return value becomes a message.
+  \item \code{IsolatedTask(f)} --- like \code{Task} but with a
+    dedicated thread (used for long blocking work).
+  \item \code{Batch([c1, c2, \ldots])} --- run several commands.
+  \item \code{CommitScrollback / Overflow / ForceRedraw} ---
+    inline-mode plumbing (Chapter 11).
+\end{itemize}
+
+The runtime is an \emph{interpreter} for this language: it walks
+the \code{Cmd} value and executes the corresponding real-world
+action. Your \code{update} returns the \emph{program} (the AST);
+the runtime is the CPU.
+
+This distinction matters because:
+
+\begin{itemize}[leftmargin=*]
+  \item In tests, you can use a \emph{different} interpreter ---
+    one that records what was asked for instead of doing it.
+  \item In replay mode, you can use a \emph{logging} interpreter
+    that writes every command to disk for later inspection.
+  \item Adding a new effect is a matter of adding an alternative
+    to the variant and a case to the interpreter. No callers of
+    \code{update} change.
+\end{itemize}
+
+\begin{idea}
+This is the same trick LLVM uses: a frontend builds IR (a value),
+a backend interprets it. The IR can be optimised, serialised,
+replayed, or routed to a different backend. \code{Cmd<Msg>} is
+your application's IR for side effects.
+\end{idea}
+
+\section{Walking the runtime loop, line by line}
+
+We traced the loop conceptually earlier. Now we are going to walk
+the \emph{real} loop --- the one inside
+\file{maya/include/maya/app/app.hpp} and
+\file{maya/src/app/runtime.cpp} --- and stop on each step.
+
+The loop in pseudocode:
+
+\begin{lstlisting}
+template <Program P>
+int run(Config cfg) {
+    auto [model, cmd] = P::init();           // 1
+    Renderer renderer{cfg};                  // 2
+    EventLoop loop;                          // 3
+    interpret(cmd, loop);                    // 4
+
+    while (loop.running()) {                 // 5
+        renderer.frame(P::view(model));      // 6
+        Sub<Msg> sub = P::subscribe(model);  // 7
+        loop.install(sub);                   // 8
+        Msg msg = loop.next_message();       // 9
+        auto [m2, c2] = P::update(model, msg); // 10
+        model = std::move(m2);               // 11
+        interpret(c2, loop);                 // 12
+    }
+    return 0;                                // 13
+}
+\end{lstlisting}
+
+Line by line:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{1.} \code{init} runs once. It produces the initial
+    model and the initial \code{Cmd}. The \code{Cmd} is often
+    empty, but for an app that wants to fetch something at startup
+    it might be a \code{Task}.
+  \item \textbf{2.} The renderer constructs itself, opening the
+    terminal in raw mode, switching to the alt screen if
+    requested, and writing the entry escape codes.
+  \item \textbf{3.} The event loop wires up file descriptors for
+    stdin, signals, timers, and any task channels.
+  \item \textbf{4.} The initial \code{Cmd} is handed to the
+    interpreter. If it includes a \code{Quit}, we are done before
+    we begin. If it includes a \code{Task}, a worker thread
+    starts.
+  \item \textbf{5.} The main loop runs until something says stop.
+  \item \textbf{6.} \code{view} is called. Its output is a tree.
+    The renderer diffs it against the previous frame and writes
+    only the bytes that changed (Chapters 8--10).
+  \item \textbf{7.} \code{subscribe} is called with the current
+    model. This is the only way subscriptions can change
+    \emph{between frames} --- which is what lets a counter
+    subscribe to \code{Every(1s)} only when it is in ``running''
+    state.
+  \item \textbf{8.} The loop installs (or updates) the
+    subscriptions: it adds or removes timers, repaint hooks, mouse
+    captures.
+  \item \textbf{9.} The loop blocks on the next event. This is
+    the \emph{only} place the program waits.
+  \item \textbf{10.} \code{update} runs synchronously. It is
+    expected to be fast --- microseconds, not milliseconds.
+  \item \textbf{11.} The new model replaces the old. The old is
+    free to be destroyed.
+  \item \textbf{12.} The new \code{Cmd} is interpreted. New tasks
+    might be spawned; \code{After} might queue a timer.
+  \item \textbf{13.} On exit, destructors restore the terminal.
+\end{itemize}
+
+The runtime is small. Once you read this loop, the rest of
+\maya{}'s architecture follows.
+
+\begin{warning}
+If \code{update} or \code{view} throws, the runtime catches the
+exception, restores the terminal, and prints a diagnostic. It does
+\emph{not} continue. This is intentional: a thrown exception is a
+bug, and silently swallowing it would leave the model in an
+undefined intermediate state.
+\end{warning}
+
+\section{Subscriptions: pull-based reactivity}
+
+Here is the part of the loop people miss on first reading. Between
+every message, the runtime calls \code{subscribe(model)} again.
+It asks the program: ``given your current state, what are you
+listening to?''
+
+The consequence: subscriptions are \emph{pull-based}. They are
+descriptions, not registrations. There is no
+\code{loop.on\_key(\ldots)} call hidden in your constructor. Your
+\code{subscribe} declares an entire intention afresh on each
+frame, and the runtime diffs it against the previous intention to
+figure out which OS-level wires to add or drop.
+
+A tiny example:
+
+\begin{lstlisting}
+static Sub<Msg> subscribe(const Model& m) {
+    if (m.paused) return Sub<Msg>::on_key(handle_key);
+    return Sub<Msg>::batch({
+        Sub<Msg>::on_key(handle_key),
+        Sub<Msg>::every(50ms, Tick{})
+    });
+}
+\end{lstlisting}
+
+When \code{paused} flips to \code{true}, the next call to
+\code{subscribe} returns the smaller batch. The runtime diffs:
+``the \code{Every(50ms)} subscription is gone'' --- and drops the
+timer. The user did not have to remember to cancel a
+registration. There is no registration to cancel; the description
+changed.
+
+\begin{idea}
+This is the same idea React uses for effects: ``what hooks should
+be active right now is a function of state.'' \maya{} just makes
+it explicit instead of magical.
+\end{idea}
+
+What does the diff actually look like? The runtime keeps a
+fingerprint of the previous \code{Sub}: a flat list of
+(\emph{kind}, \emph{parameters}) tuples. When a new \code{Sub}
+arrives, it computes a new fingerprint and compares them:
+
+\begin{itemize}[leftmargin=*]
+  \item Subscriptions that exist in both lists: keep.
+  \item Subscriptions in the old list only: tear down (remove
+    timer, close FD).
+  \item Subscriptions in the new list only: install (arm timer,
+    open FD).
+\end{itemize}
+
+The fingerprint is structural: two \code{Every(50ms, Tick\{\})}
+are equal regardless of how they were constructed. This is what
+lets the diff converge even when \code{view} re-runs every frame.
+
+\section{All eleven Cmd alternatives, walked}
+
+We listed them. Now we use each. Every example is a real
+refactor a counter app might do.
+
+\subsection*{None}
+
+The identity. Returned when an update has no effect:
+
+\begin{lstlisting}
+return {m2, Cmd<Msg>::none()};
+\end{lstlisting}
+
+\code{Cmd<Msg>\{\}} default-constructs to \code{None}, so the
+short form \code{return \{m2, \{\}\}} works too.
+
+\subsection*{Quit}
+
+The terminator. Tells the runtime to exit cleanly:
+
+\begin{lstlisting}
+[](Quit) { return std::pair{Model{}, Cmd<Msg>::quit()}; }
+\end{lstlisting}
+
+Notice that we still return a (possibly fresh) model alongside
+\code{Quit}. The runtime might use it for one last render before
+shutting down (so the user sees the final state) or for replay.
+
+\subsection*{After}
+
+A timer that fires once. Used for debouncing, retry backoff, and
+any ``in a moment, do this'' pattern:
+
+\begin{lstlisting}
+return {m, Cmd<Msg>::after(300ms, ToastExpired{})};
+\end{lstlisting}
+
+After 300ms the runtime delivers a \code{ToastExpired} message.
+If \code{update} returns another \code{After} before the first
+fires, you have two pending timers --- they are independent.
+
+\begin{aside}
+\code{After} differs from a \code{Sub::every}: \code{After} is
+imperative (``do this once'') and lives in \code{Cmd}; \code{Every}
+is declarative (``while in this state, fire every $n$ ms'') and
+lives in \code{Sub}. Both are tools; pick by which describes your
+intent.
+\end{aside}
+
+\subsection*{SetTitle}
+
+Asks the terminal to set its window title. The runtime emits an
+OSC 0/1/2 sequence:
+
+\begin{lstlisting}
+return {m, Cmd<Msg>::set_title("editing " + m.filename)};
+\end{lstlisting}
+
+Not all terminals honour this. Most modern ones do.
+
+\subsection*{WriteClipboard}
+
+Uses OSC 52 to write text to the OS clipboard:
+
+\begin{lstlisting}
+return {m, Cmd<Msg>::write_clipboard(m.selection)};
+\end{lstlisting}
+
+Must be enabled in some terminals (e.g. tmux's
+\code{set-clipboard on}). Where it works, it is the only way to
+put text on the clipboard from a TUI without spawning
+\code{xclip}/\code{pbcopy}.
+
+\subsection*{Task}
+
+Runs a callable on a worker thread (pool thread). The return value
+of the callable becomes a message:
+
+\begin{lstlisting}
+return {m, Cmd<Msg>::task([url]() -> Msg {
+    auto result = fetch_blocking(url);
+    return Fetched{result};
+})};
+\end{lstlisting}
+
+The callable runs off the main loop. When it returns, the runtime
+puts the resulting \code{Msg} on the queue and the main loop
+will pick it up like any other event. From \code{update}'s
+perspective, nothing changes: a message arrived.
+
+\subsection*{IsolatedTask}
+
+Like \code{Task} but spawns its own thread instead of using the
+pool. Use for long-running blocking work that should not stall
+other tasks:
+
+\begin{lstlisting}
+return {m, Cmd<Msg>::isolated_task([]() -> Msg {
+    return BuildFinished{run_cmake_for_an_hour()};
+})};
+\end{lstlisting}
+
+If you put this on the pool, every other task would queue behind
+it. The isolated variant exists to keep the pool free.
+
+\subsection*{Batch}
+
+A list of commands to run together:
+
+\begin{lstlisting}
+return {m, Cmd<Msg>::batch({
+    Cmd<Msg>::set_title("loading"),
+    Cmd<Msg>::task(fetch_thing),
+    Cmd<Msg>::after(5s, TimedOut{})
+})};
+\end{lstlisting}
+
+The runtime interprets each. Order is not guaranteed (\code{Task}
+is async); use \code{Batch} when you want several independent
+things to happen, not when you want sequencing.
+
+\subsection*{CommitScrollback / CommitScrollbackOverflow}
+
+Inline-mode commands. They tell the runtime to ``freeze'' the
+current inline output into the terminal's scrollback so it stays
+visible after the program exits. Full treatment in Chapter 11; for
+now, the mental model is ``please make this view permanent''.
+
+\subsection*{ForceRedraw}
+
+Makes the next frame ignore the diff cache and emit every cell.
+Used after a terminal-level disturbance (e.g. user resized the
+window, another program scribbled on it):
+
+\begin{lstlisting}
+return {m, Cmd<Msg>::force_redraw()};
+\end{lstlisting}
+
+You will rarely need this; \maya{} detects resize and damage on
+its own. It is escape-hatch grade.
+
+\begin{recap}
+Every \code{Cmd} alternative names a single capability. Composing
+them is what \code{Batch} is for. There is no inheritance, no
+callback registry, no hidden state. The whole effect language is a
+sum type, and it fits on this page.
+\end{recap}
+
+\section{All eight Sub alternatives, walked}
+
+Now the subscription side, with the same level of zoom.
+
+\subsection*{None}
+
+No subscriptions. The program will only ever receive messages
+produced by commands (e.g. \code{After}).
+
+\subsection*{OnKey}
+
+Delivers a message for every key press:
+
+\begin{lstlisting}
+static Sub<Msg> subscribe(const Model&) {
+    return Sub<Msg>::on_key([](Key k) -> std::optional<Msg> {
+        if (k.matches('q')) return Quit{};
+        if (k.matches('+')) return Inc{};
+        if (k.matches('-')) return Dec{};
+        return std::nullopt;
+    });
+}
+\end{lstlisting}
+
+The callable returns \code{std::optional<Msg>}; \code{nullopt}
+means ``ignore''. Returning a message routes it through
+\code{update}.
+
+\subsection*{OnMouse}
+
+Like \code{OnKey} but for mouse events. The runtime enables mouse
+reporting on the terminal automatically when this subscription is
+active, and disables it when not.
+
+\subsection*{OnResize}
+
+Fires when the terminal's dimensions change:
+
+\begin{lstlisting}
+Sub<Msg>::on_resize([](Size s) { return Resized{s}; })
+\end{lstlisting}
+
+Sent before the next frame is rendered, so you can recompute
+layout-dependent state.
+
+\subsection*{OnPaste}
+
+Bracketed-paste detection. Terminals that support bracketed paste
+(most modern ones) wrap pasted text in \code{\textbackslash e[200\textasciitilde}
+and \code{\textbackslash e[201\textasciitilde}; this subscription
+lets you receive the whole pasted blob as one message instead of
+thousands of single-character key events.
+
+\subsection*{Every}
+
+A periodic timer:
+
+\begin{lstlisting}
+Sub<Msg>::every(16ms, Tick{})  // 60 Hz
+\end{lstlisting}
+
+The runtime makes a best effort to fire on the cadence; it does
+not guarantee real-time precision. If a frame takes 20ms, the next
+Tick is delivered as soon as the previous frame finishes.
+
+\subsection*{AnimationFrame}
+
+Fires once per render frame, after the frame is drawn. Used for
+advancing animations:
+
+\begin{lstlisting}
+Sub<Msg>::animation_frame(NextFrame{})
+\end{lstlisting}
+
+Different from \code{Every} in that it is synchronised to the
+render loop, so it cannot fall behind.
+
+\subsection*{Batch}
+
+A list of subscriptions to install together:
+
+\begin{lstlisting}
+Sub<Msg>::batch({
+    Sub<Msg>::on_key(handle_key),
+    Sub<Msg>::on_resize([](Size s) { return Resized{s}; }),
+    Sub<Msg>::every(1s, Tick{})
+})
+\end{lstlisting}
+
+The diffing happens at the leaf level, not the batch level: adding
+or removing a single subscription from the batch only churns that
+one subscription.
+
+\section{Cmd::map and Sub::map: the functor instances}
+
+When you compose components, the parent has its own \code{Msg}
+type and the child has its own. Their messages do not share a
+namespace. We need a way to ``lift'' a child's \code{Cmd<ChildMsg>}
+into the parent's \code{Cmd<ParentMsg>}.
+
+The operation is called \code{map}. It takes a function
+\code{f : ChildMsg -> ParentMsg} and a \code{Cmd<ChildMsg>} and
+produces a \code{Cmd<ParentMsg>}:
+
+\begin{lstlisting}
+template <class A, class B>
+Cmd<B> map(Cmd<A> c, std::function<B(A)> f);
+\end{lstlisting}
+
+Under the hood, \code{map} walks the variant. For each alternative
+that carries a \code{Msg}-valued callable or value, it composes
+\code{f} on the outside. \code{After(dt, child\_msg)} becomes
+\code{After(dt, f(child\_msg))}. \code{Task(g)} becomes
+\code{Task([g, f]() \{ return f(g()); \})}.
+
+The shape:
+
+\begin{lstlisting}
+struct Parent {
+    struct ChildMessage { Child::Msg inner; };
+    using Msg = std::variant<ChildMessage, Quit>;
+
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        return std::visit(overload{
+            [&](ChildMessage cm) {
+                auto [child2, ccmd] =
+                    Child::update(m.child, cm.inner);
+                m.child = std::move(child2);
+                return std::pair{m,
+                    map(ccmd, [](Child::Msg x) -> Msg {
+                        return ChildMessage{x};
+                    })};
+            },
+            [&](Quit) { return std::pair{m, Cmd<Msg>::quit()}; }
+        }, msg);
+    }
+};
+\end{lstlisting}
+
+\code{Sub::map} is the same idea on the subscription side. Together
+they are the only mechanism you need to compose components. There
+is no parent--child wiring API, no observer pattern, no
+registration. Just a function lifted through a variant.
+
+\begin{funfact}
+In category theory, \code{Cmd} is a \emph{functor}: a structure
+that preserves shape under mapping. The same word ``functor''
+appears in C++ to mean ``a callable object'', which is unrelated.
+(C++ stole the name and changed the meaning. Sorry.)
+\end{funfact}
+
+\section{Composing components: a worked refactor}
+
+Let us refactor the counter into a reusable component, then host
+two of them in a parent. This is the smallest example that shows
+the whole composition story.
+
+\subsection*{Step 1: extract the counter as a component}
+
+\begin{lstlisting}
+namespace counter {
+    struct Model { int n = 0; };
+    struct Inc {}; struct Dec {};
+    using Msg = std::variant<Inc, Dec>;
+
+    inline std::pair<Model, Cmd<Msg>>
+    update(Model m, Msg msg) {
+        return std::visit(overload{
+            [&](Inc) { return std::pair{Model{m.n+1}, Cmd<Msg>{}}; },
+            [&](Dec) { return std::pair{Model{m.n-1}, Cmd<Msg>{}}; }
+        }, msg);
+    }
+
+    inline Element view(const Model& m, std::string_view label) {
+        return h(t<"["> | Dim,
+                 text(label) | Bold,
+                 t<" "> ,
+                 text(std::to_string(m.n)),
+                 t<"]"> | Dim);
+    }
+}
+\end{lstlisting}
+
+No \code{subscribe}: the counter is a passive participant. It
+receives messages and renders; it does not listen.
+
+\subsection*{Step 2: a parent with two counters}
+
+\begin{lstlisting}
+struct Parent {
+    struct Model {
+        counter::Model left, right;
+        bool focused_left = true;
+    };
+
+    struct ToLeft { counter::Msg m; };
+    struct ToRight { counter::Msg m; };
+    struct Tab {};
+    struct Quit {};
+    using Msg = std::variant<ToLeft, ToRight, Tab, Quit>;
+
+    static std::pair<Model, Cmd<Msg>> init() {
+        return {Model{}, Cmd<Msg>{}};
+    }
+\end{lstlisting}
+
+\subsection*{Step 3: route messages with map}
+
+\begin{lstlisting}
+    static std::pair<Model, Cmd<Msg>>
+    update(Model m, Msg msg) {
+        return std::visit(overload{
+            [&](ToLeft tl) {
+                auto [c2, cmd] =
+                    counter::update(m.left, tl.m);
+                m.left = std::move(c2);
+                return std::pair{m,
+                    map(cmd, [](counter::Msg x) -> Msg {
+                        return ToLeft{x};
+                    })};
+            },
+            [&](ToRight tr) {
+                auto [c2, cmd] =
+                    counter::update(m.right, tr.m);
+                m.right = std::move(c2);
+                return std::pair{m,
+                    map(cmd, [](counter::Msg x) -> Msg {
+                        return ToRight{x};
+                    })};
+            },
+            [&](Tab) {
+                m.focused_left = !m.focused_left;
+                return std::pair{m, Cmd<Msg>{}};
+            },
+            [&](Quit) {
+                return std::pair{m, Cmd<Msg>::quit()};
+            }
+        }, msg);
+    }
+\end{lstlisting}
+
+\subsection*{Step 4: render both children}
+
+\begin{lstlisting}
+    static Element view(const Model& m) {
+        return v(
+            counter::view(m.left,  "left")  | (m.focused_left ? Bold : Dim),
+            counter::view(m.right, "right") | (m.focused_left ? Dim : Bold),
+            t<"[tab] switch  [q] quit"> | Dim
+        ) | pad<1>;
+    }
+\end{lstlisting}
+
+\subsection*{Step 5: subscribe at the parent level}
+
+\begin{lstlisting}
+    static Sub<Msg> subscribe(const Model& m) {
+        return Sub<Msg>::on_key([&](Key k) -> std::optional<Msg> {
+            if (k.matches('q'))   return Quit{};
+            if (k.matches('\t'))  return Tab{};
+            if (m.focused_left) {
+                if (k.matches('+')) return ToLeft{counter::Inc{}};
+                if (k.matches('-')) return ToLeft{counter::Dec{}};
+            } else {
+                if (k.matches('+')) return ToRight{counter::Inc{}};
+                if (k.matches('-')) return ToRight{counter::Dec{}};
+            }
+            return std::nullopt;
+        });
+    }
+};
+
+int main() { run<Parent>({.title = "two counters"}); }
+\end{lstlisting}
+
+Review the structure:
+
+\begin{itemize}[leftmargin=*]
+  \item The child is reusable: \code{counter::update} and
+    \code{counter::view} know nothing about the parent.
+  \item The parent owns the children's models as plain fields.
+    No pointers, no shared\_ptr, no observer registration.
+  \item Messages are tagged with their target (\code{ToLeft} /
+    \code{ToRight}); the parent's \code{update} unwraps the tag
+    and forwards.
+  \item \code{Cmd::map} lifts the child's \code{Cmd} into the
+    parent's \code{Cmd}. There is no other glue.
+\end{itemize}
+
+\begin{idea}
+This pattern scales to dozens of components. Each is a triple
+(\code{Model}, \code{Msg}, \code{update}/\code{view}); composition
+is a function. There is no inheritance hierarchy, no widget tree,
+no parent pointer.
+\end{idea}
+
+\section{Errors as messages}
+
+Nothing in the Elm architecture knows about exceptions. If you
+want errors, you put them in your \code{Msg} type:
+
+\begin{lstlisting}
+struct FetchOk     { std::string body; };
+struct FetchFailed { std::string reason; };
+using Msg = std::variant<FetchOk, FetchFailed, /* ... */>;
+
+static Cmd<Msg> fetch_cmd(std::string url) {
+    return Cmd<Msg>::task([url]() -> Msg {
+        try {
+            return FetchOk{do_fetch(url)};
+        } catch (const std::exception& e) {
+            return FetchFailed{e.what()};
+        }
+    });
+}
+\end{lstlisting}
+
+The task is the boundary between the impure world (sockets,
+filesystems) and the pure world (\code{update}). Catch on one
+side, deliver as data on the other.
+
+In \code{update}, branches handle both:
+
+\begin{lstlisting}
+[&](FetchOk ok) {
+    m.body = std::move(ok.body);
+    m.state = Loaded;
+    return std::pair{m, Cmd<Msg>{}};
+},
+[&](FetchFailed e) {
+    m.error = std::move(e.reason);
+    m.state = ErrorState;
+    return std::pair{m, Cmd<Msg>::after(5s, DismissError{})};
+},
+\end{lstlisting}
+
+The error becomes a value. The retry strategy is a \code{Cmd}.
+The UI in error state is just another branch of \code{view}. The
+whole error story is data flowing through the same pipeline as
+success.
+
+\begin{warning}
+Do not let exceptions escape a \code{Task}'s callable. The runtime
+will catch them and emit a diagnostic, but it has no way to route
+them back into your \code{Msg} type. Always \code{try}/\code{catch}
+at the task boundary and convert to a message.
+\end{warning}
+
+\section{Testing the architecture}
+
+Because \code{update} is pure, you can test it without a terminal,
+without a renderer, without any runtime at all:
+
+\begin{lstlisting}
+TEST_CASE("counter increments and decrements") {
+    auto m0 = Counter::init().first;
+    CHECK(m0.count == 0);
+
+    auto [m1, _] = Counter::update(m0, Counter::Inc{});
+    CHECK(m1.count == 1);
+
+    auto [m2, __] = Counter::update(m1, Counter::Inc{});
+    auto [m3, ___] = Counter::update(m2, Counter::Dec{});
+    CHECK(m3.count == 1);
+}
+\end{lstlisting}
+
+No mocks. No setup. The test \emph{is} the specification.
+
+\subsection*{Property tests}
+
+Because \code{update} is a function, you can run a property-based
+tester (rapidcheck, Catch2's generators) against it:
+
+\begin{lstlisting}
+PROPERTY("increment then decrement is identity",
+        Counter::Model m) {
+    auto [m1, _] = Counter::update(m, Counter::Inc{});
+    auto [m2, __] = Counter::update(m1, Counter::Dec{});
+    REQUIRE(m2.count == m.count);
+}
+\end{lstlisting}
+
+The property holds (assuming no overflow). The fuzzer will
+generate thousands of \code{Counter::Model} values to convince
+itself.
+
+\subsection*{Sequence tests}
+
+If you need to test a multi-message scenario, write the sequence
+as a fold:
+
+\begin{lstlisting}
+std::vector<Counter::Msg> seq = {
+    Counter::Inc{}, Counter::Inc{}, Counter::Inc{},
+    Counter::Dec{}
+};
+auto m = Counter::init().first;
+for (auto msg : seq) {
+    auto [m2, _] = Counter::update(m, msg);
+    m = m2;
+}
+CHECK(m.count == 2);
+\end{lstlisting}
+
+This is the building block for replay: a session is a sequence of
+messages, and replaying it deterministically reproduces the final
+model. There is no other state to track.
+
+\begin{idea}
+If you ever find yourself writing a mock to test \code{update},
+stop. The architecture is telling you the impurity belongs in a
+\code{Cmd}, not in \code{update}.
+\end{idea}
+
+\section{Replay and time travel}
+
+If you wrap the runtime in a thin recorder, you can capture every
+message and replay it:
+
+\begin{lstlisting}
+template <Program P>
+struct Recorded {
+    using Model = typename P::Model;
+    using Msg   = typename P::Msg;
+
+    struct State {
+        Model model;
+        std::vector<Msg> history;
+    };
+
+    static std::pair<State, Cmd<Msg>> init() {
+        auto [m, c] = P::init();
+        return {{m, {}}, c};
+    }
+    static std::pair<State, Cmd<Msg>>
+    update(State s, Msg msg) {
+        s.history.push_back(msg);
+        auto [m2, c] = P::update(s.model, msg);
+        s.model = std::move(m2);
+        return {std::move(s), std::move(c)};
+    }
+    static Element view(const State& s) {
+        return P::view(s.model);
+    }
+    static Sub<Msg> subscribe(const State& s) {
+        return P::subscribe(s.model);
+    }
+};
+\end{lstlisting}
+
+To replay a session: feed the recorded \code{history} into
+\code{P::update}, starting from \code{P::init().first}. The final
+model will be identical, because \code{update} is pure.
+
+To time-travel: keep the entire vector of \code{Model}s, not just
+the latest. Step backwards by setting \code{model = history[i-1]}.
+
+The storage cost is the only obstacle. Most apps can afford it.
+
+\section{Performance: where the cycles go}
+
+The architecture sounds expensive (``you re-render the whole tree
+every frame!''), but the cost is bounded:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{update} is a single function call. It does what you
+    wrote; if you wrote $O(n)$ work, you pay $O(n)$.
+  \item \code{view} is a single function call. The tree it
+    returns is freshly allocated. For a typical TUI with hundreds
+    of nodes, this is microseconds.
+  \item Layout (Chapter 7) is $O(n)$ in tree size and runs on the
+    fresh tree.
+  \item The canvas diff (Chapter 8) is SIMD over packed cells.
+    For an 80x24 grid (1920 cells), a frame diff is
+    well under a microsecond on a modern CPU.
+  \item The ANSI emitter (Chapter 10) only writes bytes for cells
+    that changed.
+\end{itemize}
+
+In practice, the bottleneck for a Maya app is almost never the
+framework. It is the work \emph{you} do in \code{update} or
+\code{view}: parsing a large file, formatting megabytes of text,
+recomputing an expensive layout property. Profile first; the
+architecture is not the suspect.
+
+\begin{aside}
+The re-render-everything model is exactly how every immediate-mode
+GUI (Dear ImGui, Nuklear) works, and how virtual-DOM frameworks
+(React, Elm) work. The performance is fine. Decades of intuition
+from retained-mode GUIs (Qt, GTK, MFC) does not apply.
+\end{aside}
+
+\section{Pitfalls and tripwires}
+
+A handful of mistakes show up over and over:
+
+\begin{warning}
+\textbf{Putting mutable state in Model that update does not own.}
+If you store a \code{std::shared\_ptr<Cache>} in \code{Model} and
+your rendering reads from it, the cache being mutated by another
+thread will corrupt your frame. The fix: make the cache a value
+in \code{Model}, or treat reads from it as effects (\code{Task})
+that deliver the read value as a message.
+\end{warning}
+
+\begin{warning}
+\textbf{Blocking inside update.} \code{update} runs on the main
+thread, on the critical path. If it takes 100ms, your app is at
+10 FPS. Move any work that could block (file I/O, network, heavy
+computation) into a \code{Cmd::task}.
+\end{warning}
+
+\begin{warning}
+\textbf{Throwing from update or view.} The runtime treats this as
+a crash. Catch and convert to messages. \code{std::out\_of\_range}
+from a stray \code{.at()} is the most common offender.
+\end{warning}
+
+\begin{warning}
+\textbf{Forgetting to subscribe after a state change.} If your
+subscription depends on \code{model.mode}, the subscription will
+only change when \code{subscribe(model)} is called with the new
+mode. This happens automatically between messages, but not
+\emph{during} a single \code{update} call. If you need a
+subscription to start ``right now'', return a \code{Cmd} from
+\code{update} (perhaps \code{After(0ms, \ldots)}) to trigger
+another loop turn.
+\end{warning}
+
+\begin{warning}
+\textbf{Variants without an Unknown case.} If your \code{Msg}
+variant grows over time and some code path does not handle a new
+alternative, \code{std::visit} with \code{overload} will fail to
+compile (good!) but a runtime route that misclassifies a message
+can still produce a no-op silently. Add a fallthrough
+\code{[](\ldots) \{ return \ldots; \}} only when you mean it.
+\end{warning}
+
+\section{When the architecture is the wrong tool}
+
+The Elm architecture is not universal. It is excellent for
+interactive applications with structured state. It is awkward for:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Streaming pipelines} where the program is a
+    function from an infinite input stream to an infinite output
+    stream and there is no real model. (Use a coroutine.)
+  \item \textbf{Plain CLI tools} that do one thing and exit.
+    The whole runtime is overhead. Use \maya{}'s widget pieces
+    (\code{maya::print}) directly.
+  \item \textbf{Interactive REPLs} where each command is
+    self-contained and history is the only state. The model
+    becomes ``a vector of commands'', which works but feels
+    forced.
+\end{itemize}
+
+For the things in \maya{}'s wheelhouse --- editors, dashboards,
+debuggers, file managers, configuration UIs --- the architecture
+pays for itself within a screenful of code.
+
+\begin{recap}
+The Elm architecture: four pure functions, two value-typed effect
+languages, one runtime that interprets them. The discipline you
+keep is rewarded with testability, replay, composition, and a
+flat data model. C++26 supplies the variants and concepts to make
+it a library, not a framework.
+\end{recap}
