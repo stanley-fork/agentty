@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (preloaded format=pdflatex 2026.4.11)  21 MAY 2026 22:58
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (preloaded format=pdflatex 2026.4.11)  21 MAY 2026 22:59
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -1527,7 +1527,7 @@ Package rerunfilecheck Info: File `maya-book.out' has not changed.
 Here is how much of TeX's memory you used:
  37739 strings out of 469515
  688141 string characters out of 5470807
- 1718333 words of memory out of 5000000
+ 1717333 words of memory out of 5000000
  62185 multiletter control sequences out of 15000+600000
  818309 words of font info for 422 fonts, out of 8000000 for 9000
  14 hyphenation exceptions out of 8191
@@ -1550,7 +1550,7 @@ c/lm/lmtk10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmtt10.pfb></usr/s
 hare/texmf-dist/fonts/type1/public/lm/lmtt8.pfb></usr/share/texmf-dist/fonts/ty
 pe1/public/lm/lmtt9.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmtti10.pf
 b>
-Output written on maya-book.pdf (178 pages, 1153674 bytes).
+Output written on maya-book.pdf (178 pages, 1152474 bytes).
 PDF statistics:
  5823 PDF objects out of 6186 (max. 8388607)
  5535 compressed objects within 56 object streams
