@@ -193,7 +193,7 @@ Element mention_palette(const Model& m) {
     auto* o = mention_opened(m.ui.mention_palette);
     if (!o) return nothing();
 
-    auto matches = filter_files(o->files, o->query);
+    const auto& matches = mention_filtered(*o);
 
     Picker::Config cfg;
     cfg.title      = " Mention File ";
@@ -244,7 +244,7 @@ Element symbol_palette(const Model& m) {
     auto* o = symbol_palette_opened(m.ui.symbol_palette);
     if (!o) return nothing();
 
-    auto matches = filter_symbols(o->entries, o->query);
+    const auto& matches = symbol_filtered(*o);
 
     Picker::Config cfg;
     cfg.title      = " Symbol ";

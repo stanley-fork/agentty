@@ -89,23 +89,29 @@ void build_live_tail(const Model& m, int& running_turn,
         int turn_num = running_turn;
 
         if (head.role == Role::Assistant) {
-            // ── Empty-placeholder activity indicator. When the head is
-            //    a freshly-pushed Assistant with no text + no tools +
-            //    no streaming bytes yet, inject the breathing
-            //    "thinking…" indicator into the Turn body so the user
-            //    sees movement during the pre-first-delta window. Only
-            //    the head of the run is considered — if the run has
-            //    any text/tools in any of its messages, content takes
-            //    priority and the indicator is suppressed.
-            const bool empty_placeholder =
-                run_end == i + 1
-                && head.text.empty()
-                && head.streaming_text.empty()
-                && head.tool_calls.empty();
-
+            // ── In-turn activity indicator (agent_session pattern).
+            //    Show the breathing "thinking…" row whenever the agent
+            //    is active and the assistant Turn has no body slots
+            //    yet — i.e. cfg.body is empty after
+            //    turn_config_for_assistant_run. Same shape as
+            //    agent_session: thinking widget appears in the
+            //    assistant Turn body until the first text/tool/etc.
+            //    slot lands, then content replaces it.
             auto cfg = turn_config_for_assistant_run(
-                i, run_end, turn_num, m, /*synthetic=*/true);
-            if (empty_placeholder) {
+                i, run_end, turn_num, m, /*synthetic=*/false);
+            // Show indicator when active and the LAST sub-turn in this
+            // run is an empty placeholder — covers both the initial
+            // pre-first-delta window and the post-tool continuation
+            // before the next sub-turn's bytes arrive.
+            const Message& tail = m.d.current.messages[run_end - 1];
+            const bool tail_is_empty_placeholder =
+                tail.role == Role::Assistant
+                && tail.text.empty()
+                && tail.streaming_text.empty()
+                && tail.pending_stream.empty()
+                && tail.tool_calls.empty();
+            const bool show_indicator = m.s.active() && tail_is_empty_placeholder;
+            if (show_indicator) {
                 using namespace maya::dsl;
                 maya::ActivityIndicator::Config ind;
                 ind.edge_color    = cfg.rail_color;

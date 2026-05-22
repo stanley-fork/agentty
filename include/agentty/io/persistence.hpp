@@ -61,6 +61,10 @@ struct DeserializeError {
 load_thread_file(const std::filesystem::path& p);
 
 void save_thread(const Thread& t);
+// Block until every queued background save has hit disk. Call at
+// shutdown after the last reducer step (Quit handler issues a final
+// save_thread) so we don't lose the most-recent transcript on exit.
+void flush_pending_saves();
 void delete_thread(const ThreadId& id);
 
 [[nodiscard]] store::Settings load_settings();

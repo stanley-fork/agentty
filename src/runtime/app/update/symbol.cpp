@@ -58,7 +58,7 @@ Step symbol_update(Model m, msg::SymbolPaletteMsg sm) {
         [&](SymbolPaletteMove& e) -> Step {
             auto* o = symbol_palette_opened(m.ui.symbol_palette);
             if (!o) return done(std::move(m));
-            int sz = static_cast<int>(filter_symbols(o->entries, o->query).size());
+            int sz = static_cast<int>(symbol_filtered(*o).size());
             if (sz <= 0) { o->index = 0; return done(std::move(m)); }
             o->index = std::clamp(o->index + e.delta, 0, sz - 1);
             return done(std::move(m));
@@ -66,7 +66,7 @@ Step symbol_update(Model m, msg::SymbolPaletteMsg sm) {
         [&](SymbolPaletteSelect) -> Step {
             auto* o = symbol_palette_opened(m.ui.symbol_palette);
             if (!o) return done(std::move(m));
-            auto matches = filter_symbols(o->entries, o->query);
+            const auto& matches = symbol_filtered(*o);
             if (matches.empty()
                 || o->index < 0
                 || o->index >= static_cast<int>(matches.size())) {

@@ -681,46 +681,23 @@ maya::Turn::Config turn_config_for_assistant_run(
                            /*continuation=*/false, synthetic);
     }
 
-    // Walk the run, accumulating consecutive tool-only sub-turn
-    // Messages into a single merged tool panel. The wire layer pushes
-    // a fresh Assistant placeholder after every tool batch completes
-    // (kick_pending_tools in cmd_factory.cpp) so each post-tool sub-
-    // turn lives on its own Message. Pre-merge the view would render
-    // those as N stacked `ACTIONS · 1/1` panels — one per Message —
-    // even though the user thinks of them as one batch of N actions.
-    // The agent_session promise ("one agent turn = one Turn") really
-    // wants "one contiguous tool group = one panel" too.
+    // Walk the run, emitting one tool panel per Message that carries
+    // tools. agent_session's discipline: one tool batch = one panel,
+    // flushed when the next text block starts OR the run ends. In
+    // agentty terms a "batch" is the tools attached to a single
+    // Anthropic Message; the post-tool placeholder model gives us
+    // one Message per sub-turn already, so each Message's tool_calls
+    // are conceptually one batch (the model's reply text for that
+    // sub-turn either precedes them in the same Message or arrives
+    // on the following Message).
     //
-    // Merge rule: collect ToolUses from consecutive Messages with no
-    // intervening text into a `pending` buffer. Flush as ONE panel
-    // whenever we hit a Message that has text (the text gets its own
-    // markdown slot first, then any tools on that same Message start
-    // a fresh group anchored at this Message). Final flush at run end.
-    //
-    // Anchor (cache key) = id of the FIRST Message contributing to
-    // the group. Stable across rebuilds (Messages are append-only)
-    // and distinct per group (each group starts at a different
-    // Message). Subsequent appends within the group don't perturb
-    // the cache slot — the slot key changes only when the group's
-    // tool_calls set changes, via compute_render_key inside the
-    // panel_key mix.
+    // Order in the rendered body mirrors wire order: text(i)
+    // → panel(i) → text(i+1) → panel(i+1) …  Sub-turns whose only
+    // contribution is a tool batch (no text) emit just a panel.
+    // No cross-Message merging: every sub-turn gets its own panel,
+    // matching agent_session where each ev::ToolEnd batch becomes
+    // its own actions_panel(...).
     std::string error_accum;
-    std::vector<ToolUse> pending;          // owned copies; lifetime spans this fn
-    std::optional<MessageId> pending_anchor;
-
-    auto flush_panel = [&]() {
-        if (!pending_anchor || pending.empty()) {
-            pending.clear();
-            pending_anchor.reset();
-            return;
-        }
-        append_assistant_tool_panel(
-            cfg, *pending_anchor,
-            std::span<const ToolUse>{pending},
-            m, synthetic, style);
-        pending.clear();
-        pending_anchor.reset();
-    };
 
     for (std::size_t i = run_first; i < end; ++i) {
         const Message& m_i = msgs[i];
@@ -728,20 +705,16 @@ maya::Turn::Config turn_config_for_assistant_run(
 
         const bool has_text = !m_i.text.empty() || !m_i.streaming_text.empty();
         if (has_text) {
-            // Text emission breaks the merge group. Flush any pending
-            // tools first so they render ABOVE this message's text
-            // (preserving wire order: prior sub-turns' tools came
-            // before this sub-turn's reply text).
-            flush_panel();
             cfg.body.emplace_back(cached_markdown_for(m_i, m));
         }
         if (!m_i.tool_calls.empty()) {
-            if (!pending_anchor) pending_anchor = m_i.id;
-            for (const auto& tc : m_i.tool_calls) pending.push_back(tc);
+            append_assistant_tool_panel(
+                cfg, m_i.id,
+                std::span<const ToolUse>{m_i.tool_calls},
+                m, synthetic, style);
         }
         if (m_i.error && error_accum.empty()) error_accum = *m_i.error;
     }
-    flush_panel();
 
     if (!error_accum.empty()) cfg.error = std::move(error_accum);
 

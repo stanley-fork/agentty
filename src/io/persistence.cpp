@@ -1,5 +1,7 @@
 #include "agentty/io/persistence.hpp"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -7,6 +9,9 @@
 #include <mutex>
 #include <random>
 #include <sstream>
+#include <thread>
+#include <unordered_map>
+#include <utility>
 
 #ifdef _WIN32
 #  include <io.h>
@@ -540,7 +545,14 @@ std::vector<Thread> load_all_threads() {
     return out;
 }
 
-void save_thread(const Thread& t) {
+// Synchronous worker — builds JSON, fsync, atomic-rename. The public
+// `save_thread` entry point enqueues onto a background writer instead
+// of running this on the caller's thread; serialising a 200-message
+// transcript can take 50-200 ms and blocking the reducer there froze
+// the UI at every turn-finalize. Called only by the worker below; the
+// worker holds at most one pending Thread per id (newer save wins),
+// so two finalize-back-to-back calls do at most one disk write.
+static void save_thread_sync(const Thread& t) {
     if (t.id.empty() || t.messages.empty()) return;
     json j;
     j["id"] = t.id;
@@ -581,6 +593,93 @@ void save_thread(const Thread& t) {
     } catch (const nlohmann::json::exception&) {
         // caller can't react; best-effort persistence is acceptable here.
     }
+}
+
+// ── Async writer ─────────────────────────────────────────────────────
+//
+// Single background thread + coalescing pending-map keyed by ThreadId.
+// `save_thread(t)` upserts t into the map and signals the worker; the
+// worker drains the map by repeatedly extracting one entry at a time
+// and running `save_thread_sync` on it. Two saves of the same thread
+// arriving while the worker is busy collapse to one disk write of the
+// latest snapshot — the map already deduplicates by key. Two saves of
+// DIFFERENT threads each get one write.
+//
+// Lifetime: the worker is started lazily on the first save and runs
+// for the life of the process. There's no `flush + join` on shutdown
+// because the reducer's Quit handler issues a final save_thread()
+// before maya returns; we wait for the queue to drain inside
+// flush_and_stop() which `main` calls right after maya::run returns.
+struct AsyncWriter {
+    std::mutex                              mu;
+    std::condition_variable                 cv;
+    std::unordered_map<std::string, Thread> pending;
+    bool                                    stopping = false;
+    std::thread                             worker;
+
+    void enqueue(Thread t) {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            // Newer snapshot supersedes any older one still queued
+            // for the same thread id. Move-assign so we don't copy
+            // the messages vector twice.
+            pending.insert_or_assign(t.id.value, std::move(t));
+            if (!worker.joinable()) start_locked();
+        }
+        cv.notify_one();
+    }
+
+    void flush_and_stop() {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            stopping = true;
+            if (!worker.joinable()) return;
+        }
+        cv.notify_one();
+        worker.join();
+    }
+
+    ~AsyncWriter() { flush_and_stop(); }
+
+private:
+    void start_locked() {
+        worker = std::thread([this] { run(); });
+    }
+
+    void run() {
+        for (;;) {
+            Thread next;
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                cv.wait(lk, [this] { return !pending.empty() || stopping; });
+                if (pending.empty()) {
+                    if (stopping) return;
+                    continue;
+                }
+                auto it = pending.begin();
+                next = std::move(it->second);
+                pending.erase(it);
+            }
+            // Run outside the lock so concurrent enqueue() calls don't
+            // block on the (potentially slow) fsync.
+            try { save_thread_sync(next); }
+            catch (...) { /* best-effort, same policy as the sync path */ }
+        }
+    }
+};
+
+static AsyncWriter& async_writer() {
+    static AsyncWriter w;
+    return w;
+}
+
+void save_thread(const Thread& t) {
+    if (t.id.empty() || t.messages.empty()) return;
+    async_writer().enqueue(t);
+}
+
+void flush_pending_saves() {
+    async_writer().flush_and_stop();
 }
 
 void delete_thread(const ThreadId& id) {

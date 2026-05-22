@@ -62,7 +62,7 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
         [&](MentionPaletteMove& e) -> Step {
             auto* o = mention_opened(m.ui.mention_palette);
             if (!o) return done(std::move(m));
-            int sz = static_cast<int>(filter_files(o->files, o->query).size());
+            int sz = static_cast<int>(mention_filtered(*o).size());
             if (sz <= 0) { o->index = 0; return done(std::move(m)); }
             o->index = std::clamp(o->index + e.delta, 0, sz - 1);
             return done(std::move(m));
@@ -70,7 +70,7 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
         [&](MentionPaletteSelect) -> Step {
             auto* o = mention_opened(m.ui.mention_palette);
             if (!o) return done(std::move(m));
-            auto matches = filter_files(o->files, o->query);
+            const auto& matches = mention_filtered(*o);
             if (matches.empty()
                 || o->index < 0
                 || o->index >= static_cast<int>(matches.size())) {

@@ -27,6 +27,13 @@ struct Open {
     std::string              query;
     int                      index = 0;
     std::vector<SymbolEntry> entries;
+    /// Filter result cache. Same rationale as mention_palette —
+    /// filter_symbols is O(N × query_cost); reducer + view callers
+    /// share the memoised indices via `symbol_filtered` so a single
+    /// keystroke pays at most one O(N) pass.
+    mutable std::vector<std::size_t> cached_matches;
+    mutable std::string              cached_query;
+    mutable bool                     cached_valid = false;
 };
 
 } // namespace symbol_palette
@@ -38,5 +45,15 @@ using SymbolPaletteState = std::variant<symbol_palette::Closed, symbol_palette::
 }
 [[nodiscard]] inline       symbol_palette::Open* symbol_palette_opened(SymbolPaletteState& s)       noexcept { return std::get_if<symbol_palette::Open>(&s); }
 [[nodiscard]] inline const symbol_palette::Open* symbol_palette_opened(const SymbolPaletteState& s) noexcept { return std::get_if<symbol_palette::Open>(&s); }
+
+[[nodiscard]] inline const std::vector<std::size_t>&
+symbol_filtered(const symbol_palette::Open& o) {
+    if (!o.cached_valid || o.cached_query != o.query) {
+        o.cached_matches = filter_symbols(o.entries, o.query);
+        o.cached_query   = o.query;
+        o.cached_valid   = true;
+    }
+    return o.cached_matches;
+}
 
 } // namespace agentty

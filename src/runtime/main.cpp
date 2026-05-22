@@ -268,5 +268,10 @@ int main(int argc, char** argv) {
     // The spinner-tick subscription (gated on stream.active) supplies frames
     // while streaming; idle agentty costs zero CPU.
     maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0, .mode = maya::Mode::Inline});
+
+    // Drain the async persistence queue. The Quit reducer arm enqueues
+    // a final save_thread() right before maya returns; this blocks
+    // until that (and any earlier-still-queued) write lands on disk.
+    persistence::flush_pending_saves();
     return 0;
 }
