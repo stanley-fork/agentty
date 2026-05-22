@@ -197,6 +197,12 @@ struct SseState {
     std::size_t read_pos = 0;
     std::string event_name;
     std::string data_accum;
+    // Set when an in-flight event exceeded `kSseDataAccumMax`. Subsequent
+    // `event:` / `data:` lines for the same event are ignored; the blank
+    // terminator clears the flag and the next event parses fresh. Without
+    // this guard the over-cap event's tail data lines would accumulate
+    // into a fresh buffer and dispatch as a corrupted event.
+    bool skip_event = false;
 };
 // Compact the SSE buffer when the read cursor has consumed at least this
 // many bytes. A larger threshold means more memory held at the high-water
@@ -543,10 +549,15 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
         if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
 
         if (line.empty()) {
-            if (!ctx.sse.data_accum.empty() || !ctx.sse.event_name.empty())
+            if (!ctx.sse.skip_event
+                && (!ctx.sse.data_accum.empty() || !ctx.sse.event_name.empty()))
                 dispatch_event(ctx, ctx.sse.event_name, ctx.sse.data_accum);
             ctx.sse.event_name.clear();
             ctx.sse.data_accum.clear();
+            ctx.sse.skip_event = false;
+        } else if (ctx.sse.skip_event) {
+            // Still inside the over-cap event. Drop until the blank line.
+            continue;
         } else if (line.starts_with("event:")) {
             std::size_t s = 6;
             while (s < line.size() && line[s] == ' ') ++s;
@@ -559,10 +570,13 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
             const std::size_t add = (line.size() - s) +
                 (ctx.sse.data_accum.empty() ? 0 : 1);
             if (ctx.sse.data_accum.size() + add > kSseDataAccumMax) {
-                // Defensive cap: drop the in-flight event silently
-                // rather than grow the accumulator without bound.
+                // Defensive cap: drop the in-flight event and ignore the
+                // rest of its data lines until the blank-line terminator,
+                // so partial bytes don't accumulate fresh and dispatch as
+                // a corrupted event.
                 ctx.sse.data_accum.clear();
                 ctx.sse.event_name.clear();
+                ctx.sse.skip_event = true;
                 continue;
             }
             if (!ctx.sse.data_accum.empty()) ctx.sse.data_accum.push_back('\n');
@@ -763,20 +777,30 @@ std::string make_user_id() {
     // for routing/quota; matching the new shape byte-for-byte is part of the
     // fix. We don't own a real account UUID under OAuth here, so we leave it
     // empty exactly as CC does when one isn't available.
-    auto device_id  = machine_id_hex(32);
-    auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    uint64_t s1 = 0xcbf29ce484222325ull;
-    for (int i = 0; i < 8; ++i) { s1 ^= (now >> (i*8)) & 0xff; s1 *= 0x100000001b3ull; }
-    uint64_t s2 = s1 ^ 0x9e3779b97f4a7c15ull;
-    char buf[33];
-    std::snprintf(buf, sizeof(buf), "%016llx%016llx",
-                  (unsigned long long)s1, (unsigned long long)s2);
-    auto session_id = std::string(buf, 32);
-    return nlohmann::json{
-        {"device_id",    device_id},
-        {"account_uuid", ""},
-        {"session_id",   session_id},
-    }.dump();
+    //
+    // Cached for the agentty process lifetime so `session_id` stays stable
+    // across turns — CC mints session_id once per CLI invocation. A fresh
+    // session_id per request defeats the abuse-signal stability that the
+    // stable device_id is meant to provide.
+    static std::string cached;
+    static std::once_flag once;
+    std::call_once(once, []{
+        auto device_id = machine_id_hex(32);
+        auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+        uint64_t s1 = 0xcbf29ce484222325ull;
+        for (int i = 0; i < 8; ++i) { s1 ^= (now >> (i*8)) & 0xff; s1 *= 0x100000001b3ull; }
+        uint64_t s2 = s1 ^ 0x9e3779b97f4a7c15ull;
+        char buf[33];
+        std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+                      (unsigned long long)s1, (unsigned long long)s2);
+        auto session_id = std::string(buf, 32);
+        cached = nlohmann::json{
+            {"device_id",    device_id},
+            {"account_uuid", ""},
+            {"session_id",   session_id},
+        }.dump();
+    });
+    return cached;
 }
 
 } // namespace

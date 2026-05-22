@@ -149,7 +149,6 @@ const std::unordered_map<std::string, const ToolDef*>& index() {
 
 const ToolDef* find(std::string_view name) {
     const auto& m = index();
-    // Heterogeneous lookup avoids constructing a temporary std::string.
     if (auto it = m.find(std::string{name}); it != m.end()) return it->second;
     return nullptr;
 }

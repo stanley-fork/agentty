@@ -1400,33 +1400,14 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // still need the retry counters for the can_retry check.
             if (auto* a = active_ctx(m.s.phase)) a->cancel.reset();
 
-            // Move any partial streaming_text into the message body so
-            // the assistant's in-flight output isn't lost regardless of
-            // what we do next (retry or terminal). Drain the smoothing
-            // buffer first so the error path preserves every received
-            // byte even if the Tick pacer hadn't revealed it yet.
-            //
-            // `prepended_into_committed_text` records the corruption-
-            // adjacent case the renderer cares about: a multi-sub-turn
-            // assistant message where `last->text` was ALREADY non-empty
-            // before this error, and we just appended more bytes onto
-            // it. StreamingMarkdown's `set_content` had been fed the
-            // prior streaming_text alone; the new content does NOT have
-            // that as a prefix, so the next frame's `set_content` hits
-            // the replace path, calls `clear()`, and re-emits the body
-            // through fresh block parsing. The inline-tail layout and
-            // the committed-block layout of the same bytes have
-            // different per-block heights, which shifts content_rows.
-            // Live frame repaints correctly via the diff; rows that
-            // already overflowed into native scrollback retain the
-            // OLD layout — visible as duplicated / missing / fragmented
-            // border rows at the scrollback↔viewport seam. Force a
-            // Divergent transition on the next render so the full
-            // repaint resolves the seam (scrollback wipe is acceptable
-            // — a stream error has already disturbed the user's flow).
-            // See docs/corruption-analysis.md Finding 2.
+            // Drain pacer buffer + streaming_text into the committed
+            // body so a retry or terminal path doesn't lose received
+            // bytes. Pre-settle StreamingMarkdown so the message's
+            // rendered height is locked before the next view() — lazy
+            // finish() during view can shift assistant height by 1+
+            // rows when a closing ``` commits the tail into a prefix
+            // block, which disturbs the scrollback↔viewport seam.
             Message* last = nullptr;
-            bool prepended_into_committed_text = false;
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 last = &m.d.current.messages.back();
@@ -1436,21 +1417,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 }
                 if (!last->streaming_text.empty()) {
                     if (last->text.empty()) last->text = std::move(last->streaming_text);
-                    else                  {
-                        prepended_into_committed_text = true;
-                        last->text += std::move(last->streaming_text);
-                    }
+                    else                    last->text += std::move(last->streaming_text);
                     std::string{}.swap(last->streaming_text);
                 }
-                // Pre-settle StreamingMarkdown so the message's rendered
-                // height is locked in BEFORE the next view() runs.
-                // Mirrors the finalize_turn fix: lazy finish() during
-                // view shifts assistant height by 1+ rows when the
-                // closing ``` of a code block commits the tail into a
-                // prefix block. On the error path the seam disturbance
-                // is even worse because we also force_redraw below; the
-                // pre-settle gets the canvas right BEFORE the redraw
-                // hashes the cells.
                 if (!last->text.empty()) {
                     auto& cache = m.ui.view_cache.message_md(
                         m.d.current.id, last->id);
@@ -1648,11 +1617,6 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
                         + std::chrono::milliseconds{50},
                     Msg{ClearStatus{stamp}});
-                if (prepended_into_committed_text) {
-                    // Pre-settle above already locked the message
-                    // height; no force_redraw (resize-only rule).
-                    return {std::move(m), std::move(status_cmd)};
-                }
                 return {std::move(m), std::move(status_cmd)};
             }
         },
