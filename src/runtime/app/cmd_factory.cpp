@@ -271,85 +271,95 @@ int estimate_wire_tokens(const Thread& t) {
 }
 
 Cmd<Msg> launch_stream(Model& m) {
-    provider::Request req;
-    req.model         = m.d.model_id.value;
-    req.system_prompt = provider::anthropic::default_system_prompt();
-
-    // Wire payload diverges on compaction kickoff:
-    //   normal turn  → wire_messages_for(thread) substitutes any
-    //                  prior compaction summary in place of its
-    //                  covered prefix.
-    //   compaction   → wire_messages_for_compaction(thread, ctx_max)
-    //                  appends the synthetic summarisation prompt and
-    //                  trims the raw prefix to fit context_max. Tools
-    //                  are omitted from the wire so the model can only
-    //                  reply with text — a tool_use during compaction
-    //                  would have nowhere to land (we don't surface
-    //                  the synthetic turn in the UI).
-    if (m.s.compacting) {
-        req.messages = wire_messages_for_compaction(m.d.current, m.s.context_max);
-        // req.tools left empty — summarisation is text-only.
-    } else {
-        req.messages = wire_messages_for_impl(m.d.current);
-        // Adaptive soft-trim: if the wire view is still over the
-        // window (no compactions yet, or the latest one is stale
-        // and the user has run many turns since), drop oldest raw
-        // turns from the wire until it fits ~95% of context_max.
-        // The transcript is NOT mutated — this only shapes what
-        // ships on THIS request. Lets the agent keep working past
-        // the threshold without yanking it for compaction; the
-        // user can run /compact at their leisure for a strictly
-        // better summary-based shape on subsequent turns.
-        if (m.s.context_max > 0) {
-            const int soft_ceiling = static_cast<int>(
-                static_cast<double>(m.s.context_max) * 0.95);
-            soft_trim_to_ceiling(req.messages, soft_ceiling);
-        }
-        // All tools, every profile. Gating is the policy layer's job
-        // (`tool::DynamicDispatch::needs_permission`, called from
-        // `kick_pending_tools`) — it inspects the tool's effects against
-        // the active profile and decides Allow vs Prompt:
-        //   Write   → all Allow  (autonomous)
-        //   Ask     → ReadFs/Pure Allow; WriteFs/Exec/Net Prompt
-        //   Minimal → only Pure Allow; everything else Prompt
-        // Hiding tools from the wire here used to be the gate, but it
-        // conflicted with what users expect from "Ask": that the model
-        // can attempt anything, the *user* approves per-call. With the
-        // filter in place, Ask just made write/edit/bash invisible (no
-        // prompt could ever fire because the model never called them) and
-        // Minimal sent zero tools at all (model became chat-only). The
-        // policy layer is exhaustively static_asserted in policy.hpp; let
-        // it own the decision so the three profiles read as users expect.
-        for (const auto& t : tools::registry()) {
-            req.tools.push_back({t.name.value, t.description, t.input_schema,
-                                 t.eager_input_streaming});
-        }
-    }
-    req.auth = deps().auth;
-
+    // Defer the wire-payload build to the worker. The UI thread used
+    // to spend ~5-50 ms here on long threads (full t.messages deep
+    // copy via wire_messages_for_impl, plus soft_trim_to_ceiling's
+    // estimate loop) between the user pressing Enter and the next
+    // render — visible as input lag on the "my message appears" frame.
+    // Now the UI returns to render after a few microseconds of cheap
+    // capture work; the heavy lift runs concurrently with the first
+    // post-submit paint.
+    //
+    // What stays on the UI thread (must — they read the live Model):
+    //   • cancel token mint + stash onto active_ctx
+    //   • shallow Thread copy into the task closure (vector of
+    //     Messages; each Message itself contains owned strings/vectors
+    //     so the copy is deep — but it's the same copy wire_messages
+    //     _for_impl was doing anyway, just relocated)
+    //
+    // What moves to the worker:
+    //   • compaction-vs-normal payload branch
+    //   • soft_trim_to_ceiling
+    //   • tools::registry() walk
+    //   • provider::anthropic::default_system_prompt()
+    //   • deps().stream(...) (already async)
+    //
     // Mint a fresh cancel token per turn and stash it on the active
     // ctx so the Esc handler (Msg::CancelStream) can flip it. The
-    // worker thread holds its own shared_ptr via req.cancel; storing
+    // worker holds its own shared_ptr via the captured request; storing
     // it inside the phase variant on the UI thread is safe — both
     // sides only ever load/store the atomic flag. Caller has already
     // transitioned us into an active phase by the time launch_stream
     // runs, so active_ctx is non-null here.
-    req.cancel = std::make_shared<http::CancelToken>();
-    if (auto* a = active_ctx(m.s.phase)) a->cancel = req.cancel;
-    // Capture the token by value so the worker can compare against the
-    // cancel-state at every dispatch boundary. Without this guard, a
-    // cancelled worker's trailing events (the StreamError("cancelled")
-    // unwound by the worker ~200 ms after Esc, in particular) flow into
-    // the reducer's StreamError handler and run `active_ctx(m.s.phase)
-    // ->cancel.reset()` — but the active phase may have been replaced
-    // with a fresh ctx if the user typed and submitted a new message in
-    // the meantime, which means we silently null out the *new* turn's
-    // cancel token. Result: Esc on the new turn does nothing, the user
-    // can't cancel anymore, and "agentty gets stuck — nothing works".
-    auto cancel_for_guard = req.cancel;
+    auto cancel = std::make_shared<http::CancelToken>();
+    if (auto* a = active_ctx(m.s.phase)) a->cancel = cancel;
 
-    return Cmd<Msg>::task([req = std::move(req), cancel_for_guard]
-                          (std::function<void(Msg)> dispatch) mutable {
+    // Capture the snapshot the worker needs. The Thread copy is the
+    // one unavoidable cost; everything else is small.
+    Thread thread_snapshot = m.d.current;
+    const bool compacting  = m.s.compacting;
+    const int  context_max = m.s.context_max;
+    std::string model_id   = m.d.model_id.value;
+    auth::AuthHeader auth  = deps().auth;
+
+    return Cmd<Msg>::task(
+        [thread = std::move(thread_snapshot),
+         compacting, context_max,
+         model_id = std::move(model_id),
+         auth = std::move(auth),
+         cancel]
+        (std::function<void(Msg)> dispatch) mutable {
+        // Build wire payload off the UI thread.
+        provider::Request req;
+        req.model         = std::move(model_id);
+        req.system_prompt = provider::anthropic::default_system_prompt();
+        req.cancel        = cancel;
+        req.auth          = std::move(auth);
+
+        // Wire payload diverges on compaction kickoff:
+        //   normal turn  → wire_messages_for(thread) substitutes any
+        //                  prior compaction summary in place of its
+        //                  covered prefix.
+        //   compaction   → wire_messages_for_compaction(thread, ctx_max)
+        //                  appends the synthetic summarisation prompt and
+        //                  trims the raw prefix to fit context_max. Tools
+        //                  are omitted from the wire so the model can only
+        //                  reply with text — a tool_use during compaction
+        //                  would have nowhere to land (we don't surface
+        //                  the synthetic turn in the UI).
+        if (compacting) {
+            req.messages = wire_messages_for_compaction(thread, context_max);
+            // req.tools left empty — summarisation is text-only.
+        } else {
+            req.messages = wire_messages_for_impl(thread);
+            // Adaptive soft-trim: if the wire view is still over the
+            // window (no compactions yet, or the latest one is stale
+            // and the user has run many turns since), drop oldest raw
+            // turns from the wire until it fits ~95% of context_max.
+            if (context_max > 0) {
+                const int soft_ceiling = static_cast<int>(
+                    static_cast<double>(context_max) * 0.95);
+                soft_trim_to_ceiling(req.messages, soft_ceiling);
+            }
+            // All tools, every profile. Gating is the policy layer's job
+            // (`tool::DynamicDispatch::needs_permission`, called from
+            // `kick_pending_tools`).
+            for (const auto& t : tools::registry()) {
+                req.tools.push_back({t.name.value, t.description, t.input_schema,
+                                     t.eager_input_streaming});
+            }
+        }
+
         // Suppress every event after the token is tripped — including the
         // worker's own terminal StreamError("cancelled"). The UI thread
         // already did the cancel-side cleanup synchronously in the
@@ -360,8 +370,8 @@ Cmd<Msg> launch_stream(Model& m) {
         // The check matches the worker's own cancellation gate, so once
         // the token is tripped no further events flow into the reducer
         // from this worker.
-        auto guarded = [dispatch, cancel_for_guard](Msg m) {
-            if (cancel_for_guard && cancel_for_guard->is_cancelled()) return;
+        auto guarded = [dispatch, cancel](Msg m) {
+            if (cancel && cancel->is_cancelled()) return;
             dispatch(std::move(m));
         };
         try {
