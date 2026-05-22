@@ -429,7 +429,15 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
             slot.agent_timeline_key      = panel_key;
             slot.agent_timeline_model_id = model_id_ref;
         }
-        cfg.body.emplace_back(*slot.agent_timeline);
+        // Pass the shared_ptr (mirrors the live-path fix): maya wraps
+        // it in a ComponentElement keyed on the control block, so the
+        // renderer cell-blits the entire settled panel as one rect
+        // instead of deep-copying the Element tree (with every Edit /
+        // Write body text owned inside ToolBodyPreview::Config) into
+        // cfg.body every frame. Steady-state cost on a thread with N
+        // visible settled action panels goes from O(sum of tool body
+        // bytes) per frame to O(1) blit per panel.
+        cfg.body.emplace_back(slot.agent_timeline);
     } else {
         std::uint64_t live_key = 1469598103934665603ULL;
         auto mixlive = [&](std::uint64_t v) {
