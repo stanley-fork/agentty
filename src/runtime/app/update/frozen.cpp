@@ -215,19 +215,43 @@ void rehydrate_frozen(Model& m) {
     //      "paint from top, fast-scroll to bottom" lag on thread
     //      resume.
     //
-    // Keep the cap small enough that the swap-frame canvas is roughly
-    // viewport-sized: the diff path emits a screenful and stops,
-    // instead of streaming hundreds of rows. Older turns live in the
-    // on-disk JSON (m.d.current.messages is intact); they're just
-    // invisible inside agentty until the next live append shifts the
-    // window. Composer history (↑ in the composer) still walks every
-    // prior user prompt, so the recall path is unaffected.
-    constexpr std::size_t kRehydrateTurns = 6;
+    // Two caps in conjunction:
+    //   • Turn cap (kRehydrateTurns) bounds the build cost on
+    //     turn-heavy threads where each turn is small.
+    //   • Row budget (kRehydrateRowBudget) bounds the paint cost on
+    //     content-heavy threads where ONE turn (e.g. a Write of a
+    //     2000-line file) can blow past the budget by itself.
+    //
+    // Either cap stops the backward walk. The row estimate is bytes
+    // / 60 (rough "average rendered chars per row" across prose,
+    // code, tool bodies) — deliberately conservative so we under-
+    // count and stop early rather than over-emit. Older turns live
+    // in the on-disk JSON (m.d.current.messages is intact); they're
+    // just invisible inside agentty until the next live append
+    // shifts the window. Composer history (↑ in the composer) still
+    // walks every prior user prompt, so the recall path is unaffected.
+    constexpr std::size_t kRehydrateTurns     = 6;
+    constexpr std::size_t kRehydrateRowBudget = 200;   // ~3-8 viewports
 
-    // Walk backward counting speaker-runs until we hit the budget.
-    std::size_t units = 0;
-    std::size_t start = total;
-    std::size_t cursor = total;
+    auto estimate_msg_rows = [](const Message& mm) -> std::size_t {
+        std::size_t bytes = mm.text.size() + mm.streaming_text.size();
+        for (const auto& tc : mm.tool_calls) {
+            bytes += tc.output().size();
+            bytes += tc.args_streaming.size();
+            // Header / footer / chrome rows per tool card (~4 rows
+            // even for an empty body — title, divider, status, blank).
+            bytes += 4 * 60;
+        }
+        // Per-message envelope (header, gap, divider).
+        bytes += 3 * 60;
+        return bytes / 60 + 1;
+    };
+
+    // Walk backward counting speaker-runs until EITHER cap trips.
+    std::size_t units      = 0;
+    std::size_t row_budget = 0;
+    std::size_t start      = total;
+    std::size_t cursor     = total;
     while (cursor > 0) {
         std::size_t j = cursor;
         if (msgs[j - 1].role == Role::Assistant) {
@@ -235,9 +259,19 @@ void rehydrate_frozen(Model& m) {
         } else {
             --j;
         }
+        // Estimate rows for THIS run before committing to include it.
+        std::size_t run_rows = 0;
+        for (std::size_t k = j; k < cursor; ++k)
+            run_rows += estimate_msg_rows(msgs[k]);
+        // Always include at least one run — even a giant one is what
+        // the user just loaded and wants to see. Stop AFTER the run
+        // that pushes us over budget so the most-recent context is
+        // always visible.
         ++units;
         start = j;
+        row_budget += run_rows;
         if (units >= kRehydrateTurns) break;
+        if (row_budget >= kRehydrateRowBudget) break;
         cursor = j;
     }
 
