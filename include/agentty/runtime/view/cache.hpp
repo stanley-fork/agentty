@@ -123,21 +123,11 @@ struct MessageMdCache {
 };
 
 struct TurnConfigCache {
-    // Frozen agent_timeline panel Element. Snapshotted the FIRST
-    // frame on which every tool_call is terminal and no pending
-    // permission targets one of them. From that frame onward the
-    // live agent_timeline_config / AgentTimeline::build chain is
-    // bypassed and this Element is reused verbatim, even while the
-    // rest of the turn is still alive (markdown body streaming).
-    //
-    // This is the ONLY remaining cache slot — the Turn-level Config
-    // and Element caches were removed when the host moved to
-    // agent_session's discipline: settled turns are built ONCE at
-    // freeze time into m.ui.frozen as raw Element values, and the
-    // live tail rebuilds each frame (bounded by the active turn).
-    std::shared_ptr<maya::Element>            agent_timeline;
-    std::uint64_t                             agent_timeline_key = 0;
-    std::string                               agent_timeline_model_id;
+    // Reserved for future per-(thread, msg) view-state. Empty for now —
+    // the legacy `agent_timeline` slot was removed: settled assistant
+    // panels are built into m.ui.frozen by freeze_range and never
+    // re-rendered from this cache, so the slot was populated and
+    // immediately bypassed forever.
 };
 
 // LRU-bounded render cache. Both the markdown render and the turn-config

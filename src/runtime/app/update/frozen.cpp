@@ -146,8 +146,7 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         if (head.role == Role::Assistant) {
             int turn_num = m.ui.frozen_turn + 1;
             auto cfg = ui::turn_config_for_assistant_run(
-                i, run_end, turn_num, m, /*synthetic=*/false,
-                /*for_freeze=*/true);
+                i, run_end, turn_num, m);
 
             // Hash key: settled assistant run. The merge inputs (every
             // run-member msg.id + the run length) all fold in so a
@@ -170,10 +169,8 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
             int turn_num = m.ui.frozen_turn;
             auto cfg = ui::turn_config(head, i, turn_num, m,
                                        /*continuation=*/false,
-                                       /*synthetic=*/false,
                                        /*meta_override=*/{},
-                                       /*tool_calls_override=*/{},
-                                       /*for_freeze=*/true);
+                                       /*tool_calls_override=*/{});
             cfg.hash_id = maya::CacheIdBuilder{}
                 .add(std::string_view{"agentty.turn"})
                 .add(std::string_view{head.id.value})

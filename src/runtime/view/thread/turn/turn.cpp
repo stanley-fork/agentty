@@ -378,99 +378,28 @@ std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
 // panel cache key is the `anchor_msg_id` — stable across rebuilds
 // because messages are append-only, and unique per merged group
 // because each group is anchored at the FIRST contributing Message.
+// Build the actions panel fresh every frame (agent_session pattern).
+// Settled assistant runs get snapshotted into m.ui.frozen by
+// freeze_range — they never re-enter this function. Live panels are
+// bounded by the in-flight turn's tool count, so per-frame cost is
+// O(active_tools). One AgentTimeline carrier per panel, born here,
+// dropped when cfg.body goes out of scope: no shared_ptr identity
+// flip races, no spinner-bucket cache, no freeze fast path. The old
+// freeze cache was dead weight — the Element it built is snapshotted
+// straight into m.ui.frozen the same frame the slot is populated.
+//
+// Permission card is NO LONGER appended here. The host floats it as
+// its own live_tail entry below the active assistant Turn (mirrors
+// agent_session's `Permission` sibling under the root vstack).
 void append_assistant_tool_panel(maya::Turn::Config& cfg,
-                                 const MessageId& anchor_msg_id,
                                  std::span<const ToolUse> tool_calls,
                                  const Model& m,
-                                 bool synthetic,
-                                 const SpeakerStyle& style,
-                                 bool for_freeze)
+                                 const SpeakerStyle& style)
 {
     if (tool_calls.empty()) return;
-    const std::string& model_id_ref = m.d.model_id.value;
-
-    bool all_terminal = true;
-    bool any_pending_perm = false;
-    for (const auto& tc : tool_calls) {
-        if (!tc.is_terminal()) { all_terminal = false; break; }
-        if (m.d.pending_permission
-            && m.d.pending_permission->id == tc.id) {
-            any_pending_perm = true;
-            break;
-        }
-    }
-    // Freeze-cache fast path is reserved for `freeze_range` (for_freeze=true).
-    // The live tail keeps using the spinner-bucketed live cache even when
-    // every tool has settled. Why: when freeze_through lands the frame
-    // after the last tool terminates, the frozen Turn (built off
-    // slot.agent_timeline) and a still-live Turn briefly co-existed and
-    // raced on the same shared_ptr — maya's hash-keyed component cache
-    // saw two carriers and painted two overlapping cards (stacked
-    // ACTIONS panel artifact). With the freeze cache born exclusively
-    // inside freeze_range there is one carrier per panel, one paint.
-    const bool can_freeze_panel =
-        for_freeze && !synthetic && all_terminal && !any_pending_perm;
-
-    std::uint64_t panel_key = 0;
-    if (can_freeze_panel) {
-        panel_key = 1469598103934665603ULL;
-        auto mix = [&](std::uint64_t v) {
-            panel_key = (panel_key ^ v) * 1099511628211ULL;
-        };
-        mix(tool_calls.size());
-        for (const auto& tc : tool_calls)
-            mix(tc.compute_render_key());
-        mix(static_cast<std::uint64_t>(style.color.r()));
-        mix(static_cast<std::uint64_t>(style.color.g()));
-        mix(static_cast<std::uint64_t>(style.color.b()));
-    }
-
-    if (can_freeze_panel) {
-        auto& slot = m.ui.view_cache.turn_config(
-            m.d.current.id, anchor_msg_id);
-        if (!slot.agent_timeline
-            || slot.agent_timeline_key != panel_key
-            || slot.agent_timeline_model_id != model_id_ref) {
-            auto built = maya::AgentTimeline{
-                agent_timeline_config(tool_calls, /*spinner_frame=*/0,
-                                      style.color)}.build();
-            slot.agent_timeline =
-                std::make_shared<maya::Element>(std::move(built));
-            slot.agent_timeline_key      = panel_key;
-            slot.agent_timeline_model_id = model_id_ref;
-        }
-        // Pass the shared_ptr (mirrors the live-path fix): maya wraps
-        // it in a ComponentElement keyed on the control block, so the
-        // renderer cell-blits the entire settled panel as one rect
-        // instead of deep-copying the Element tree (with every Edit /
-        // Write body text owned inside ToolBodyPreview::Config) into
-        // cfg.body every frame. Steady-state cost on a thread with N
-        // visible settled action panels goes from O(sum of tool body
-        // bytes) per frame to O(1) blit per panel.
-        cfg.body.emplace_back(slot.agent_timeline);
-    } else {
-        // agent_session pattern: build the live actions panel fresh
-        // every frame. No shared_ptr cache, no bucketed live_key, no
-        // spinner-bucket array. The cell-cache identity flip class
-        // of bug (live↔frozen carrier race, spinner-bucket race)
-        // disappears entirely — there is one carrier per panel,
-        // born inside this function, dropped when cfg.body goes out
-        // of scope. Steady-state cost is one AgentTimeline deep-copy
-        // per visible in-flight panel per frame; the body bytes are
-        // bounded by the in-flight tool count, not the whole settled
-        // transcript (settled panels live in m.ui.frozen and skip
-        // this branch entirely).
-        const int frame = m.s.spinner.frame_index();
-        cfg.body.emplace_back(maya::AgentTimeline{
-            agent_timeline_config(tool_calls, frame, style.color)}.build());
-    }
-    // In-flight permission card under the timeline.
-    for (const auto& tc : tool_calls) {
-        if (m.d.pending_permission && m.d.pending_permission->id == tc.id) {
-            cfg.body.emplace_back(inline_permission_config(
-                *m.d.pending_permission, tc));
-        }
-    }
+    const int frame = m.s.spinner.frame_index();
+    cfg.body.emplace_back(maya::AgentTimeline{
+        agent_timeline_config(tool_calls, frame, style.color)}.build());
 }
 
 // Single-message body slot append: text (if any) then this message's
@@ -481,31 +410,27 @@ void append_assistant_body_slots(maya::Turn::Config& cfg,
                                  const Message& msg,
                                  std::span<const ToolUse> tool_calls,
                                  const Model& m,
-                                 bool synthetic,
-                                 const SpeakerStyle& style,
-                                 bool for_freeze)
+                                 const SpeakerStyle& style)
 {
     const bool has_body = !msg.text.empty() || !msg.streaming_text.empty();
     if (has_body) {
         cfg.body.emplace_back(cached_markdown_for(msg, m));
     }
-    append_assistant_tool_panel(cfg, msg.id, tool_calls, m, synthetic, style, for_freeze);
+    append_assistant_tool_panel(cfg, tool_calls, m, style);
 }
 
 } // namespace
 
 maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                                int turn_num, const Model& m,
-                               bool continuation, bool synthetic,
+                               bool continuation,
                                std::string_view meta_override,
-                               std::span<const ToolUse> tool_calls_override,
-                               bool for_freeze) {
+                               std::span<const ToolUse> tool_calls_override) {
     // agent_session pattern: build a fresh Config every call. Settled
     // turns get their Element snapshotted into m.ui.frozen at freeze
     // time and rendered from there; the live tail rebuilds each frame
     // but is bounded to the in-flight turn. No Config / Element
-    // memoization here. `synthetic` is still consulted further down to
-    // skip the agent_timeline panel-freeze cache for queued previews.
+    // memoization here.
     (void)msg_idx;
 
     // Tool-batch merge plumbing: when the caller passes an override
@@ -588,7 +513,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         }
         cfg.body.emplace_back(maya::Turn::PlainText{.content = std::move(display), .color = fg});
     } else if (msg.role == Role::Assistant) {
-        append_assistant_body_slots(cfg, msg, tool_calls, m, synthetic, style, for_freeze);
+        append_assistant_body_slots(cfg, msg, tool_calls, m, style);
         if (msg.error) cfg.error = *msg.error;
     }
 
@@ -597,8 +522,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 
 maya::Turn::Config turn_config_for_assistant_run(
     std::size_t run_first, std::size_t run_end,
-    int turn_num, const Model& m, bool synthetic,
-    bool for_freeze)
+    int turn_num, const Model& m)
 {
     const auto& msgs = m.d.current.messages;
     // Pre-conditions defended at the only two call sites (build_live_tail
@@ -625,10 +549,9 @@ maya::Turn::Config turn_config_for_assistant_run(
         // Defensive: only Assistant runs use the multi-message path.
         // For a User head this collapses to the single-message build.
         return turn_config(head, run_first, turn_num, m,
-                           /*continuation=*/false, synthetic,
+                           /*continuation=*/false,
                            /*meta_override=*/{},
-                           /*tool_calls_override=*/{},
-                           for_freeze);
+                           /*tool_calls_override=*/{});
     }
 
     // Walk the run, emitting one tool panel per Message that carries
@@ -659,9 +582,9 @@ maya::Turn::Config turn_config_for_assistant_run(
         }
         if (!m_i.tool_calls.empty()) {
             append_assistant_tool_panel(
-                cfg, m_i.id,
+                cfg,
                 std::span<const ToolUse>{m_i.tool_calls},
-                m, synthetic, style, for_freeze);
+                m, style);
         }
         if (m_i.error && error_accum.empty()) error_accum = *m_i.error;
     }

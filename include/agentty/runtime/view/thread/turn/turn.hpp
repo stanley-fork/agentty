@@ -9,33 +9,28 @@
 namespace agentty::ui {
 
 // Build the Turn config for one message — header + typed body slots
-// (PlainText / MarkdownText / AgentTimeline / Permission / cached
-// streaming-markdown Element).  Set `continuation = true` when this
-// message is the 2nd+ assistant in a same-speaker run; the Turn widget
-// then suppresses its header (glyph + label + meta) and the
-// Conversation widget skips the inter-turn divider, so consecutive
-// assistant messages from one agent action visually flow as one block.
-//
-// `synthetic = true` marks the per-frame queued-message preview turns
-// the conversation adapter manufactures from `composer.queued[]`.
-// Those messages carry a fresh `MessageId` each frame, so caching
-// them would only fill the LRU with garbage entries; the flag short-
-// circuits the cache write path.
+// (PlainText / MarkdownText / AgentTimeline / cached streaming-markdown
+// Element). Set `continuation = true` when this message is the 2nd+
+// assistant in a same-speaker run; the Turn widget then suppresses
+// its header (glyph + label + meta) and the Conversation widget skips
+// the inter-turn divider, so consecutive assistant messages from one
+// agent action visually flow as one block.
 //
 // `tool_calls_override` lets the tool-batch merge in freeze_range /
 // build_live_tail synthesise a single panel from multiple disjoint
 // Messages' tool_calls without deep-copying `msg`. When non-empty the
-// AgentTimeline + permission scan uses this span instead of
-// `msg.tool_calls`; when empty `msg.tool_calls` is used as before.
+// AgentTimeline scan uses this span instead of `msg.tool_calls`;
+// when empty `msg.tool_calls` is used as before.
+//
+// Permission card is NOT emitted as a Turn body slot — the host
+// floats it as a sibling under the live tail (agent_session shape).
 [[nodiscard]] maya::Turn::Config turn_config(const Message& msg,
                                              std::size_t msg_idx,
                                              int turn_num,
                                              const Model& m,
                                              bool continuation = false,
-                                             bool synthetic    = false,
                                              std::string_view meta_override = {},
-                                             std::span<const ToolUse> tool_calls_override = {},
-                                             bool for_freeze   = false);
+                                             std::span<const ToolUse> tool_calls_override = {});
 
 // Build ONE Turn::Config covering a run of consecutive Assistant messages.
 // `run_first` is the index of the head message (Role::Assistant); `run_end`
@@ -46,13 +41,9 @@ namespace agentty::ui {
 //
 // Header (glyph, label, meta) is taken from the head message; meta carries
 // the head's timestamp + (optionally) elapsed since the last user message.
-//
-// `synthetic` flag is forwarded (queue previews skip the panel-freeze cache).
 [[nodiscard]] maya::Turn::Config turn_config_for_assistant_run(
     std::size_t run_first, std::size_t run_end,
-    int turn_num, const Model& m,
-    bool synthetic = false,
-    bool for_freeze = false);
+    int turn_num, const Model& m);
 
 // Decide where the current speaker-run ends. For an Assistant head this
 // walks forward over consecutive Assistant messages; for User / other roles
