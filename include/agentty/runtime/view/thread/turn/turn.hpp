@@ -34,7 +34,8 @@ namespace agentty::ui {
                                              bool continuation = false,
                                              bool synthetic    = false,
                                              std::string_view meta_override = {},
-                                             std::span<const ToolUse> tool_calls_override = {});
+                                             std::span<const ToolUse> tool_calls_override = {},
+                                             bool for_freeze   = false);
 
 // Build ONE Turn::Config covering a run of consecutive Assistant messages.
 // `run_first` is the index of the head message (Role::Assistant); `run_end`
@@ -50,7 +51,8 @@ namespace agentty::ui {
 [[nodiscard]] maya::Turn::Config turn_config_for_assistant_run(
     std::size_t run_first, std::size_t run_end,
     int turn_num, const Model& m,
-    bool synthetic = false);
+    bool synthetic = false,
+    bool for_freeze = false);
 
 // Decide where the current speaker-run ends. For an Assistant head this
 // walks forward over consecutive Assistant messages; for User / other roles

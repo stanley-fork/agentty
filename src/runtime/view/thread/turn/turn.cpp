@@ -383,7 +383,8 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
                                  std::span<const ToolUse> tool_calls,
                                  const Model& m,
                                  bool synthetic,
-                                 const SpeakerStyle& style)
+                                 const SpeakerStyle& style,
+                                 bool for_freeze)
 {
     if (tool_calls.empty()) return;
     const std::string& model_id_ref = m.d.model_id.value;
@@ -398,8 +399,17 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
             break;
         }
     }
+    // Freeze-cache fast path is reserved for `freeze_range` (for_freeze=true).
+    // The live tail keeps using the spinner-bucketed live cache even when
+    // every tool has settled. Why: when freeze_through lands the frame
+    // after the last tool terminates, the frozen Turn (built off
+    // slot.agent_timeline) and a still-live Turn briefly co-existed and
+    // raced on the same shared_ptr — maya's hash-keyed component cache
+    // saw two carriers and painted two overlapping cards (stacked
+    // ACTIONS panel artifact). With the freeze cache born exclusively
+    // inside freeze_range there is one carrier per panel, one paint.
     const bool can_freeze_panel =
-        !synthetic && all_terminal && !any_pending_perm;
+        for_freeze && !synthetic && all_terminal && !any_pending_perm;
 
     std::uint64_t panel_key = 0;
     if (can_freeze_panel) {
@@ -538,13 +548,14 @@ void append_assistant_body_slots(maya::Turn::Config& cfg,
                                  std::span<const ToolUse> tool_calls,
                                  const Model& m,
                                  bool synthetic,
-                                 const SpeakerStyle& style)
+                                 const SpeakerStyle& style,
+                                 bool for_freeze)
 {
     const bool has_body = !msg.text.empty() || !msg.streaming_text.empty();
     if (has_body) {
         cfg.body.emplace_back(cached_markdown_for(msg, m));
     }
-    append_assistant_tool_panel(cfg, msg.id, tool_calls, m, synthetic, style);
+    append_assistant_tool_panel(cfg, msg.id, tool_calls, m, synthetic, style, for_freeze);
 }
 
 } // namespace
@@ -553,7 +564,8 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                                int turn_num, const Model& m,
                                bool continuation, bool synthetic,
                                std::string_view meta_override,
-                               std::span<const ToolUse> tool_calls_override) {
+                               std::span<const ToolUse> tool_calls_override,
+                               bool for_freeze) {
     // agent_session pattern: build a fresh Config every call. Settled
     // turns get their Element snapshotted into m.ui.frozen at freeze
     // time and rendered from there; the live tail rebuilds each frame
@@ -642,7 +654,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         }
         cfg.body.emplace_back(maya::Turn::PlainText{.content = std::move(display), .color = fg});
     } else if (msg.role == Role::Assistant) {
-        append_assistant_body_slots(cfg, msg, tool_calls, m, synthetic, style);
+        append_assistant_body_slots(cfg, msg, tool_calls, m, synthetic, style, for_freeze);
         if (msg.error) cfg.error = *msg.error;
     }
 
@@ -651,7 +663,8 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 
 maya::Turn::Config turn_config_for_assistant_run(
     std::size_t run_first, std::size_t run_end,
-    int turn_num, const Model& m, bool synthetic)
+    int turn_num, const Model& m, bool synthetic,
+    bool for_freeze)
 {
     const auto& msgs = m.d.current.messages;
     // Pre-conditions defended at the only two call sites (build_live_tail
@@ -678,7 +691,10 @@ maya::Turn::Config turn_config_for_assistant_run(
         // Defensive: only Assistant runs use the multi-message path.
         // For a User head this collapses to the single-message build.
         return turn_config(head, run_first, turn_num, m,
-                           /*continuation=*/false, synthetic);
+                           /*continuation=*/false, synthetic,
+                           /*meta_override=*/{},
+                           /*tool_calls_override=*/{},
+                           for_freeze);
     }
 
     // Walk the run, emitting one tool panel per Message that carries
@@ -711,7 +727,7 @@ maya::Turn::Config turn_config_for_assistant_run(
             append_assistant_tool_panel(
                 cfg, m_i.id,
                 std::span<const ToolUse>{m_i.tool_calls},
-                m, synthetic, style);
+                m, synthetic, style, for_freeze);
         }
         if (m_i.error && error_accum.empty()) error_accum = *m_i.error;
     }
