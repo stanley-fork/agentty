@@ -243,7 +243,7 @@ jobs:
           pattern: bin-linux-*
           merge-multiple: true
       - name: Tooling
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm libarchive-tools zstd
       - name: Build + upload .deb / .rpm / .pkg.tar.zst
         run: |
           mkdir -p dist
@@ -253,29 +253,31 @@ jobs:
           bash packaging/deb/build.sh "$V" arm64 bins/agentty-linux-aarch64 "$PWD/dist"
           bash packaging/rpm/build.sh "$V" x86_64  bins/agentty-linux-x86_64  "$PWD/dist"
           bash packaging/rpm/build.sh "$V" aarch64 bins/agentty-linux-aarch64 "$PWD/dist"
-          work="$(mktemp -d)"
-          cp bins/agentty-linux-x86_64 "$work/agentty-linux-x86_64"
-          # Sourceless PKGBUILD: package() installs the bind-mounted binary
-          # directly, so makepkg never tries to "extract" the raw ELF.
+          # Arch .pkg.tar.zst built by hand (bsdtar + zstd) — same philosophy as
+          # the deb builder. Avoids makepkg's fakeroot, which is unreliable in
+          # containers ("libfakeroot: payload not recognized").
+          aroot="$(mktemp -d)"
+          install -Dm755 bins/agentty-linux-x86_64 "$aroot/usr/bin/agentty"
+          asize=$(du -sb "$aroot" | cut -f1)
           {
-            echo 'pkgname=agentty-bin'
-            echo "pkgver=$V"
-            echo 'pkgrel=1'
-            echo 'pkgdesc="Blazing-fast Claude in your terminal (C++26, static binary)"'
-            echo "arch=('x86_64')"
-            echo 'url="https://github.com/1ay1/agentty"'
-            echo "license=('MIT')"
-            echo "provides=('agentty')"
-            echo "conflicts=('agentty')"
-            echo 'options=(!strip !debug)'
-            echo 'package() { install -Dm755 /pkg/agentty-linux-x86_64 "$pkgdir/usr/bin/agentty"; }'
-          } > "$work/PKGBUILD"
-          docker run --rm -v "$work":/pkg -w /pkg archlinux:base-devel bash -c '
-            useradd -m -u 1000 build 2>/dev/null || true
-            chown -R build:build /pkg
-            su build -c "cd /pkg && PKGDEST=/pkg makepkg -f --noconfirm"
-          '
-          cp "$work"/agentty-bin-*-x86_64.pkg.tar.zst dist/
+            echo "pkgname = agentty-bin"
+            echo "pkgbase = agentty-bin"
+            echo "pkgver = $V-1"
+            echo "pkgdesc = Blazing-fast Claude in your terminal (C++26, static binary)"
+            echo "url = https://github.com/1ay1/agentty"
+            echo "builddate = $(date +%s)"
+            echo "packager = agentty CI <noreply@github.com>"
+            echo "size = $asize"
+            echo "arch = x86_64"
+            echo "license = MIT"
+            echo "provides = agentty"
+            echo "conflict = agentty"
+          } > "$aroot/.PKGINFO"
+          bsdtar -C "$aroot" -czf "$aroot/.MTREE" --format=mtree \
+            --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' \
+            .PKGINFO usr
+          bsdtar -C "$aroot" -cf - .PKGINFO .MTREE usr \
+            | zstd -19 -T0 > "dist/agentty-bin-${V}-1-x86_64.pkg.tar.zst"
           gh release upload "$TAG" dist/*.deb dist/*.rpm dist/*.pkg.tar.zst --clobber
 
   # Runs last; regenerates SHA256SUMS over whatever is on the release. The
@@ -290,6 +292,7 @@ jobs:
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
+      - uses: actions/checkout@v4   # gh needs a git repo context for release ops
       - name: Download release assets, hash, re-upload
         run: |
           mkdir -p dist && cd dist
