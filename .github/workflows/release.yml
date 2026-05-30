@@ -254,18 +254,26 @@ jobs:
           bash packaging/rpm/build.sh "$V" x86_64  bins/agentty-linux-x86_64  "$PWD/dist"
           bash packaging/rpm/build.sh "$V" aarch64 bins/agentty-linux-aarch64 "$PWD/dist"
           work="$(mktemp -d)"
-          sed -e "s/^pkgver=.*/pkgver=$V/" \
-              -e "s|source_x86_64=.*|source_x86_64=(\"agentty-$V-x86_64::file:///pkg/agentty-linux-x86_64\")|" \
-              -e "s/sha256sums_x86_64=.*/sha256sums_x86_64=('SKIP')/" \
-              packaging/arch/PKGBUILD > "$work/PKGBUILD"
-          # makepkg would try to "extract" the raw ELF and then package() can't
-          # find it in srcdir; mark it noextract so it's symlinked in verbatim.
-          printf 'noextract=("agentty-%s-x86_64")\n' "$V" >> "$work/PKGBUILD"
           cp bins/agentty-linux-x86_64 "$work/agentty-linux-x86_64"
+          # Sourceless PKGBUILD: package() installs the bind-mounted binary
+          # directly, so makepkg never tries to "extract" the raw ELF.
+          {
+            echo 'pkgname=agentty-bin'
+            echo "pkgver=$V"
+            echo 'pkgrel=1'
+            echo 'pkgdesc="Blazing-fast Claude in your terminal (C++26, static binary)"'
+            echo "arch=('x86_64')"
+            echo 'url="https://github.com/1ay1/agentty"'
+            echo "license=('MIT')"
+            echo "provides=('agentty')"
+            echo "conflicts=('agentty')"
+            echo 'options=(!strip !debug)'
+            echo 'package() { install -Dm755 /pkg/agentty-linux-x86_64 "$pkgdir/usr/bin/agentty"; }'
+          } > "$work/PKGBUILD"
           docker run --rm -v "$work":/pkg -w /pkg archlinux:base-devel bash -c '
             useradd -m -u 1000 build 2>/dev/null || true
             chown -R build:build /pkg
-            su build -c "cd /pkg && PKGDEST=/pkg makepkg -f --skipinteg --noconfirm"
+            su build -c "cd /pkg && PKGDEST=/pkg makepkg -f --noconfirm"
           '
           cp "$work"/agentty-bin-*-x86_64.pkg.tar.zst dist/
           gh release upload "$TAG" dist/*.deb dist/*.rpm dist/*.pkg.tar.zst --clobber
