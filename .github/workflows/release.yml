@@ -128,7 +128,7 @@ jobs:
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git submodule update --init --recursive
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
       - name: Build static binary (Alpine 3.21 / musl / GCC 14)
         run: |
           docker run --rm --platform linux/arm64 \
@@ -168,7 +168,7 @@ jobs:
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git submodule update --init --recursive
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
       - name: Build static binary (Alpine 3.21 / musl / GCC 14)
         run: |
           docker run --rm --platform linux/386 \
