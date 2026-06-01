@@ -390,24 +390,77 @@ void rehydrate_frozen(Model& m) {
     const std::size_t total = msgs.size();
     if (total == 0) return;
 
-    // Rehydrate the WHOLE thread. On the first resume frame maya's
-    // Fresh compose emits every frozen canvas row from row 0; rows past
-    // term_h scroll into the terminal's NATIVE scrollback via \r\n.
-    // That is the only way content reaches native scrollback — so a
-    // bounded "one-viewport" rehydrate makes resume instant but leaves
-    // the elided prefix unreachable on scroll-up (it was never emitted
-    // and so never entered scrollback). The user wants the full thread
-    // present, so we freeze the entire transcript: the brief one-time
-    // scroll on open is the cost of seeding scrollback, and steady-
-    // state per-frame cost stays flat because (a) trim_frozen_if_
-    // oversized bounds the live frozen canvas after the prefix has
-    // overflowed, and (b) the hash_id ComponentCache blits already-
-    // built rows without rebuilding markdown/tool bodies.
+    // Bounded rehydrate. The CPU-side resume cost is small (~200 ms on
+    // the largest real threads: load + rehydrate + cold render). The
+    // 30 s open the user hit was the WIRE EMIT: maya's first frame
+    // pushes every frozen canvas row to the terminal row-by-row, and
+    // for a thread that rehydrated to ~36 000 rows that is the terminal
+    // physically scrolling through 36 000 lines. There is no way to
+    // seed native scrollback faster than the terminal can paint it.
     //
-    // frozen_turn starts at 0: every run is in the rehydrated window,
-    // so turn numbers count up naturally from the top.
-    m.ui.frozen_turn = 0;
-    freeze_range(m, 0, total);
+    // So we seed only a bounded tail — the SAME row window the live app
+    // ever re-renders (kFrozenMaxRows in trim_frozen_if_oversized).
+    // Anything older than that the app would trim out of its live tree
+    // the moment you interacted anyway, and it lives intact on disk
+    // (recall it via the thread picker). This keeps scroll-up showing
+    // a generous, instant slice of recent history without a 30 s paint.
+    //
+    // Walk backward over whole speaker-runs accumulating estimated
+    // rows; stop after the run that crosses the budget so the most
+    // recent context is always whole. If the newest run alone exceeds
+    // the budget, cut INSIDE it at sub-turn granularity (keep the
+    // trailing sub-turns that fit) so even a giant final auto-pilot run
+    // resumes fast.
+    constexpr std::size_t kRehydrateRowBudget = 1500;
+    std::size_t units      = 0;
+    std::size_t row_budget = 0;
+    std::size_t start      = total;
+    std::size_t cursor     = total;
+    while (cursor > 0) {
+        std::size_t j = cursor;
+        if (msgs[j - 1].role == Role::Assistant) {
+            while (j > 0 && msgs[j - 1].role == Role::Assistant) --j;
+        } else {
+            --j;
+        }
+        std::size_t run_rows = 0;
+        for (std::size_t k = j; k < cursor; ++k)
+            run_rows += estimate_msg_rows(msgs[k]);
+
+        if (units == 0 && run_rows > kRehydrateRowBudget
+            && (cursor - j) > 1) {
+            std::size_t kept = 0;
+            std::size_t cut  = cursor;
+            for (std::size_t k = cursor; k-- > j; ) {
+                kept += estimate_msg_rows(msgs[k]);
+                cut = k;
+                if (kept >= kRehydrateRowBudget) break;
+            }
+            ++units;
+            start = cut;
+            row_budget += kept;
+            break;
+        }
+
+        ++units;
+        start = j;
+        row_budget += run_rows;
+        if (row_budget >= kRehydrateRowBudget) break;
+        cursor = j;
+    }
+
+    // Seed frozen_turn to the count of assistant runs in the skipped
+    // prefix so visible turn numbers reflect their true position
+    // (e.g. "turn 87" not "turn 1" on a long reload).
+    int skipped_assistant_runs = 0;
+    for (std::size_t k = 0; k < start; ) {
+        const std::size_t run_end = ui::turn_run_end(msgs, k);
+        if (msgs[k].role == Role::Assistant) ++skipped_assistant_runs;
+        k = run_end;
+    }
+    m.ui.frozen_turn = skipped_assistant_runs;
+
+    freeze_range(m, start, total);
 }
 
 maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {

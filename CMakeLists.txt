@@ -831,6 +831,42 @@ if(AGENTTY_BUILD_TESTS)
             "-framework CoreFoundation")
     endif()
 
+    # realthread_probe — loads a real on-disk thread JSON and times the
+    # resume hot path (rehydrate_frozen + cold/warm render) to locate
+    # where a long thread's open time actually goes.
+    add_executable(realthread_probe
+        tests/realthread_probe.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(realthread_probe PRIVATE include)
+    target_compile_definitions(realthread_probe PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(realthread_probe PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(realthread_probe PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(realthread_probe PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+
     # fuzzy_match_smoke — small correctness smoke for the line-DP
     # fuzzy matcher used by the edit tool. Standalone (no maya / no
     # runtime), so it compiles against just the fuzzy_match TU.

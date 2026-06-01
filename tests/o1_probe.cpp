@@ -348,14 +348,14 @@ int main() {
 
     scaling_breakdown();
 
-    // ── Rehydrate footprint: rows the full-thread rehydrate freezes.
-    // rehydrate_frozen now freezes the WHOLE transcript so scroll-up
-    // shows everything (the elided-prefix experiment left old turns
-    // unreachable in native scrollback). The one-time first-frame
-    // scroll is the cost of seeding scrollback; steady-state per-frame
-    // cost is bounded by trim_frozen_if_oversized + the hash_id cache.
-    // Probe reports total frozen rows/entries after rehydrate.
-    std::printf("\nrehydrate footprint (full-thread freeze):\n");
+    // ── Rehydrate footprint: rows the resume freeze seeds to the wire.
+    // The 30s open on a real long thread was the WIRE EMIT of tens of
+    // thousands of frozen rows (the terminal scrolling through them),
+    // not CPU — load+rehydrate+cold render is ~200ms even on an 8MB
+    // thread. rehydrate_frozen bounds the seeded tail to ~1500 rows
+    // (the same window the live app re-renders); the rest stays on disk
+    // and is recalled via the picker. Probe reports frozen rows/entries.
+    std::printf("\nrehydrate footprint (bounded resume seed):\n");
     std::printf("%-26s | %12s | %12s\n",
                 "thread shape", "frozen_rows", "frozen_ent");
     std::printf("---------------------------+--------------+--------------\n");

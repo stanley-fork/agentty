@@ -208,9 +208,18 @@ parse_tool_status(std::string_view status_tag, std::string&& output) {
     if (status_tag == "failed" || status_tag == "error")
         return ToolUse::Status{ToolUse::Failed{{}, {}, std::move(output)}};
     if (status_tag == "rejected") return ToolUse::Status{ToolUse::Rejected{{}}};
-    if (status_tag == "running")  return ToolUse::Status{ToolUse::Running{{}, {}}};
-    if (status_tag == "approved") return ToolUse::Status{ToolUse::Approved{{}}};
-    if (status_tag == "pending")  return ToolUse::Status{ToolUse::Pending{{}}};
+    // A persisted thread SHOULD only carry terminal tool states, but a
+    // session killed mid-tool (crash, SIGKILL, power loss) leaves a
+    // pending/running/approved tool on disk. Such a tool never
+    // completed and never will — coerce it to a terminal Failed state
+    // so the run is freezable/renderable on resume (run_is_freezable
+    // refuses any non-terminal tool, which would otherwise drop the
+    // whole trailing run from the rehydrated transcript).
+    if (status_tag == "running" || status_tag == "approved"
+        || status_tag == "pending") {
+        std::string note = output.empty() ? "interrupted" : std::move(output);
+        return ToolUse::Status{ToolUse::Failed{{}, {}, std::move(note)}};
+    }
     return std::unexpected(DeserializeError{
         DeserializeErrorKind::InvalidVariantTag, "tool_calls[*].status",
         std::string{"unknown status tag: "} + std::string{status_tag}});
