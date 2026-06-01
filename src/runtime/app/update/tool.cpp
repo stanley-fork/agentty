@@ -224,20 +224,29 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // terminal. Freeze that completed prefix now so the live
             // canvas holds only the active sub-turn — keeps per-frame
             // cost flat as edits/writes pile up in one long auto-pilot
-            // turn (no-op when nothing new is freezable).
+            // turn (no-op when nothing new is freezable). This is the
+            // SPEED path and stays: the frozen prefix is zero-copy
+            // (list_ref) and hash-keyed, so maya blits it — a tall
+            // mid-run prefix costs O(1) per frame to re-present.
             freeze_settled_subturns(m);
-            // The freeze grows m.ui.frozen by the just-settled sub-turns.
-            // In one long auto-pilot turn that prefix balloons to
-            // thousands of rows, and the per-frame canvas blit is
-            // O(rows) even on a cache hit — so everything slows as
-            // edits/writes accumulate. Trim the frozen prefix to ~2
-            // viewports here too (not just on submit/stream-finish);
-            // the overflow has already painted to native scrollback.
-            auto trim = trim_frozen_if_oversized(m);
+            // Do NOT trim mid-run. trim_frozen_if_oversized drops whole
+            // entries from the FRONT of m.ui.frozen down to a row
+            // budget; mid-run that budget can be smaller than what's
+            // still on screen, so the trim removes a frozen entry (e.g.
+            // the run's User header) whose rows have NOT yet overflowed
+            // the viewport. maya's inline diff then re-emits every row
+            // below the drop at a shifted position — but the pre-drop
+            // copies are already committed to native terminal
+            // scrollback and unrewritable, so the turn appears TWICE
+            // (the duplication bug). agent_session never trims mid-
+            // stream for exactly this reason: it bounds scrollback only
+            // at MessageStop. We mirror that — the trim runs at stream
+            // finish (stream.cpp) and on the next user submit
+            // (modal.cpp), both turn boundaries where the whole run is
+            // settled and the dropped rows have provably overflowed.
+            // Mid-run the canvas is bounded by freeze_settled_subturns
+            // moving content into the cached prefix, not by trimming.
             auto cmd = cmd::kick_pending_tools(m);
-            if (!trim.is_none())
-                return {std::move(m), Cmd<Msg>::batch(
-                    std::vector<Cmd<Msg>>{std::move(trim), std::move(cmd)})};
             return {std::move(m), std::move(cmd)};
         },
 
