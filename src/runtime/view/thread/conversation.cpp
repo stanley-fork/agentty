@@ -219,69 +219,18 @@ void build_live_tail(const Model& m, int& running_turn,
                     kb.add(m.d.current.messages[j].compute_render_key());
                 }
                 cfg.hash_id = kb.build();
-            } else if (!show_indicator && [&]{
-                // Only cache when the live body is a TOOL CARD, not
-                // streaming prose. Streaming prose carries reveal_fx (the
-                // gradient caret + scramble→resolve) which MUST repaint
-                // every frame to animate; caching it would freeze the
-                // caret. A run qualifies only if its active (last)
-                // sub-turn has tool_calls and no growing prose tail.
-                const Message& last = m.d.current.messages[run_end - 1];
-                const bool prose_tail = !last.streaming_text.empty()
-                                     || !last.pending_stream.empty();
-                if (prose_tail) return false;
-                for (std::size_t j = i; j < run_end; ++j)
-                    if (!m.d.current.messages[j].tool_calls.empty())
-                        return true;
-                return false;
-            }()) {
-                // STREAMING run whose live body is a tool card (write/
-                // edit/read preview). Without a hash_id maya rebuilds +
-                // re-emits the whole card every 33ms frame — the dominant
-                // wire cost while a tool streams, and on a slow tty the
-                // source of the residue-drain CPU spin. The card's bytes
-                // change in discrete ~250ms steps (the reducer throttles
-                // the streaming preview), so key the cache on a COARSENED
-                // signature: per-message terminal state + body size
-                // bucketed to 512 bytes. Between steps the key is stable
-                // → maya blits the already-painted card. The spinner /
-                // stream-rate live in the separate status bar, so the
-                // “live” feel is preserved. A <512-byte lag on a tail-
-                // windowed preview is invisible.
-                maya::CacheIdBuilder kb;
-                kb.add(std::string_view{"agentty.turn.assistant_run.stream"})
-                  .add(midrun_continuation ? std::string_view{"cont"}
-                                           : std::string_view{"head"})
-                  .add(static_cast<std::uint64_t>(run_end - i))
-                  .add(reserve_slot ? 1ULL : 0ULL);   // spacer presence
-                for (std::size_t j = i; j < run_end; ++j) {
-                    const Message& mj = m.d.current.messages[j];
-                    kb.add(std::string_view{mj.id.value});
-                    // Prose body grows by text/streaming_text; bucket it.
-                    kb.add(static_cast<std::uint64_t>(
-                        (mj.text.size() + mj.streaming_text.size()) / 512));
-                    for (const auto& tc : mj.tool_calls) {
-                        kb.add(static_cast<std::uint64_t>(tc.status.index()));
-                        // Coarse body size across the rendered fields so
-                        // a growing write/edit body only bumps the key
-                        // once per 512 bytes, not per delta.
-                        std::size_t body = tc.output().size()
-                                         + tc.progress_text().size();
-                        if (tc.args.is_object()) {
-                            if (auto it = tc.args.find("content");
-                                it != tc.args.end() && it->is_string())
-                                body += it->get_ref<const std::string&>().size();
-                            if (auto it = tc.args.find("edits");
-                                it != tc.args.end() && it->is_array())
-                                for (const auto& e : *it)
-                                    body += e.value("old_text", std::string{}).size()
-                                          + e.value("new_text", std::string{}).size();
-                        }
-                        kb.add(static_cast<std::uint64_t>(body / 512));
-                    }
-                }
-                cfg.hash_id = kb.build();
             }
+            // NOTE: the in-flight (streaming) run is deliberately NOT
+            // cached. Its Turn carries animated chrome — the tool
+            // spinner glyph and the live `elapsed` counter — which
+            // change every frame independent of the body bytes. A
+            // whole-Turn hash_id keyed on tool status + body-size
+            // buckets would blit a stale card between buckets, freezing
+            // the spinner and the elapsed readout ("liveness gone").
+            // The per-frame rebuild is cheap because the streaming
+            // write/edit body is sliced to a tail window in
+            // tool_body_preview_config (O(window), not O(file)), so we
+            // pay ~0.04ms to rebuild and keep the animation alive.
             out.push_back(maya::Turn{std::move(cfg)}.build());
             ++running_turn;
             i = run_end;
