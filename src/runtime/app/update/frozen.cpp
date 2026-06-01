@@ -390,108 +390,24 @@ void rehydrate_frozen(Model& m) {
     const std::size_t total = msgs.size();
     if (total == 0) return;
 
-    // Bounded rehydrate. Two costs scale with the rehydrated tail:
+    // Rehydrate the WHOLE thread. On the first resume frame maya's
+    // Fresh compose emits every frozen canvas row from row 0; rows past
+    // term_h scroll into the terminal's NATIVE scrollback via \r\n.
+    // That is the only way content reaches native scrollback — so a
+    // bounded "one-viewport" rehydrate makes resume instant but leaves
+    // the elided prefix unreachable on scroll-up (it was never emitted
+    // and so never entered scrollback). The user wants the full thread
+    // present, so we freeze the entire transcript: the brief one-time
+    // scroll on open is the cost of seeding scrollback, and steady-
+    // state per-frame cost stays flat because (a) trim_frozen_if_
+    // oversized bounds the live frozen canvas after the prefix has
+    // overflowed, and (b) the hash_id ComponentCache blits already-
+    // built rows without rebuilding markdown/tool bodies.
     //
-    //   1. Build cost: markdown parse + tool body preview + timeline
-    //      layout, paid once per frozen Element at rehydrate time.
-    //   2. Paint cost on the swap frame: every canvas row gets emitted
-    //      to the wire row-by-row with \r\n between, and each \r\n at
-    //      the viewport bottom edge scrolls the terminal one row. Rows
-    //      that scroll past the top of the viewport during this paint
-    //      are NOT in native scrollback (they were never live in this
-    //      session) — pure wasted bytes that the user sees as the
-    //      "paint from top, fast-scroll to bottom" lag on thread
-    //      resume.
-    //
-    // Row budget = current terminal rows − composer reserve. Fitting
-    // the rehydrated tail inside ONE viewport eliminates the visible
-    // scroll animation entirely: maya's case-A (Fresh) compose path
-    // emits every canvas row from row 0, and any row past the viewport
-    // bottom triggers a \r\n scroll. When total_rows ≤ term_h, no row
-    // scrolls — the screen paints in place. Older turns live in the
-    // on-disk JSON (m.d.current.messages is intact); they're just
-    // invisible inside agentty until the next live append shifts the
-    // window. Composer history (↑ in the composer) still walks every
-    // prior user prompt, so the recall path is unaffected.
-    constexpr std::size_t kRehydrateTurns = 6;
-    const auto term_size = maya::platform::query_terminal_size(
-        maya::platform::stdout_handle());
-    // Reserve ~6 rows for the composer + status line so the rehydrated
-    // transcript leaves room for chrome without forcing a scroll.
-    constexpr int kComposerReserve = 6;
-    const std::size_t kRehydrateRowBudget = static_cast<std::size_t>(
-        std::max(8, term_size.height.value - kComposerReserve));
-
-    // Walk backward counting speaker-runs until EITHER cap trips.
-    // A long auto-pilot Assistant run can be hundreds of rows in a
-    // SINGLE run; including it whole would blow the one-viewport budget
-    // (the resume paint emits every frozen row to the wire, and rows
-    // past the viewport bottom scroll — the visible "render from top"
-    // lag). So when a single run already exceeds the budget, cut INSIDE
-    // it at sub-turn granularity: keep only the trailing sub-turns that
-    // fit. freeze_range renders that partial run with a header (it's
-    // the start of the rehydrated window); the elided leading sub-turns
-    // live in the on-disk JSON and the terminal's own scrollback.
-    std::size_t units      = 0;
-    std::size_t row_budget = 0;
-    std::size_t start      = total;
-    std::size_t cursor     = total;
-    while (cursor > 0) {
-        std::size_t j = cursor;
-        if (msgs[j - 1].role == Role::Assistant) {
-            while (j > 0 && msgs[j - 1].role == Role::Assistant) --j;
-        } else {
-            --j;
-        }
-        // Estimate rows for THIS run before committing to include it.
-        std::size_t run_rows = 0;
-        for (std::size_t k = j; k < cursor; ++k)
-            run_rows += estimate_msg_rows(msgs[k]);
-
-        // If this is the FIRST (newest) run and it ALONE overflows the
-        // budget, trim it from the front at sub-turn granularity so the
-        // resume paint still fits ~one viewport. Walk its sub-turns
-        // newest-first, keeping until the budget is met (always keep
-        // >=1 sub-turn).
-        if (units == 0 && run_rows > kRehydrateRowBudget
-            && (cursor - j) > 1) {
-            std::size_t kept = 0;
-            std::size_t cut  = cursor;
-            for (std::size_t k = cursor; k-- > j; ) {
-                kept += estimate_msg_rows(msgs[k]);
-                cut = k;
-                if (kept >= kRehydrateRowBudget) break;
-            }
-            ++units;
-            start = cut;
-            row_budget += kept;
-            break;   // budget spent inside this run
-        }
-
-        // Always include at least one run — even a giant one is what
-        // the user just loaded and wants to see. Stop AFTER the run
-        // that pushes us over budget so the most-recent context is
-        // always visible.
-        ++units;
-        start = j;
-        row_budget += run_rows;
-        if (units >= kRehydrateTurns) break;
-        if (row_budget >= kRehydrateRowBudget) break;
-        cursor = j;
-    }
-
-    // Seed frozen_turn to the count of assistant runs in the skipped
-    // prefix so visible turn numbers reflect their true position
-    // (e.g. "turn 87" not "turn 1" on a long reload).
-    int skipped_assistant_runs = 0;
-    for (std::size_t k = 0; k < start; ) {
-        const std::size_t run_end = ui::turn_run_end(msgs, k);
-        if (msgs[k].role == Role::Assistant) ++skipped_assistant_runs;
-        k = run_end;
-    }
-    m.ui.frozen_turn = skipped_assistant_runs;
-
-    freeze_range(m, start, total);
+    // frozen_turn starts at 0: every run is in the rehydrated window,
+    // so turn numbers count up naturally from the top.
+    m.ui.frozen_turn = 0;
+    freeze_range(m, 0, total);
 }
 
 maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {

@@ -348,13 +348,14 @@ int main() {
 
     scaling_breakdown();
 
-    // ── Rehydrate budget: what an old thread paints on resume.
-    // The visible "rendering from top" lag on thread open is the wire
-    // emit of the rehydrated frozen rows. rehydrate_frozen should bound
-    // this to ~one viewport. Probe: a long thread ending in a big
-    // auto-pilot run, report the frozen rows the FIRST resume frame
-    // emits. (term height here is whatever the test env reports.)
-    std::printf("\nrehydrate budget (resume paint height):\n");
+    // ── Rehydrate footprint: rows the full-thread rehydrate freezes.
+    // rehydrate_frozen now freezes the WHOLE transcript so scroll-up
+    // shows everything (the elided-prefix experiment left old turns
+    // unreachable in native scrollback). The one-time first-frame
+    // scroll is the cost of seeding scrollback; steady-state per-frame
+    // cost is bounded by trim_frozen_if_oversized + the hash_id cache.
+    // Probe reports total frozen rows/entries after rehydrate.
+    std::printf("\nrehydrate footprint (full-thread freeze):\n");
     std::printf("%-26s | %12s | %12s\n",
                 "thread shape", "frozen_rows", "frozen_ent");
     std::printf("---------------------------+--------------+--------------\n");
