@@ -598,6 +598,16 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             // should see one. The single freeze site is in
             // `finalize_turn` once `phase::Idle` is reached.
             auto ctx = take_active_ctx(std::move(m.s.phase));
+            // Re-arm the stall watchdog across the tool boundary. No SSE
+            // events flow during ExecutingTool, so last_event_at is as
+            // old as the last delta before the tool ran — minutes, for a
+            // long `bash`/`gh run watch`. Carrying it into Streaming lets
+            // a Tick land before the new sub-turn's StreamStarted resets
+            // it, firing a spurious "stream stalled — no events for Ns".
+            // The sub-turn is a fresh wire phase; start its clock now.
+            auto now = std::chrono::steady_clock::now();
+            ctx.value().last_event_at = now;
+            ctx.value().retry         = retry::Fresh{};
             m.s.phase = phase::Streaming{std::move(ctx).value()};
             Message placeholder;
             placeholder.role = Role::Assistant;
