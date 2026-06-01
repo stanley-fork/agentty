@@ -14,6 +14,7 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
+#include <maya/platform/io.hpp>
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -276,11 +277,16 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             release_to_kernel();
             stamp("release_to_kernel", t2);
             if (prof_out) {
+                const auto _ts = maya::platform::query_terminal_size(
+                    maya::platform::stdout_handle());
                 std::fprintf(prof_out,
-                    "[load-async] msgs=%zu frozen=%zu frozen_through=%zu\n",
+                    "[load-async] msgs=%zu frozen=%zu frozen_rows=%zu "
+                    "frozen_through=%zu term_h=%d\n",
                     m.d.current.messages.size(),
                     m.ui.frozen.size(),
-                    m.ui.frozen_through);
+                    m.ui.frozen_row_total,
+                    m.ui.frozen_through,
+                    _ts.height.value);
                 std::fflush(prof_out);
                 std::fclose(prof_out);
             }
