@@ -79,43 +79,69 @@ if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
 # UI extension provides WixUI_InstallDir
 wix extension add -g WixToolset.UI.wixext | Out-Null
 
-# ---- (optional) sign the exe BEFORE packaging --------------------------------
-function Invoke-TrustedSign($file) {
-    if (-not $Sign) { return }
-    if (-not $env:TRUSTED_SIGNING_ENDPOINT) {
-        Warn "signing requested but TRUSTED_SIGNING_* env not set — leaving $file unsigned"
-        return
-    }
-    Info "code-signing $file via Azure Trusted Signing"
-
-    # Trusted Signing dlib + metadata describe the cert profile to signtool.
-    $dlibDir = Join-Path $env:TEMP "tsdlib"
-    if (-not (Test-Path "$dlibDir\bin\x64\Azure.CodeSigning.Dlib.dll")) {
-        New-Item -ItemType Directory -Force -Path $dlibDir | Out-Null
-        Info "fetching Microsoft.Trusted.Signing.Client"
-        nuget install Microsoft.Trusted.Signing.Client -Version 1.0.60 `
-            -OutputDirectory $dlibDir -ExcludeVersion | Out-Null
-    }
-    $dlib = Get-ChildItem -Recurse $dlibDir -Filter "Azure.CodeSigning.Dlib.dll" |
-            Select-Object -First 1
-    $meta = Join-Path $env:TEMP "metadata.json"
-    @{
-        Endpoint               = $env:TRUSTED_SIGNING_ENDPOINT
-        CodeSigningAccountName = $env:TRUSTED_SIGNING_ACCOUNT
-        CertificateProfileName = $env:TRUSTED_SIGNING_PROFILE
-    } | ConvertTo-Json | Set-Content -Path $meta -Encoding ASCII
-
-    $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-                Sort-Object FullName | Select-Object -Last 1
-    & $signtool.FullName sign `
-        /v /fd SHA256 /tr "http://timestamp.acs.microsoft.com" /td SHA256 `
-        /dlib $dlib.FullName /dmdf $meta `
-        $file
-    if ($LASTEXITCODE -ne 0) { throw "signtool failed on $file" }
-    Ok "signed $file"
+# ---- (optional) code-sign a file --------------------------------------------
+# Supports TWO signing backends, no Azure required:
+#   1. A generic certificate (any CA — SSL.com, Certum, DigiCert, …) supplied as
+#      a base64-encoded PFX in $env:WINDOWS_CERT_BASE64 + $env:WINDOWS_CERT_PASSWORD.
+#      This is the simplest path: buy a code-signing cert from any vendor, export
+#      it as .pfx, base64 it, drop it in a GitHub secret. (EV certs on hardware
+#      tokens can't be exported — use the Azure path or the vendor's cloud signer.)
+#   2. Azure Trusted Signing, if $env:TRUSTED_SIGNING_ENDPOINT is set.
+# If neither is configured, the file is left unsigned (still a valid MSI).
+function Get-SignTool {
+    $st = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+          Sort-Object FullName | Select-Object -Last 1
+    if (-not $st) { throw "signtool.exe not found (install the Windows SDK)" }
+    return $st.FullName
 }
 
-Invoke-TrustedSign $Exe
+function Invoke-Sign($file) {
+    if (-not $Sign) { return }
+
+    # --- backend 1: generic PFX certificate (any CA) ---
+    if ($env:WINDOWS_CERT_BASE64) {
+        Info "code-signing $file with PFX certificate"
+        $pfx = Join-Path $env:TEMP "codesign.pfx"
+        [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+        $signtool = Get-SignTool
+        & $signtool sign /v /fd SHA256 `
+            /f $pfx /p "$env:WINDOWS_CERT_PASSWORD" `
+            /tr "http://timestamp.digicert.com" /td SHA256 `
+            $file
+        Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+        if ($LASTEXITCODE -ne 0) { throw "signtool failed on $file" }
+        Ok "signed $file"
+        return
+    }
+
+    # --- backend 2: Azure Trusted Signing ---
+    if ($env:TRUSTED_SIGNING_ENDPOINT) {
+        Info "code-signing $file via Azure Trusted Signing"
+        $dlibDir = Join-Path $env:TEMP "tsdlib"
+        if (-not (Test-Path "$dlibDir\bin\x64\Azure.CodeSigning.Dlib.dll")) {
+            New-Item -ItemType Directory -Force -Path $dlibDir | Out-Null
+            nuget install Microsoft.Trusted.Signing.Client -Version 1.0.60 `
+                -OutputDirectory $dlibDir -ExcludeVersion | Out-Null
+        }
+        $dlib = Get-ChildItem -Recurse $dlibDir -Filter "Azure.CodeSigning.Dlib.dll" | Select-Object -First 1
+        $meta = Join-Path $env:TEMP "metadata.json"
+        @{
+            Endpoint               = $env:TRUSTED_SIGNING_ENDPOINT
+            CodeSigningAccountName = $env:TRUSTED_SIGNING_ACCOUNT
+            CertificateProfileName = $env:TRUSTED_SIGNING_PROFILE
+        } | ConvertTo-Json | Set-Content -Path $meta -Encoding ASCII
+        $signtool = Get-SignTool
+        & $signtool sign /v /fd SHA256 /tr "http://timestamp.acs.microsoft.com" /td SHA256 `
+            /dlib $dlib.FullName /dmdf $meta $file
+        if ($LASTEXITCODE -ne 0) { throw "signtool failed on $file" }
+        Ok "signed $file"
+        return
+    }
+
+    Warn "signing requested but no certificate configured — leaving $file unsigned"
+}
+
+Invoke-Sign $Exe
 
 # ---- build the MSI -----------------------------------------------------------
 Info "building $msi (WiX v4, $Arch)"
@@ -131,6 +157,6 @@ if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 Ok "built $msi"
 
 # ---- sign the MSI ------------------------------------------------------------
-Invoke-TrustedSign $msi
+Invoke-Sign $msi
 
 Ok "done: $msi"

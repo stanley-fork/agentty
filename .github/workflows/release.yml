@@ -227,8 +227,12 @@ jobs:
         shell: pwsh
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-          # Azure Trusted Signing — set these as repo secrets to produce a
-          # SmartScreen-trusted, signed .exe + .msi. Absent → unsigned MSI.
+          # Code signing is OPTIONAL. Two ways, pick whichever you have:
+          #  (a) any-CA cert: base64 your .pfx into WINDOWS_CERT_BASE64 (+ password)
+          #  (b) Azure Trusted Signing: set the TRUSTED_SIGNING_* secrets
+          # No secrets → a valid UNSIGNED installer is still produced.
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
@@ -236,7 +240,7 @@ jobs:
           TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
           TRUSTED_SIGNING_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
         run: |
-          $sign = if ($env:TRUSTED_SIGNING_ENDPOINT) { '-Sign' } else { '' }
+          $sign = if ($env:WINDOWS_CERT_BASE64 -or $env:TRUSTED_SIGNING_ENDPOINT) { '-Sign' } else { '' }
           ./packaging/windows/build-msi.ps1 `
             -Version "$env:VERSION" `
             -Exe agentty-windows-x86_64.exe `
@@ -418,3 +422,23 @@ jobs:
           rm -f SHA256SUMS
           sha256sum -- * > SHA256SUMS
           gh release upload "$TAG" SHA256SUMS --clobber
+
+  # Submit the Windows .msi to the winget community repo. winget is the
+  # zero-cost, no-SmartScreen-warning install path: `winget install agentty`.
+  # The action computes the installer SHA from the published .msi and opens a
+  # PR to microsoft/winget-pkgs. Requires a PAT (classic, public_repo scope)
+  # stored as the WINGET_TOKEN secret; skipped automatically if absent.
+  publish-winget:
+    name: publish to winget
+    needs: [prepare, build-windows]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit manifest to winget-pkgs
+        if: ${{ secrets.WINGET_TOKEN != '' }}
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: agentty.agentty
+          version: ${{ needs.prepare.outputs.version }}
+          installers-regex: 'agentty-windows-x86_64\.msi$'
+          token: ${{ secrets.WINGET_TOKEN }}

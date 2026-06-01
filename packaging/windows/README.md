@@ -23,35 +23,56 @@ That emits `agentty-windows-x86_64.msi` (unsigned). Add `-Sign` to sign it (see 
 
 ## Code signing — getting rid of the SmartScreen warning
 
-An unsigned installer triggers Windows SmartScreen ("unknown publisher"). To
-ship a **trusted, signed** installer you need a publicly-trusted code-signing
-certificate. Since 2023 the private key must live on FIPS-140-2 hardware/HSM,
-so signing in CI is done through a cloud signing service. We use
-**[Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing/)**
-(~\$10/month; EV-validated profiles are trusted by SmartScreen immediately).
+An unsigned installer triggers Windows SmartScreen ("unknown publisher"). You
+have three ways to deal with this — **you do not need Azure**:
 
-### One-time setup
+### Option A (free, no signing): ship via winget / Scoop
 
-1. Create a **Trusted Signing account** + a **certificate profile** in Azure.
-2. Create an **app registration (service principal)** and grant it the
-   *Trusted Signing Certificate Profile Signer* role on the account.
-3. Add these as **GitHub Actions repository secrets**:
+Package managers download from the GitHub release and install with **no
+SmartScreen warning at all** — the manager is trusted, not your binary. For a
+CLI this is what most users prefer:
 
-   | Secret | Value |
-   |--------|-------|
-   | `AZURE_TENANT_ID` | the service-principal tenant id |
-   | `AZURE_CLIENT_ID` | the service-principal app id |
-   | `AZURE_CLIENT_SECRET` | the service-principal secret |
-   | `TRUSTED_SIGNING_ENDPOINT` | e.g. `https://wus2.codesigning.azure.net` |
-   | `TRUSTED_SIGNING_ACCOUNT` | your Trusted Signing account name |
-   | `TRUSTED_SIGNING_PROFILE` | your certificate profile name |
+```powershell
+winget install agentty        # or: scoop install agentty
+```
 
-With those secrets present, the release workflow signs **both** `agentty.exe`
-and the `.msi`. Without them, it still publishes a valid **unsigned** MSI.
+The winget manifest lives in `packaging/winget/`; the `publish-winget` job in
+the release workflow opens a PR to `microsoft/winget-pkgs` automatically once
+you add a `WINGET_TOKEN` secret (a classic PAT with `public_repo` scope). Zero
+cost, zero Azure.
 
-> Alternatives to Azure Trusted Signing: DigiCert KeyLocker, SSL.com eSigner —
-> any service that exposes a signtool dlib works; adjust `build-msi.ps1`
-> accordingly.
+### Option B (any CA, simplest paid path): a PFX certificate
+
+Buy a code-signing certificate from **any** CA — SSL.com, Certum, DigiCert,
+GlobalSign (~\$200–600/yr). Export it as a `.pfx`, base64-encode it, and add two
+GitHub secrets:
+
+| Secret | Value |
+|--------|-------|
+| `WINDOWS_CERT_BASE64` | `base64 -w0 cert.pfx` output |
+| `WINDOWS_CERT_PASSWORD` | the PFX password |
+
+`build-msi.ps1` signs both the `.exe` and `.msi` with it. An **OV** cert clears
+SmartScreen after it builds download reputation; an **EV** cert clears it
+immediately (but EV keys live on a hardware token and can't be exported — use
+the vendor's cloud signer or Option C for those).
+
+> Note: as of 2023, publicly-trusted keys must live on FIPS-140-2 hardware. A
+> plain exported `.pfx` still works for **OV** certs from CAs that issue them in
+> software; for EV, use a cloud signing service.
+
+### Option C (cloud HSM): Azure Trusted Signing
+
+If you'd rather not handle a token, Azure Trusted Signing (~\$10/mo) keeps the
+key in Microsoft's HSM and clears SmartScreen immediately. Set
+`TRUSTED_SIGNING_ENDPOINT`, `TRUSTED_SIGNING_ACCOUNT`, `TRUSTED_SIGNING_PROFILE`
+(+ the `AZURE_*` service-principal secrets). `build-msi.ps1` auto-detects this
+backend.
+
+**With none of the above configured, CI still publishes a valid UNSIGNED MSI**
+— which already gives PATH + Start Menu + clean uninstall, a big step up from a
+raw `.exe`. Most users will install via winget/Scoop anyway and never see a
+warning.
 
 ## Files
 
