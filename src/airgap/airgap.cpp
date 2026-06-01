@@ -82,17 +82,23 @@ void print_usage() {
         "                     after re-OAuthing locally.\n"
         "  --remote-agentty PATH Absolute path to agentty on the remote.  Default:\n"
         "                     `agentty` (resolved via remote PATH).\n"
+        "  --clipboard-relay  Make Ctrl+V image paste work on the remote.\n"
+        "                     Adds a reverse tunnel back to this laptop's\n"
+        "                     sshd and points the remote's clipboard reader\n"
+        "                     at it, so a pasted image is pulled from THIS\n"
+        "                     machine's clipboard on demand.  Requires sshd\n"
+        "                     running on the laptop and key-based login to\n"
+        "                     localhost (BatchMode — no password prompt).\n"
         "\n"
         "  ssh and scp must be on this laptop's PATH.  Pass extra ssh args\n"
         "  via the AGENTTY_AIRGAP_SSH env var (e.g. -i, -p, -J).\n"
         "\n"
-        "  Image paste (Ctrl+V) on the remote: the remote host has no\n"
-        "  clipboard of its own, so set AGENTTY_CLIPBOARD_CMD on the remote\n"
-        "  to a command that prints your laptop's clipboard image to stdout.\n"
-        "  Easiest is a reverse SSH callback — add a `-R` tunnel to an sshd\n"
-        "  on your laptop and point the command back through it, e.g.:\n"
+        "  Image paste (Ctrl+V) on the remote: easiest is --clipboard-relay\n"
+        "  above.  For full control, set AGENTTY_CLIPBOARD_CMD on the remote\n"
+        "  (or on this laptop — it's forwarded) to any command that prints\n"
+        "  the laptop's clipboard image to stdout, e.g.:\n"
         "    AGENTTY_CLIPBOARD_CMD='ssh laptop wl-paste --type image/png'\n"
-        "  Without it, attach images by path instead.\n");
+        "  Without either, attach images by path instead.\n");
 }
 
 // Synchronously spawn `argv[0]` with the given argv and wait for it.
@@ -206,8 +212,21 @@ std::string sh_squote(std::string_view v) {
 // Replace this process with `ssh -t -R 1080 user@host <remote-cmd>`.
 // Never returns on success.  argv constructed on the heap because execvp
 // modifies its argv slot.
+//
+// clipboard_relay: when true, also open a reverse tunnel
+// `-R <kRelayPort>:localhost:22` so the air-gapped remote can ssh back
+// to *this* laptop's sshd, and set AGENTTY_CLIPBOARD_CMD on the remote
+// to a command that runs the laptop's clipboard reader through it. This
+// is what makes Ctrl+V image paste work in airgap: the bytes are pulled
+// from the laptop's clipboard on demand over the existing session.
 [[noreturn]] void exec_ssh(const std::string& remote,
-                           const std::string& remote_agentty) {
+                           const std::string& remote_agentty,
+                           bool clipboard_relay) {
+    // Reverse-tunnel port for the clipboard relay: the remote's
+    // localhost:kRelayPort forwards back to this laptop's sshd (:22),
+    // so the synthesized AGENTTY_CLIPBOARD_CMD can ssh home and read
+    // the laptop clipboard. Distinct from the SOCKS port (1080).
+    constexpr int kRelayPort = 1175;
     // Remote command: point agentty at the tunnelled SOCKS5 proxy, exec it.
     // `exec` matters — without it the user's $SHELL stays around as a
     // parent process and signal forwarding gets one extra hop wrong.
@@ -223,15 +242,63 @@ std::string sh_squote(std::string_view v) {
     // realigns" flicker on the rest.
     std::string remote_cmd = "AGENTTY_SOCKS_PROXY=localhost:1080 MAYA_FORCE_SYNC=1";
 
-    // Forward the clipboard-image override to the remote if the user
-    // set it on the laptop. The remote has no clipboard of its own, so
-    // this is how Ctrl+V image paste reaches the laptop's clipboard
-    // (the command typically shells back over a reverse SSH tunnel).
+    // ---- Clipboard image relay ---------------------------------------
+    // The air-gapped remote has no clipboard of its own, so Ctrl+V image
+    // paste needs the bytes pulled from *this* laptop's clipboard on
+    // demand. AGENTTY_CLIPBOARD_CMD on the remote is the hook; two ways
+    // to populate it:
+    //   1. User set it explicitly on the laptop -> forward verbatim.
+    //   2. --clipboard-relay -> we add a reverse tunnel back to the
+    //      laptop's sshd (see kRelayPort below) and synthesize a command
+    //      that runs the laptop's clipboard reader (wl-paste / xclip)
+    //      through it.
+    // (1) wins if both are present.
     if (const char* cc =
             util::env::get_or_null<util::env::Var::ClipboardCmd>()) {
         remote_cmd += " AGENTTY_CLIPBOARD_CMD=";
         remote_cmd += sh_squote(cc);
+    } else if (clipboard_relay) {
+        // Pick the laptop's clipboard reader from its session type:
+        // wl-paste on Wayland, xclip on X11. We request image/png —
+        // sniff_image_type on the remote validates whatever returns.
+        bool laptop_wayland = false;
+        if (const char* st = std::getenv("XDG_SESSION_TYPE"))
+            laptop_wayland = std::string_view{st} == "wayland";
+        if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w)
+            laptop_wayland = true;
+
+        // A non-interactive `ssh host cmd` does NOT inherit the laptop's
+        // graphical-session env, so wl-paste/xclip can't find the
+        // display. We captured WAYLAND_DISPLAY / DISPLAY here (on the
+        // laptop, where they're set) and prepend them to the callback
+        // command so the reader connects to the right compositor.
+        std::string disp_prefix;
+        if (laptop_wayland) {
+            if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w)
+                disp_prefix += "WAYLAND_DISPLAY=" + std::string{w} + " ";
+        } else if (const char* d = std::getenv("DISPLAY"); d && *d) {
+            disp_prefix += "DISPLAY=" + std::string{d} + " ";
+        }
+        const char* reader = laptop_wayland
+            ? "wl-paste --type image/png"
+            : "xclip -selection clipboard -t image/png -o";
+
+        const char* user = std::getenv("USER");
+        std::string dest = (user && *user)
+            ? std::string{user} + "@localhost" : std::string{"localhost"};
+        // BatchMode=yes so a missing key fails fast instead of prompting
+        // for a password (the paste runs unattended on Ctrl+V).
+        std::string back =
+            "ssh -p " + std::to_string(kRelayPort)
+            + " -o StrictHostKeyChecking=no"
+              " -o UserKnownHostsFile=/dev/null"
+              " -o BatchMode=yes"
+              " -o LogLevel=ERROR "
+            + dest + " " + disp_prefix + reader;
+        remote_cmd += " AGENTTY_CLIPBOARD_CMD=";
+        remote_cmd += sh_squote(back);
     }
+
 
     // Forward terminal-identifying env vars from this laptop to the
     // remote shell so the remote agentty can tell whether the user's
@@ -282,6 +349,17 @@ std::string sh_squote(std::string_view v) {
     // it receives via *this* (laptop) side.  Requires OpenSSH ≥ 7.6 on
     // both ends — practically every modern install.
     argv.push_back("-R"); argv.push_back("1080");
+
+    // Clipboard relay reverse tunnel: remote localhost:kRelayPort ->
+    // this laptop's sshd. Only added with --clipboard-relay; lets the
+    // remote's AGENTTY_CLIPBOARD_CMD ssh home to read the clipboard.
+    // -A forwards this laptop's ssh-agent so the callback authenticates
+    // back to localhost with your key without copying one to the remote.
+    if (clipboard_relay) {
+        argv.push_back("-A");
+        argv.push_back("-R");
+        argv.push_back(std::to_string(kRelayPort) + ":localhost:22");
+    }
 
     // Liveness defaults.  All passed *before* AGENTTY_AIRGAP_SSH so a user-
     // supplied `-o Foo=bar` later silently wins (OpenSSH applies the last
@@ -366,6 +444,7 @@ int cmd_airgap(int argc, char** argv) {
     return 1;
 #else
     bool        setup_mode = false;
+    bool        clipboard_relay = false;
     std::string remote_agentty = "agentty";
     std::string remote;
 
@@ -373,6 +452,7 @@ int cmd_airgap(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "-h" || a == "--help") { print_usage(); return 0; }
         else if (a == "--setup")       { setup_mode = true; }
+        else if (a == "--clipboard-relay") { clipboard_relay = true; }
         else if (a == "--remote-agentty" && i + 1 < argc) {
             remote_agentty = argv[++i];
         }
@@ -393,7 +473,25 @@ int cmd_airgap(int argc, char** argv) {
         if (int rc = copy_credentials(remote); rc != 0) return rc;
     }
 
-    exec_ssh(remote, remote_agentty);  // [[noreturn]]
+    if (clipboard_relay) {
+        // The relay's callback authenticates back to localhost via the
+        // forwarded ssh-agent (BatchMode, no password prompt). Without
+        // an agent holding a key the laptop accepts, the callback fails
+        // silently and Ctrl+V just reports an empty clipboard — warn now.
+        const char* sock = std::getenv("SSH_AUTH_SOCK");
+        if (!sock || !*sock) {
+            std::fprintf(stderr,
+                "agentty airgap: --clipboard-relay needs a running ssh-agent "
+                "on this laptop\n"
+                "             (the remote authenticates back via forwarded "
+                "agent). Start one and add your key:\n"
+                "               eval \"$(ssh-agent -s)\" && ssh-add\n"
+                "             then re-run. Continuing anyway — image paste "
+                "may not work.\n");
+        }
+    }
+
+    exec_ssh(remote, remote_agentty, clipboard_relay);  // [[noreturn]]
 #endif
 }
 
