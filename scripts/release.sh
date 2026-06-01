@@ -450,14 +450,30 @@ linux_x64=$(sum_for "agentty-linux-x86_64")
 linux_arm=$(sum_for "agentty-linux-aarch64")
 win_x64=$(sum_for "agentty-windows-x86_64.exe")
 src_tar=$(sum_for "agentty-$VERSION.tar.gz")
+mac_x64=$(sum_for "agentty-macos-x86_64")
+mac_arm=$(sum_for "agentty-macos-arm64")
 
-# homebrew — only regenerate on the linux host (Linux SHAs are the ones the
-# formula pins; the macOS half is a source build).
-if [ "$HOST_OS" = linux ] && [ -n "$linux_x64" ] && [ -n "$linux_arm" ] && [ -n "$src_tar" ]; then
+# The macOS binaries are built on macOS runners, so a Linux-host release run
+# won't have them in dist/. Pull their SHAs from the published release's
+# SHA256SUMS so the formula (generated on the Linux host) can pin them.
+if [ "$HOST_OS" = linux ] && { [ -z "$mac_x64" ] || [ -z "$mac_arm" ]; }; then
+    remote_sums=$(gh release view "$TAG" --repo 1ay1/agentty \
+        --json assets -q '.assets[].name' 2>/dev/null | grep -qx SHA256SUMS \
+        && gh release download "$TAG" --repo 1ay1/agentty \
+             --pattern SHA256SUMS --output - 2>/dev/null)
+    [ -z "$mac_x64" ] && mac_x64=$(printf '%s\n' "$remote_sums" | awk '$2=="agentty-macos-x86_64"{print $1}')
+    [ -z "$mac_arm" ] && mac_arm=$(printf '%s\n' "$remote_sums" | awk '$2=="agentty-macos-arm64"{print $1}')
+fi
+
+# homebrew — only regenerate on the linux host. Pins prebuilt static binaries
+# for both Linux and macOS (no source build; agentty needs C++26/GCC).
+if [ "$HOST_OS" = linux ] && [ -n "$linux_x64" ] && [ -n "$linux_arm" ] \
+     && [ -n "$mac_x64" ] && [ -n "$mac_arm" ]; then
     sed -e "s/^  version \".*\"/  version \"$VERSION\"/" \
         -e "s|@LINUX_X86_64_SHA256@|$linux_x64|g" \
         -e "s|@LINUX_AARCH64_SHA256@|$linux_arm|g" \
-        -e "s|@SRC_TARBALL_SHA256@|$src_tar|g" \
+        -e "s|@MACOS_X86_64_SHA256@|$mac_x64|g" \
+        -e "s|@MACOS_ARM64_SHA256@|$mac_arm|g" \
         "$root/packaging/homebrew/agentty.rb" > "$pkgdir/agentty.rb"
     ok "packaging/agentty.rb (homebrew)"
 fi
