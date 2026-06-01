@@ -115,6 +115,48 @@ struct AgenttyApp {
         mix(m.ui.composer.queued.size());
         mix(m.ui.composer.expanded ? 1ULL : 0ULL);
 
+        // ── Modal / picker state.
+        //
+        // CRITICAL: every modal's open/closed state AND its in-modal
+        // cursor/query must feed the hash. These pickers are
+        // selection-driven — pressing ↑/↓ only mutates an index (or a
+        // query string) inside the variant; nothing else in the model
+        // moves. If that index isn't hashed, ModelPickerMove produces a
+        // model the gate considers visually identical, skip_render fires,
+        // and the cursor doesn't repaint until some OTHER hashed axis
+        // (caret-blink parity, status text) happens to flip ~265 ms later.
+        // Symptom: "press 4-5 times, registers once."
+        //
+        // variant::index() captures Closed-vs-Open (and login's six
+        // sub-states); the OpenAt index / palette query+index capture the
+        // cursor movement within an open picker.
+        mix(static_cast<std::uint64_t>(m.ui.model_picker.index()));
+        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.model_picker)));
+        mix(static_cast<std::uint64_t>(m.ui.thread_list.index()));
+        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.thread_list)));
+        mix(static_cast<std::uint64_t>(m.ui.diff_review.index()));
+        if (auto* c = ui::pick::opened(m.ui.diff_review)) {
+            mix(static_cast<std::uint64_t>(c->file_index));
+            mix(static_cast<std::uint64_t>(c->hunk_index));
+        }
+        mix(static_cast<std::uint64_t>(m.ui.command_palette.index()));
+        if (auto* o = opened(m.ui.command_palette)) {
+            mix_str(o->query);
+            mix(static_cast<std::uint64_t>(o->index));
+        }
+        mix(static_cast<std::uint64_t>(m.ui.mention_palette.index()));
+        if (auto* o = mention_opened(m.ui.mention_palette)) {
+            mix_str(o->query);
+            mix(static_cast<std::uint64_t>(o->index));
+        }
+        mix(static_cast<std::uint64_t>(m.ui.symbol_palette.index()));
+        if (auto* o = symbol_palette_opened(m.ui.symbol_palette)) {
+            mix_str(o->query);
+            mix(static_cast<std::uint64_t>(o->index));
+        }
+        mix(static_cast<std::uint64_t>(m.ui.todo.open.index()));
+        mix(static_cast<std::uint64_t>(m.ui.login.index()));
+
         // Time-driven animation buckets. Each bucket flip forces a
         // render via hash advance. The bucket size is the FLOOR on
         // how often we'll re-render purely for animation; the actual

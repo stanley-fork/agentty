@@ -274,12 +274,25 @@ struct Model {
         // Persisted across open→close→open by default. The reducer can
         // reset `.y = 0` on semantic transitions if desired (e.g. when
         // the filter query changes the match set).
-        mutable maya::ScrollState model_picker_scroll;
-        mutable maya::ScrollState thread_list_scroll;
-        mutable maya::ScrollState command_palette_scroll;
-        mutable maya::ScrollState mention_palette_scroll;
-        mutable maya::ScrollState symbol_palette_scroll;
-        mutable maya::ScrollState todo_scroll;
+        //
+        // auto_dispatch = false: these pickers are selection-driven. The
+        // reducer owns the cursor (ModelPickerMove / ThreadListMove /
+        // CommandPaletteMove / …) and the Picker widget auto-scrolls the
+        // viewport to keep the selected row visible every build. Leaving
+        // auto_dispatch on (the default) would ALSO feed every ↑/↓/PageUp
+        // arrow straight into ScrollState::handle, bumping scroll.y in
+        // parallel — which then fights the widget's selection-follow
+        // clamp. The visible symptom is arrow keys appearing to do
+        // nothing until the offset saturates against max_y ("press 4-5
+        // times before it registers once"). Scroll position here is a
+        // pure function of the selected index, so the raw-key dispatch
+        // is interference, not input.
+        mutable maya::ScrollState model_picker_scroll{.auto_dispatch = false};
+        mutable maya::ScrollState thread_list_scroll{.auto_dispatch = false};
+        mutable maya::ScrollState command_palette_scroll{.auto_dispatch = false};
+        mutable maya::ScrollState mention_palette_scroll{.auto_dispatch = false};
+        mutable maya::ScrollState symbol_palette_scroll{.auto_dispatch = false};
+        mutable maya::ScrollState todo_scroll{.auto_dispatch = false};
     };
 
     Domain      d;
