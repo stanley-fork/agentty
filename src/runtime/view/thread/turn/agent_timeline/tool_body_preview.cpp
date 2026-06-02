@@ -79,6 +79,17 @@ void accumulate_grep_hits(const std::string& output, GrepHits& out) {
 // final card renders everything.
 constexpr std::size_t kStreamTailLines = 64;
 
+// Live-tail window budget for line-oriented bodies (FileRead,
+// CodeBlock, GitDiff, Json, web_fetch). With show_all=false and
+// tail_only=true (maya's defaults for these kinds) the widget renders
+// only the last max(head,tail) lines — so feeding the full body makes
+// split_lines/elide walk O(file) every frame for a fixed-size preview.
+// A tail slice generous enough to cover every renderer's tail budget
+// keeps the visible output byte-identical while bounding per-frame cost
+// to O(window). The frozen snapshot (built under FrozenBuildScope) still
+// gets the full body — painted once, then blitted.
+constexpr std::size_t kLiveTailLines = 64;
+
 [[nodiscard]] std::string tail_window(std::string_view s,
                                       std::size_t keep_lines) {
     if (s.empty()) return {};
@@ -93,6 +104,16 @@ constexpr std::size_t kStreamTailLines = 64;
         if (i == 0) start = 0;
     }
     return std::string{s.substr(start)};
+}
+
+// Body for a terminal line-oriented tool sitting in the LIVE tail.
+// Frozen builds keep the full body (full content, painted once); the
+// live path elides to a bounded tail window so per-frame split_lines
+// stays O(window) instead of O(file). Cheap no-op for short bodies
+// (tail_window returns the whole string when it has <= keep_lines).
+[[nodiscard]] std::string live_tail_body(std::string_view body) {
+    if (building_frozen()) return std::string{body};
+    return tail_window(body, kLiveTailLines);
 }
 
 } // namespace
@@ -171,9 +192,21 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 auto b = body.find(kClose, a);
                 if (b == std::string::npos) b = body.size();
                 out.kind = Kind::GitDiff;
-                out.text = body.substr(a, b - a);
+                // Frozen build keeps the full diff (show_all, painted
+                // once). In the live tail elide to a tail window so the
+                // per-frame split_lines stays O(window) for a large edit
+                // — same discipline as Write's terminal-but-not-frozen
+                // branch.
+                if (building_frozen()) {
+                    out.text     = body.substr(a, b - a);
+                    out.show_all = true;
+                } else {
+                    out.text     = tail_window(
+                        std::string_view{body}.substr(a, b - a),
+                        kStreamTailLines);
+                    out.show_all = false;
+                }
                 out.text_color = text_tertiary;
-                out.show_all = true;
                 return out;
             }
             // Fence missing — fall through to args-based EditDiff below.
@@ -192,7 +225,11 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 it != tc.args.end() && it->is_array() && !it->empty())
             {
                 out.kind = Kind::EditDiff;
-                out.show_all     = !streaming_now;
+                // show_all only in the frozen snapshot. While streaming
+                // OR sitting in the live tail (re-rendered every frame)
+                // keep the elided per-side/per-hunk preview so the cost
+                // is bounded; the frozen card carries the full diff.
+                out.show_all     = !streaming_now && building_frozen();
                 out.is_streaming = streaming_now;
                 out.hunks.reserve(it->size());
                 for (const auto& e : *it) {
@@ -209,7 +246,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             if (nt.empty()) nt = safe_arg(tc.args, "new_string");
             if (!ot.empty() || !nt.empty()) {
                 out.kind = Kind::EditDiff;
-                out.show_all     = !streaming_now;
+                out.show_all     = !streaming_now && building_frozen();
                 out.is_streaming = streaming_now;
                 out.hunks.push_back({std::move(ot), std::move(nt)});
             }
@@ -312,7 +349,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         const auto& body = tc.output();
         if (!body.empty() && body != "no changes") {
             out.kind = Kind::GitDiff;
-            out.text = body;
+            out.text = live_tail_body(body);
             out.text_color = text_tertiary;
         }
         return out;
@@ -329,7 +366,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         const auto& body = tc.output();
         if (!body.empty()) {
             out.kind = Kind::FileRead;
-            out.text = body;
+            out.text = live_tail_body(body);
             out.text_color = text_tertiary;    // bright cyan — file content rendered as code
             // Anchor the gutter to the real source line numbers the tool
             // returned, not 1. The read tool accepts both `offset` and the
@@ -370,7 +407,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         const auto& body = tc.output();
         if (!body.empty()) {
             out.kind = Kind::Json;
-            out.text = body;
+            out.text = live_tail_body(body);
             out.text_color = text_tertiary;
         }
         return out;
@@ -397,7 +434,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     {
         if (!tc.output().empty()) {
             out.kind = Kind::CodeBlock;
-            out.text = tc.output();
+            out.text = live_tail_body(tc.output());
             out.text_color = text_tertiary;
         }
         return out;
@@ -407,7 +444,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //    matches the card's failure cue; body content stays dim.
     if (tc.is_failed() && !tc.output().empty()) {
         out.kind = Kind::Failure;
-        out.text = tc.output();
+        out.text = live_tail_body(tc.output());
         out.chrome_color = status_error;
         return out;
     }
