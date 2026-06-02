@@ -44,6 +44,38 @@ namespace agentty::app::detail {
 
 namespace {
 
+// Single source of truth for the live terminal geometry. ONE TIOCGWINSZ
+// ioctl returns both axes; every row-math / trim caller reads through
+// this so width and height can never disagree across a frame. The
+// row estimate (estimate_msg_rows) divides byte counts by `cols`, and
+// the trims size their keep-margins off `rows` — both must reflect the
+// SAME terminal state the renderer laid the canvas out against, or the
+// "provably above the viewport" trim proof drifts (under-counted rows
+// → drop an on-screen entry → re-emit committed scrollback shifted =
+// the duplication ghost). Falls back to a sane 80x40 when the ioctl
+// fails (piped output, detached tty).
+struct TermDims { int cols; int rows; };
+TermDims term_dims() {
+    const auto sz = maya::platform::query_terminal_size(
+        maya::platform::stdout_handle());
+    return TermDims{
+        sz.width.value  > 0 ? sz.width.value  : 80,
+        sz.height.value > 0 ? sz.height.value : 40,
+    };
+}
+
+// Effective wrap width used by the row estimate. Clamped to a sane
+// floor so a transiently-bogus 1-col read can't blow the estimate up
+// to thousands of rows (which would over-trim). The renderer reserves
+// a couple of columns for the turn rail / gutter, so subtract a small
+// margin to bias the estimate toward OVER-counting rows (keep more) —
+// the safe direction for the trim's correctness.
+int estimate_wrap_cols() {
+    const int cols = term_dims().cols;
+    // Rail + padding eat ~4 columns of real content width.
+    return std::max(16, cols - 4);
+}
+
 // Live-canvas row budget = a small multiple of the terminal viewport.
 // The live m.ui.frozen vector IS the inline canvas; every full repaint
 // (resume swap, resize→Divergent wipe+repaint, Ctrl-L) walks it top to
@@ -51,9 +83,7 @@ namespace {
 // all three cheap. Older rows live in native terminal scrollback (the
 // terminal redraws them instantly) and on disk (recall via picker).
 std::size_t frozen_row_budget() {
-    const auto sz = maya::platform::query_terminal_size(
-        maya::platform::stdout_handle());
-    const int h = sz.height.value > 0 ? sz.height.value : 40;
+    const int h = term_dims().rows;
     // ~2 viewports, floored so a tiny window still keeps useful context.
     return static_cast<std::size_t>(std::max(48, h * 2));
 }
@@ -124,11 +154,40 @@ std::size_t estimate_json_bytes(const nlohmann::json& j) {
     }
 }
 
+// Wrapped-row count for a text body at the given content width: each
+// hard newline starts a fresh row, and a line longer than `cols`
+// soft-wraps to ceil(width/cols) rows. This is what the renderer
+// actually does, so the estimate tracks the real canvas height instead
+// of assuming a fixed 60-col line. Byte length (not display columns) is
+// the wrap unit — a deliberate over-count for multibyte text, which is
+// the SAFE direction (keeps slightly more frozen than strictly needed).
+std::size_t wrapped_rows(std::string_view body, int cols) {
+    if (cols < 1) cols = 1;
+    const std::size_t w = static_cast<std::size_t>(cols);
+    std::size_t rows = 0;
+    std::size_t line_start = 0;
+    while (true) {
+        const std::size_t nl = body.find('\n', line_start);
+        const std::size_t line_end =
+            (nl == std::string_view::npos) ? body.size() : nl;
+        const std::size_t len = line_end - line_start;
+        rows += (len == 0) ? 1 : (len + w - 1) / w;   // ceil, blank = 1 row
+        if (nl == std::string_view::npos) break;
+        line_start = nl + 1;
+    }
+    return rows == 0 ? 1 : rows;
+}
+
 std::size_t estimate_msg_rows(const Message& mm) {
-    std::size_t bytes = mm.text.size() + mm.streaming_text.size();
+    const int cols = estimate_wrap_cols();
+    const std::size_t w = static_cast<std::size_t>(cols);
+
+    // Prose body: count real wrapped rows (newline-aware), not bytes/60.
+    std::size_t rows = 0;
+    if (!mm.text.empty())           rows += wrapped_rows(mm.text, cols);
+    if (!mm.streaming_text.empty()) rows += wrapped_rows(mm.streaming_text, cols);
+
     for (const auto& tc : mm.tool_calls) {
-        bytes += tc.output().size();
-        bytes += tc.args_streaming.size();
         // The RENDERED body of a settled tool card comes from its
         // ARGS, not its output: a write card shows args["content"]
         // (the whole new file, show_all), an edit card shows every
@@ -136,21 +195,23 @@ std::size_t estimate_msg_rows(const Message& mm) {
         // shows its result text. tc.output() is only the one-line
         // "wrote N lines" footer. Counting just output() under-
         // estimated a 3000-line write as ~1 row, so the row cap never
-        // tripped and the canvas ballooned to thousands of rows while
-        // frozen_row_total still read tiny. Approximate the body by a
-        // cheap (non-allocating) walk of the args JSON — NOT dump(),
-        // which allocated a full serialized copy per freeze and made
-        // resuming a long thread slow.
-        if (!tc.args.is_null()) {
-            bytes += estimate_json_bytes(tc.args);
-        }
+        // tripped and the canvas ballooned. We don't have the laid-out
+        // text here, so approximate the body's wrapped height from a
+        // cheap (non-allocating) byte walk of the args JSON divided by
+        // the real content width — NOT dump(), which allocated a full
+        // serialized copy per freeze and made resuming a long thread
+        // slow. output() bytes wrap too.
+        std::size_t body_bytes = tc.output().size() + tc.args_streaming.size();
+        if (!tc.args.is_null()) body_bytes += estimate_json_bytes(tc.args);
+        rows += (body_bytes + w - 1) / w;
         // Header / footer / chrome rows per tool card (~4 rows even
-        // for an empty body — title, divider, status, blank).
-        bytes += 4 * 60;
+        // for an empty body — title, divider, status, blank). Fixed
+        // row count, width-independent.
+        rows += 4;
     }
-    // Per-message envelope (header, gap, divider).
-    bytes += 3 * 60;
-    return bytes / 60 + 1;
+    // Per-message envelope (header, gap, divider) — a few fixed rows.
+    rows += 3;
+    return rows;
 }
 
 // Estimated rows for the run messages[from..to) that collapse into
@@ -415,11 +476,27 @@ namespace {
 // O(limit); `limit` is bounded by the committed prefix we're about to
 // move out of the live tail (it happens at most once per ~budget rows of
 // growth), so this is not a per-frame O(body) tax.
-std::size_t last_safe_block_split(const std::string& s, std::size_t limit) {
+//
+// Out-params describe the state at the returned boundary so the caller
+// can handle the inside-a-fence fallback (see freeze_streaming_text_prefix):
+//   • `fence_open`   — true iff `s[0..limit)` ends INSIDE an open fence
+//                      with no clean boundary found (best stayed 0).
+//   • `fence_marker` — the exact opening-fence line (e.g. "```python" or
+//                      "~~~") so a fallback split can close + reopen the
+//                      same fence kind / info string. Empty when not in a
+//                      fence.
+//   • `last_line_nl` — byte offset just past the last newline at or before
+//                      `limit` (a fence-internal split point). 0 if none.
+std::size_t last_safe_block_split(const std::string& s, std::size_t limit,
+                                  bool& fence_open,
+                                  std::string& fence_marker,
+                                  std::size_t& last_line_nl) {
     if (limit == 0 || limit > s.size()) limit = s.size();
     bool in_fence = false;
+    std::string open_marker;       // info line of the currently-open fence
     std::size_t best = 0;          // start-of-next-block offset, fence-closed
     std::size_t line_start = 0;
+    std::size_t last_nl = 0;
     for (std::size_t i = 0; i < limit; ) {
         std::size_t eol = s.find('\n', i);
         const bool last_line = (eol == std::string::npos || eol >= limit);
@@ -432,7 +509,13 @@ std::size_t last_safe_block_split(const std::string& s, std::size_t limit) {
         if (line_end - p >= 3
             && ((s[p] == '`' && s[p+1] == '`' && s[p+2] == '`')
              || (s[p] == '~' && s[p+1] == '~' && s[p+2] == '~'))) {
+            if (!in_fence) {
+                // Opening fence: remember the whole line (marker + info
+                // string) so a fallback close/reopen reproduces it.
+                open_marker.assign(s, line_start, line_end - line_start);
+            }
             in_fence = !in_fence;
+            if (!in_fence) open_marker.clear();
         }
         // Blank line = block boundary. Only a candidate split when the
         // fence is closed at this point (splitting mid-fence would
@@ -442,10 +525,14 @@ std::size_t last_safe_block_split(const std::string& s, std::size_t limit) {
             // newline, i.e. the start of the next block's first line.
             best = last_line ? line_end : (eol + 1);
         }
+        if (!last_line) last_nl = eol + 1;
         if (last_line) break;
         i = eol + 1;
         line_start = i;
     }
+    fence_open   = in_fence && best == 0;
+    fence_marker = in_fence ? open_marker : std::string{};
+    last_line_nl = last_nl;
     return best;
 }
 
@@ -475,8 +562,18 @@ void freeze_streaming_text_prefix(Model& m) {
     // blank line by ±1 row as a `\n\n` boundary commits — rewriting a
     // row already emitted to native scrollback (a duplication ghost).
     // Splitting early keeps the oscillating region on-screen (mutable),
-    // so the seam stays clean. ~1 KB ≈ well under a viewport of prose.
-    constexpr std::size_t kLiveTailBytes = 1024;
+    // so the seam stays clean.
+    //
+    // Width-aware: "well under a viewport of prose" is a ROW budget, not
+    // a fixed byte count — 1 KB of prose is ~13 rows at 80 cols but ~25+
+    // rows at 40 cols. Size the live tail off the real wrap width so a
+    // narrow terminal doesn't let the live region silently exceed a
+    // viewport. ~half a screen of rows, floored at 1 KB.
+    const int cols = estimate_wrap_cols();
+    const std::size_t kLiveTailBytes = std::max<std::size_t>(
+        1024,
+        static_cast<std::size_t>(cols) *
+            std::max<std::size_t>(8, frozen_row_budget() / 4));
     if (active.streaming_text.size() <= kLiveTailBytes) return;
     const std::size_t scan_limit = active.streaming_text.size() - kLiveTailBytes;
 
@@ -488,9 +585,42 @@ void freeze_streaming_text_prefix(Model& m) {
     constexpr std::size_t kMinSplitBytes = 512;
     if (scan_limit < kMinSplitBytes) return;
 
-    const std::size_t split = last_safe_block_split(active.streaming_text,
-                                                    scan_limit);
-    if (split == 0) return;   // no safe boundary yet (e.g. one long fence)
+    bool        fence_open = false;
+    std::string fence_marker;
+    std::size_t last_line_nl = 0;
+    std::size_t split = last_safe_block_split(active.streaming_text, scan_limit,
+                                              fence_open, fence_marker,
+                                              last_line_nl);
+
+    // Fence fallback. A single giant code block ("write the whole file")
+    // has NO blank-line boundary outside an open fence, so the clean
+    // split above returns 0 and the entire block stays live — re-laid-out
+    // every frame, the exact unbounded cost this function exists to bound
+    // and the content shape most likely to be huge. When we're stuck
+    // inside one fence and the scan window is well past a viewport, split
+    // at the last fence-internal newline and CLOSE + REOPEN the fence:
+    // the frozen prefix gets a synthetic closing marker so it renders as
+    // a complete code block, and the live tail is re-seeded with the same
+    // opening marker so its remaining lines keep rendering as that same
+    // language. Content the user sees is identical; only an internal
+    // fence boundary is synthesized at a line break.
+    std::string reopen_prefix;   // prepended to the live tail's text
+    bool fence_fallback = false;
+    if (split == 0 && fence_open && !fence_marker.empty()
+        && last_line_nl >= kMinSplitBytes) {
+        // Closing marker matches the OPENING run's kind. Three chars is
+        // a valid close for any longer run, but echo the exact marker
+        // (sans info string) to be safe with ```` longer fences.
+        std::string close_marker =
+            (fence_marker.find('~') != std::string::npos) ? "~~~" : "```";
+        split          = last_line_nl;
+        reopen_prefix  = fence_marker + "\n";
+        fence_fallback = true;
+        // The committed prefix needs the closing marker appended below.
+        fence_marker   = std::move(close_marker);
+    }
+
+    if (split == 0) return;   // no safe boundary yet (still one short fence)
 
     // Carve the committed prefix out of the active tail. If this is the
     // FIRST split of this sub-turn, `active.text` is empty and the
@@ -500,6 +630,14 @@ void freeze_streaming_text_prefix(Model& m) {
     // never fold it here — we only move streaming_text bytes.
     std::string prefix_body = active.streaming_text.substr(0, split);
     active.streaming_text.erase(0, split);
+    if (fence_fallback) {
+        // Close the fence in the frozen half so it parses as a complete
+        // code block, and reopen it in the live half so the remaining
+        // lines keep rendering as that same language.
+        prefix_body += fence_marker;   // synthetic closing ``` / ~~~
+        prefix_body += '\n';
+        active.streaming_text.insert(0, reopen_prefix);
+    }
 
     // The new settled message carries the committed prefix as `text`
     // (settled), inheriting the active message's identity-relevant
@@ -765,9 +903,12 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
     // floor) so the canvas stays near a single screen during a long run
     // — per-frame cost (clear + verify + blit) stays flat and minimal —
     // while never racing the visible region.
-    const auto sz = maya::platform::query_terminal_size(
-        maya::platform::stdout_handle());
-    const int term_h = sz.height.value > 0 ? sz.height.value : 40;
+    // Query terminal geometry through the SAME helper the row estimate
+    // uses (term_dims) so the keep-margin and the per-entry row counts
+    // are computed against one consistent terminal state — a width/height
+    // mismatch across a frame is exactly what desyncs the "provably above
+    // the viewport" proof.
+    const int term_h = term_dims().rows;
     const std::size_t kViewportKeepRows =
         static_cast<std::size_t>(std::max(64, (term_h * 3) / 2));
 

@@ -211,23 +211,26 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         cache.streaming->set_content_async(feed_source);
 
         // Settled message → commit any trailing tail to the prefix's
-        // block list. Necessary because find_block_boundary only commits
-        // a fenced code block once its closing ``` is followed by a
-        // newline; messages that end at the closing backticks (the
-        // common case for Claude responses ending with a code example)
-        // leave the last block stuck in the tail forever, rendered via
-        // render_tail's inline path instead of the canonical
-        // md_block_to_element. The two paths take the same border /
-        // padding builder but feed it slightly different code strings
-        // (render_tail's extractor vs the parser's stripping rules), so
-        // their painted cells aren't byte-identical. Once that turn
-        // settles and the renderer's cache_id-keyed cell blit picks up
-        // the render_tail output, the layout quirk is locked in until a
-        // resize invalidates the cache by width — which is exactly the
-        // "code block border at the wrong column" symptom we saw.
+        // block list. finish() flushes whatever is still in the
+        // streaming tail into the canonical committed block path
+        // (md_block_to_element), so the settled render is byte-identical
+        // to the live one.
         //
-        // finish() is idempotent (no-op once committed_ == source_.size()),
-        // so calling it every frame for a settled message is cheap.
+        // Historically this was load-bearing for a trailing closed code
+        // fence: find_block_boundary only committed a fenced block once
+        // its closing ``` was followed by a newline, so a message ending
+        // at the closing backticks (the common case for a reply ending
+        // in a code example) left the last block stuck in the tail,
+        // rendered via render_tail's inline path. render_tail and
+        // md_block_to_element feed the same border/padding builder
+        // slightly different code strings, so their cells weren't
+        // byte-identical — at settle the whole last block re-emitted to
+        // the terminal (the "repaint", worst over SSH). That divergence
+        // is now fixed upstream in maya (boundary.cpp eager-commits a
+        // closing fence at end-of-buffer), so the live and settled cells
+        // already match before this call. finish() is kept because it's
+        // idempotent (no-op once committed_ == source_.size()) and still
+        // the correct place to flush any OTHER trailing-block kind.
         if (settled && cache.revealed_size == source.size()) {
             cache.streaming->finish();
             cache.last_settled_size = source.size();
