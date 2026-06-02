@@ -229,8 +229,8 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // (list_ref) and hash-keyed, so maya blits it — a tall
             // mid-run prefix costs O(1) per frame to re-present.
             freeze_settled_subturns(m);
-            // Do NOT trim mid-run. trim_frozen_if_oversized drops whole
-            // entries from the FRONT of m.ui.frozen down to a row
+            // Do NOT trim mid-run with trim_frozen_if_oversized — it drops
+            // whole entries from the FRONT of m.ui.frozen down to a row
             // budget; mid-run that budget can be smaller than what's
             // still on screen, so the trim removes a frozen entry (e.g.
             // the run's User header) whose rows have NOT yet overflowed
@@ -240,13 +240,29 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // scrollback and unrewritable, so the turn appears TWICE
             // (the duplication bug). agent_session never trims mid-
             // stream for exactly this reason: it bounds scrollback only
-            // at MessageStop. We mirror that — the trim runs at stream
-            // finish (stream.cpp) and on the next user submit
-            // (modal.cpp), both turn boundaries where the whole run is
-            // settled and the dropped rows have provably overflowed.
-            // Mid-run the canvas is bounded by freeze_settled_subturns
-            // moving content into the cached prefix, not by trimming.
-            auto cmd = cmd::kick_pending_tools(m);
+            // at MessageStop. The full trim runs at stream finish
+            // (stream.cpp) and on the next user submit (modal.cpp), both
+            // turn boundaries where the whole run is settled and the
+            // dropped rows have provably overflowed.
+            //
+            // BUT freeze_settled_subturns alone does NOT bound the canvas
+            // during a single long auto-pilot run: a turn that emits many
+            // big tool panels keeps growing frozen_row_total without ever
+            // hitting a turn boundary, and render_tree + canvas.clear() +
+            // the shadow verify all walk the whole oversized canvas every
+            // frame — the progressive slowdown (and the visible top-to-
+            // bottom Divergent repaint once a coherence event hits a huge
+            // canvas). trim_frozen_above_viewport is the mid-run-SAFE
+            // bound: it drops only entries that are provably ABOVE the
+            // viewport (a 3x-viewport keep margin guarantees the dropped
+            // rows already overflowed into native scrollback), so it can
+            // never trigger the duplication bug. No-op until the prefix
+            // is well over the margin.
+            auto trim = trim_frozen_above_viewport(m);
+            auto cmd  = cmd::kick_pending_tools(m);
+            if (!trim.is_none())
+                return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+                    std::move(trim), std::move(cmd)})};
             return {std::move(m), std::move(cmd)};
         },
 

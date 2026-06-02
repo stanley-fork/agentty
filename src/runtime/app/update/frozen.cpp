@@ -620,4 +620,65 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     return maya::Cmd<Msg>::commit_scrollback_overflow();
 }
 
+maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
+    // Mid-run-safe trim. The standard trim_frozen_if_oversized can drop
+    // an entry that is still ON SCREEN (its rows haven't overflowed the
+    // viewport yet) — mid-run that re-emits already-committed scrollback
+    // rows at a shifted position and the turn appears twice (the
+    // duplication bug documented in tool.cpp). This variant is the
+    // conservative version that runs DURING an active run: it only drops
+    // entries that are provably above the viewport.
+    //
+    // Safety margin: keep at least kViewportKeepRows of the MOST RECENT
+    // frozen content on the canvas, plus the live tail maya renders on
+    // top of frozen. A dropped entry is therefore separated from the
+    // viewport bottom by (kViewportKeepRows + live-tail rows) — well
+    // more than term_h — so its rows have definitely scrolled off into
+    // native scrollback. We keep a 3x viewport margin (vs the ~2x steady
+    // -state budget) precisely so this never races the visible region.
+    const auto sz = maya::platform::query_terminal_size(
+        maya::platform::stdout_handle());
+    const int term_h = sz.height.value > 0 ? sz.height.value : 40;
+    const std::size_t kViewportKeepRows =
+        static_cast<std::size_t>(std::max(96, term_h * 3));
+
+    // Only worth doing once the canvas is meaningfully over the keep
+    // margin — trimming churns maya's inline diff (commit_scrollback_
+    // overflow + a shorter frozen tree), so we don't want to fire it on
+    // every settled sub-turn. Require the prefix to exceed the keep
+    // margin by at least one viewport before acting.
+    if (m.ui.frozen_row_total <= kViewportKeepRows + static_cast<std::size_t>(term_h))
+        return maya::Cmd<Msg>::none();
+
+    // Walk back from the newest entry, summing rows. The first entry
+    // whose inclusion pushes the running total past kViewportKeepRows is
+    // the OLDEST entry we must keep — everything before it is above the
+    // viewport and safe to drop. Always keep at least the 2 most recent
+    // entries (the active run's header + current sub-turn).
+    std::size_t kept_rows = 0;
+    std::size_t keep_from = m.ui.frozen.size();   // index of oldest kept entry
+    for (std::size_t k = m.ui.frozen.size(); k-- > 0; ) {
+        kept_rows += static_cast<std::size_t>(m.ui.frozen_rows[k]);
+        keep_from = k;
+        if (kept_rows >= kViewportKeepRows) break;
+    }
+    // Never drop the last 2 entries no matter what.
+    if (m.ui.frozen.size() >= 2 && keep_from > m.ui.frozen.size() - 2)
+        keep_from = m.ui.frozen.size() - 2;
+
+    const std::size_t drop = keep_from;
+    if (drop == 0) return maya::Cmd<Msg>::none();
+
+    std::size_t removed_rows = 0;
+    for (std::size_t k = 0; k < drop; ++k)
+        removed_rows += static_cast<std::size_t>(m.ui.frozen_rows[k]);
+    m.ui.frozen.erase(m.ui.frozen.begin(),
+                      m.ui.frozen.begin() + static_cast<std::ptrdiff_t>(drop));
+    m.ui.frozen_rows.erase(m.ui.frozen_rows.begin(),
+                           m.ui.frozen_rows.begin() + static_cast<std::ptrdiff_t>(drop));
+    m.ui.frozen_row_total -= removed_rows;
+
+    return maya::Cmd<Msg>::commit_scrollback_overflow();
+}
+
 } // namespace agentty::app::detail

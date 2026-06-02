@@ -117,6 +117,21 @@ void clear_frozen(Model& m);
 // frozen is under the cap.
 maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
 
+// trim_frozen_above_viewport: mid-run-SAFE variant of the trim. Drops
+// front entries ONLY while at least `term_h` rows of the most recent
+// frozen content remain on the canvas, so every dropped entry has
+// provably overflowed into native terminal scrollback already (its
+// rows are committed there, identical to what we'd re-emit). This is
+// the missing bound during a single long auto-pilot run: a turn with
+// many big tool panels grows frozen_row_total past the budget, and
+// without trimming, render_tree + canvas.clear() + the shadow verify
+// all walk the whole oversized canvas every frame (the progressive
+// slowdown). Unlike trim_frozen_if_oversized this NEVER drops an
+// on-screen entry, so it can't trigger the mid-run duplication bug.
+// Returns commit_scrollback_overflow() when it drops anything; no-op
+// otherwise.
+maya::Cmd<Msg> trim_frozen_above_viewport(Model& m);
+
 // Set a transient status toast that auto-clears after `ttl`. Returns a
 // Cmd that schedules the ClearStatus sentinel (stamp-matched so a newer
 // status overwrites without being wiped). Use for "no-op" feedback like
