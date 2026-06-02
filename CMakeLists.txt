@@ -752,6 +752,18 @@ option(AGENTTY_BUILD_TESTS "Build the test + benchmark binaries." OFF)
 if(AGENTTY_BUILD_TESTS)
     enable_testing()
 
+    # macOS SDK + GCC: the same `_Static_assert` arm64 macros from
+    # <mach/*.h> that the `agentty` target aliases above (see the
+    # APPLE+GNU block) also fire in the test/bench TUs — they link the
+    # full IO/tool/runtime stack (subprocess.cpp pulls <spawn.h> → mach
+    # headers). The agentty-target alias is PRIVATE, so it doesn't reach
+    # these separate executables; apply it directory-wide here so every
+    # target defined below inherits it. AppleClang doesn't need it (and
+    # can't build this tree anyway — it doesn't advertise cxx_std_26).
+    if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        add_compile_definitions(_Static_assert=static_assert)
+    endif()
+
     # long_session_bench — perf stress for the resume/render hot paths
     # exercised by the seven pins in docs/INLINE_SCROLLBACK.md. Builds
     # synthetic tool-heavy Threads of varying shape and times every
