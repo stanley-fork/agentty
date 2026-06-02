@@ -192,20 +192,18 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 auto b = body.find(kClose, a);
                 if (b == std::string::npos) b = body.size();
                 out.kind = Kind::GitDiff;
-                // Frozen build keeps the full diff (show_all, painted
-                // once). In the live tail elide to a tail window so the
-                // per-frame split_lines stays O(window) for a large edit
-                // — same discipline as Write's terminal-but-not-frozen
-                // branch.
-                if (building_frozen()) {
-                    out.text     = body.substr(a, b - a);
-                    out.show_all = true;
-                } else {
-                    out.text     = tail_window(
-                        std::string_view{body}.substr(a, b - a),
-                        kStreamTailLines);
-                    out.show_all = false;
-                }
+                // Full diff as soon as the edit is terminal — in the live
+                // tail too, not only the frozen snapshot. The output is
+                // FINAL the instant the tool settles, so eliding to a
+                // tail window here just to expand it one tick later (when
+                // freeze_range rebuilds with show_all) is the visible
+                // "diff squeezes, then pops to full size" lag. Per-frame
+                // split_lines over a stable body for the one-or-two
+                // frames before the freeze handoff is negligible, and the
+                // frozen snapshot emits the same full body so the handoff
+                // is seamless (no height jump).
+                out.text     = body.substr(a, b - a);
+                out.show_all = true;
                 out.text_color = text_tertiary;
                 return out;
             }
@@ -225,11 +223,14 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 it != tc.args.end() && it->is_array() && !it->empty())
             {
                 out.kind = Kind::EditDiff;
-                // show_all only in the frozen snapshot. While streaming
-                // OR sitting in the live tail (re-rendered every frame)
-                // keep the elided per-side/per-hunk preview so the cost
-                // is bounded; the frozen card carries the full diff.
-                out.show_all     = !streaming_now && building_frozen();
+                // Full diff as soon as the edit is terminal — in the live
+                // tail too, not only the frozen snapshot. While STREAMING
+                // keep the elided per-side/per-hunk preview (hunks grow
+                // line-by-line, would balloon height every frame); once
+                // settled the hunks are final, so expanding immediately
+                // avoids the "stub then sudden expand" lag and matches
+                // what freeze_range will build (seamless handoff).
+                out.show_all     = !streaming_now;
                 out.is_streaming = streaming_now;
                 out.hunks.reserve(it->size());
                 for (const auto& e : *it) {
@@ -246,7 +247,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             if (nt.empty()) nt = safe_arg(tc.args, "new_string");
             if (!ot.empty() || !nt.empty()) {
                 out.kind = Kind::EditDiff;
-                out.show_all     = !streaming_now && building_frozen();
+                out.show_all     = !streaming_now;
                 out.is_streaming = streaming_now;
                 out.hunks.push_back({std::move(ot), std::move(nt)});
             }
@@ -324,15 +325,18 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 out.show_footer_stats = false;
             } else if (!building_frozen()) {
                 // Terminal, but sitting in the LIVE tail (run not settled
-                // yet, re-rendered every frame). Elide to a window so the
-                // per-frame split_lines stays bounded; the FROZEN snapshot
-                // built by freeze_range keeps a generous head+tail (painted
-                // once, then blitted). Footer is dropped here too because
-                // its count would reflect the slice; the frozen card
-                // carries the true `N lines · KB`.
-                out.show_all = false;
-                out.text = tail_window(content, kStreamTailLines);
-                out.show_footer_stats = false;
+                // yet, re-rendered every frame). The content is FINAL —
+                // no more deltas arrive — so show it in full immediately
+                // instead of waiting for the next Tick's
+                // freeze_settled_subturns to graduate it into the frozen
+                // prefix. Waiting caused a visible "card stays a stub for
+                // a beat after the tool finished, then suddenly expands"
+                // lag. Per-frame split_lines over a stable body for the
+                // one-or-two frames before the freeze handoff is
+                // negligible, and the frozen snapshot reuses the same
+                // show_all body so the freeze instant is seamless (no
+                // height pop).
+                out.text = std::move(content);
             } else {
                 out.text = std::move(content);
             }
