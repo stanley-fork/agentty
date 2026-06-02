@@ -84,8 +84,19 @@ int estimate_wrap_cols() {
 // terminal redraws them instantly) and on disk (recall via picker).
 std::size_t frozen_row_budget() {
     const int h = term_dims().rows;
-    // ~2 viewports, floored so a tiny window still keeps useful context.
-    return static_cast<std::size_t>(std::max(48, h * 2));
+    // ~1 extra viewport beyond the on-screen region, floored so a tiny
+    // window still keeps useful context. CALIBRATION: this budget is
+    // applied to estimate_msg_rows, which now counts REAL source lines
+    // with no double-count. An earlier estimate over-counted tool bodies
+    // ~2x (it summed both the parsed `args` AND the raw `args_streaming`
+    // of the same payload), so the same budget value retained only ~half
+    // this many REAL rows on the canvas. With the estimate corrected, a
+    // 2x budget would retain ~2x the REAL rows and per-frame render
+    // (O(real canvas rows): render_tree + clear + verify) slows as the
+    // session grows. 1.5x keeps a couple screens of recent context while
+    // holding the canvas — and the latency — flat. Older rows live in
+    // native terminal scrollback and on disk.
+    return static_cast<std::size_t>(std::max(48, (h * 3) / 2));
 }
 
 // Thin dim ─ rule between turns. Pushed before each fresh-speaker
@@ -816,13 +827,14 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     // full bodies are NEVER collapsed (the `show_all` UX is intact);
     // they simply graduate from the in-app re-render window into
     // native terminal scrollback.
-    // Live-canvas row cap = ~2 viewports (same budget rehydrate seeds
-    // to, so steady-state and resume agree). Above it, the oldest
+    // Live-canvas row cap = frozen_row_budget() (~1.5 viewports of the
+    // accurate row estimate; same budget rehydrate seeds to, so steady-
+    // state and resume agree). Above it, the oldest
     // entries are dropped; maya's row diff sees a shorter live tree and
     // the already-overflowed rows commit to native scrollback. Bounding
     // the canvas to ~2 screens keeps EVERY full repaint cheap — the
     // per-frame tick, a resize (Divergent wipe+repaint), and Ctrl-L all
-    // walk only ~2 screens instead of thousands of rows.
+    // walk only ~1.5 screens instead of thousands of rows.
     const std::size_t kFrozenMaxRows = frozen_row_budget();
     constexpr std::size_t kFrozenMaxEntries = 120;
     // Retention floor. Expressed in ROWS, not a fixed entry count: the
