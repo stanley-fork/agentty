@@ -921,29 +921,22 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // canvas resizes to fit total transcript height and every
         // render clears + paints all of it.
         //
-        // Either way, absorb the freeze-seam height delta with
-        // commit_scrollback_overflow. At this instant the live tail's
-        // last run loses its reserved indicator/spacer slot
-        // (reserve_slot = active() && is_last_run flips false now that
-        // phase==Idle) AND its markdown just settled via finish() above,
-        // so the run's row count differs from the previous (streaming)
-        // frame by ±N rows. maya's inline diff compares new-vs-prev: a
-        // row-count change in the live tail shifts every row below it and
-        // the visible viewport gets re-emitted — the "whole scrollback
-        // re-renders at turn end" flicker. commit_scrollback_overflow
-        // re-bases prev_cells (drops max(0, prev_rows - term_h), zero
-        // wire bytes) so the next diff measures the settled frame against
-        // a clean baseline instead of scrolling on-screen rows. The
-        // trim path already issues it; the non-trim path needs it too
-        // because the seam delta exists whether or not we trimmed. Fold
-        // it into `kp` here so the post-turn auto-compaction check below
-        // still runs.
+        // commit_scrollback_overflow goes ONLY on the trim path. Trim
+        // actually removes entries from the frozen tree, so committing
+        // the overflowed rows to native scrollback matches a real
+        // shrink of the live tree — the next diff measures the smaller
+        // settled frame against a baseline that lost the same rows.
+        // The non-trim path must NOT commit: there the frozen tree
+        // still owns every visible row, so committing overflow rebases
+        // prev_cells without a matching tree shrink — the next render's
+        // canvas grows back to full height and the diff re-emits the
+        // committed rows, fighting the rebase every frame (visible as
+        // heavy flicker / stuck redraws). The freeze-seam height delta
+        // on the non-trim path is small (±N live-tail rows) and the
+        // normal new-vs-prev diff absorbs it on its own.
         if (auto trim = trim_frozen_if_oversized(m); !trim.is_none()) {
             kp = Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
                 std::move(trim), std::move(kp)});
-        } else {
-            kp = Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
-                maya::Cmd<Msg>::commit_scrollback_overflow(), std::move(kp)});
         }
     }
 
