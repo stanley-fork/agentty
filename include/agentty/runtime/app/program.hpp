@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include <maya/maya.hpp>
+#include <maya/terminal/ansi.hpp>   // env_supports_synchronized_output()
 
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/subscribe.hpp"
@@ -178,8 +179,26 @@ struct AgenttyApp {
         //
         // Three regimes:
         //   (a) fine animation live (spinner / streaming caret / welcome
-        //       bob / queued-chip pulse): 33 ms (~30 fps) — these advance
-        //       every frame, so a fine bucket is correct and necessary.
+        //       bob / queued-chip pulse): step at the SAME cadence the Tick
+        //       subscription wakes the loop. On DEC-2026 terminals that's
+        //       33 ms (~30 fps) and the synchronized-output wrapper makes
+        //       each frame swap atomically — smooth, no tearing. On
+        //       terminals WITHOUT mode 2026 (Apple Terminal, plain xterm,
+        //       tmux without sync passthrough) every multi-row repaint
+        //       paints progressively, so the chrome at the bottom of the
+        //       frame (spinner / sparkline / status bar) visibly tears on
+        //       each render. There the Tick already drops to 100 ms
+        //       (subscribe.cpp), but this bucket must MATCH it: a 33 ms
+        //       bucket against a 100 ms tick advances ~3x per wake, so the
+        //       skip-render gate fires a torn repaint on every tick anyway
+        //       and the 100 ms throttle buys nothing. Locking the bucket
+        //       to the tick period means exactly one render per tick —
+        //       ~10 fps of torn frames instead of ~10 redundant ones, and
+        //       phase-locked so renders don't double up. The spinner is
+        //       already capped at 10 fps by the tick on those terminals,
+        //       so perceived smoothness is unchanged; we only stop the
+        //       extra tearing repaints. On sync terminals the period is
+        //       still 33 ms — UX identical to before.
         //   (b) idle with the composer caret blinking: lock to the blink
         //       HALF-period (265 ms = 530 ms / 2) so every hash step is
         //       exactly one caret toggle. This keeps the RAF loop self-
@@ -203,8 +222,15 @@ struct AgenttyApp {
         // freeze-until-keypress bug. Bias toward animating.
         constexpr std::int64_t kBlinkHalfMs = 265;
         const bool caret_blinking = !m.s.active();
+        // Fine-animation bucket period, matched to the Tick subscription's
+        // cadence (subscribe.cpp) so the hash advances exactly once per
+        // loop wake. 33 ms on DEC-2026 terminals (atomic frames, smooth),
+        // 100 ms otherwise (one torn repaint per tick instead of ~3).
+        // Detected once — the capability is immutable for the session.
+        static const std::int64_t kFineAnimMs =
+            maya::ansi::env_supports_synchronized_output() ? 33 : 100;
         if (fine_anim_live) {
-            mix(static_cast<std::uint64_t>(now_ms / 33));
+            mix(static_cast<std::uint64_t>(now_ms / kFineAnimMs));
         } else if (caret_blinking) {
             // Phase-locked: feed the blink PARITY, not a time bucket, so
             // the hash advances on exactly the same boundary maya uses
