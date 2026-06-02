@@ -106,6 +106,28 @@ constexpr std::size_t kLiveTailLines = 64;
     return std::string{s.substr(start)};
 }
 
+// First `keep_lines` lines of `s`, head-anchored. Unlike tail_window,
+// this is APPEND-ONLY as `s` grows: line 1..keep_lines never change
+// content when more lines arrive at the end, they just stop being the
+// last thing rendered. Used for the streaming WRITE preview so the
+// rows it commits to native scrollback are byte-identical to the
+// settled show_all render's first rows — a tail-anchored preview
+// instead SHIFTS its top rows as the file grows, so when those rows
+// have already overflowed into scrollback and the card later settles to
+// a head-anchored full body, the committed rows no longer match and the
+// card is re-emitted below them (the duplicated-write ghost).
+[[nodiscard]] std::string head_window(std::string_view s,
+                                      std::size_t keep_lines) {
+    if (s.empty()) return {};
+    std::size_t nl_seen = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\n') {
+            if (++nl_seen >= keep_lines) return std::string{s.substr(0, i + 1)};
+        }
+    }
+    return std::string{s};
+}
+
 // Body for a terminal line-oriented tool sitting in the LIVE tail.
 // Frozen builds keep the full body (full content, painted once); the
 // live path elides to a bounded tail window so per-frame split_lines
@@ -300,44 +322,40 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             out.kind = Kind::FileWrite;
             out.text_color = text_tertiary;
             out.show_footer_stats = true;
-            // During streaming the body grows every ~120 ms — `show_all`
-            // would make the card height balloon row-by-row as deltas
-            // arrive, and any rows already pushed to native scrollback
-            // disagree with the next live re-render (rails fragment,
-            // comments from later lines bleed onto earlier rows in the
-            // viewport). Pin the streaming preview to a head+tail window
-            // so the card stays a fixed height for the whole stream;
-            // expand to `show_all` only when the tool is terminal and
-            // the body is final.
-            out.show_all     = !streaming_now;
+            // While streaming, the body grows every ~120 ms. The PRIOR
+            // approach pinned the preview to a TAIL window (last N lines):
+            // as the file grew, the top rows of that window kept changing
+            // content. Once they overflowed into native scrollback they
+            // were frozen there — but on settle the card switches to a
+            // head-anchored show_all render from line 1, so the committed
+            // rows no longer matched and the whole card was re-emitted
+            // below them: the write appeared TWICE in scrollback.
+            //
+            // Fix: render the streaming preview HEAD-anchored with
+            // show_all over a bounded head window. The first N lines never
+            // change as more arrive (append-only growth), and they are
+            // byte-identical to the settled show_all render's first N
+            // lines — so anything that commits to scrollback mid-stream
+            // stays valid through the freeze handoff. No row is ever
+            // rewritten; the card only grows downward.
             out.is_streaming = streaming_now;
             if (streaming_now) {
-                // Feed maya only the tail window. The widget renders just
-                // the last few lines while streaming (show_all=false), so
-                // slicing here makes the per-frame copy + split_lines
-                // O(window) instead of O(file) — the dominant cost when a
-                // large write streams in. maya's footer derives N-lines /
-                // bytes from out.text, so a sliced body would show a wrong
-                // total; suppress it mid-stream (the status bar carries the
-                // live byte/tok rate) and it returns with the true total
-                // the instant the tool goes terminal (full body, show_all).
-                out.text = tail_window(content, kStreamTailLines);
+                // Head window, full render: append-only and seam-stable.
+                // O(window) per frame (the slice bounds split_lines).
+                // Footer derives line/byte totals from out.text, which is
+                // a partial head here, so suppress it mid-stream (the
+                // status bar carries the live byte/tok rate); it returns
+                // with the true total the instant the tool settles.
+                out.text = head_window(content, kStreamTailLines);
+                out.show_all = true;
                 out.show_footer_stats = false;
-            } else if (!building_frozen()) {
-                // Terminal, but sitting in the LIVE tail (run not settled
-                // yet, re-rendered every frame). The content is FINAL —
-                // no more deltas arrive — so show it in full immediately
-                // instead of waiting for the next Tick's
-                // freeze_settled_subturns to graduate it into the frozen
-                // prefix. Waiting caused a visible "card stays a stub for
-                // a beat after the tool finished, then suddenly expands"
-                // lag. Per-frame split_lines over a stable body for the
-                // one-or-two frames before the freeze handoff is
-                // negligible, and the frozen snapshot reuses the same
-                // show_all body so the freeze instant is seamless (no
-                // height pop).
-                out.text = std::move(content);
             } else {
+                // Terminal: full body, head-anchored, in BOTH the live
+                // tail and the frozen snapshot. Identical bytes / anchor /
+                // height across the freeze instant, and a pure superset of
+                // the streaming head window above — so the handoff never
+                // moves a committed row.
+                out.show_all = true;
                 out.text = std::move(content);
             }
         } else if (tc.is_running()) {
