@@ -351,6 +351,101 @@ static void test_single_edit_stream_to_freeze() {
     CHECK(d_bc < 0, "single edit Done->freeze rewrote a committed scrollback row");
 }
 
+// THE write-tool transition the user actually hits: a single `write`
+// streamed through Running (compact tail-window preview, show_all=false)
+// -> Done (FULL body, show_all=true) -> mid-run freeze. The streaming
+// preview is a small compact card; the settled card is the full file
+// (viewport-overflowing). With a frozen lead-in pushing the card's top
+// rows above the viewport, any height/shape change across the settle
+// strands the streaming copy in scrollback and the settled card paints
+// below it — the duplicated Actions box the user reports.
+static void test_single_write_stream_to_freeze() {
+    constexpr int kTermH = 40;
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"write"};
+    Message u; u.role = Role::User; u.text = "write a big file";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
+
+    // Lead-in: settled edits frozen so the write card's top rows are
+    // pushed well above the viewport top before the write settles.
+    for (int e = 0; e < 20; ++e) {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("wlead" + std::to_string(e)));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    Message ph; ph.role = Role::Assistant; ph.streaming_text = "working";
+    m.d.current.messages.push_back(std::move(ph));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    agentty::app::detail::freeze_settled_subturns(m);
+    m.d.current.messages.pop_back();
+
+    // The full file content (~170 lines, viewport-overflowing) — the
+    // exact shape of the write that exposed the duplicate.
+    std::string content;
+    for (int i = 0; i < 170; ++i)
+        content += "line " + std::to_string(i) + ": some plausible file content\n";
+
+    // ── frame A: write RUNNING. Args carry the full content (it streams
+    //    in token-by-token; by terminal time it's all present). The body
+    //    config slices a tail window with show_all=false -> compact card.
+    {
+        Message a; a.role = Role::Assistant;
+        ToolUse t;
+        t.id   = ToolCallId{"write_big"};
+        t.name = ToolName{"write"};
+        t.args = {{"file_path", "/tmp/big.txt"}, {"content", content}};
+        t.status = ToolUse::Running{steady_clock::now(), ""};
+        a.tool_calls.push_back(std::move(t));
+        Message ph2; ph2.role = Role::Assistant; ph2.streaming_text = "...";
+        m.d.current.messages.push_back(std::move(a));
+        m.d.current.messages.push_back(std::move(ph2));
+    }
+    auto frame_a = render_rows(m);
+
+    // ── frame B: write SETTLES. show_all flips true -> full body.
+    {
+        agentty::app::detail::with_live_tool(
+            m, ToolCallId{"write_big"}, [&](ToolUse& t) {
+                auto now = steady_clock::now();
+                t.status = ToolUse::Done{now - milliseconds{5}, now,
+                                         "Created /tmp/big.txt (170+ 0-)"};
+            });
+    }
+    auto frame_b = render_rows(m);
+
+    // ── frame C: mid-run freeze fires.
+    agentty::app::detail::freeze_settled_subturns(m);
+    auto frame_c = render_rows(m);
+
+    int d_ab = first_committed_divergence(frame_a, frame_b, kTermH);
+    int d_bc = first_committed_divergence(frame_b, frame_c, kTermH);
+
+    auto dump = [&](const char* what, int d,
+                    const std::vector<std::string>& p,
+                    const std::vector<std::string>& c) {
+        if (d < 0) return;
+        std::fprintf(stderr, "  write %s committed-row divergence at %d\n", what, d);
+        for (int y = d; y < std::min<int>(d + 3,
+                 (int)std::max(p.size(), c.size())); ++y) {
+            std::fprintf(stderr, "    row %2d P |%s|\n", y,
+                         y < (int)p.size() ? p[y].c_str() : "<none>");
+            std::fprintf(stderr, "    row %2d C |%s|\n", y,
+                         y < (int)c.size() ? c[y].c_str() : "<none>");
+        }
+    };
+    if (d_ab >= 0 || d_bc >= 0)
+        std::fprintf(stderr, "  write frames: A=%zu B=%zu C=%zu rows (kTermH=%d)\n",
+                     frame_a.size(), frame_b.size(), frame_c.size(), kTermH);
+    dump("Running->Done", d_ab, frame_a, frame_b);
+    dump("Done->freeze", d_bc, frame_b, frame_c);
+
+    CHECK(d_ab < 0, "write Running->Done rewrote a committed scrollback row");
+    CHECK(d_bc < 0, "write Done->freeze rewrote a committed scrollback row");
+}
+
 // Reassemble the full assistant body the user should see from the
 // model's messages: every Assistant message's settled `text` plus the
 // active tail's `streaming_text`, in order. The split must be a pure
@@ -643,6 +738,7 @@ int main() {
     std::printf("midrun_seam_test\n");
     test_incremental_freeze_prefix_stable();
     test_single_edit_stream_to_freeze();
+    test_single_write_stream_to_freeze();
     test_streaming_text_prefix_freeze();
     test_giant_fence_prefix_freeze();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
