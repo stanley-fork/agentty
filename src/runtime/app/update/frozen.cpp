@@ -255,14 +255,41 @@ int estimate_run_rows(const Model& m, std::size_t from, std::size_t to) {
 }
 
 // Push a built frozen Element together with its estimated row count,
-// keeping m.ui.frozen / m.ui.frozen_rows / m.ui.frozen_row_total in
-// lockstep. EVERY push into m.ui.frozen must go through here so the
-// row accounting never drifts from the element vector.
-void push_frozen(Model& m, maya::Element e, int rows) {
+// keeping m.ui.frozen / m.ui.frozen_rows / m.ui.frozen_is_separator /
+// m.ui.frozen_row_total in lockstep. EVERY push into m.ui.frozen must
+// go through here so the parallel vectors never drift. `separator` is
+// true for inter-turn gap rows / compaction dividers (entries that must
+// never lead the prefix).
+void push_frozen(Model& m, maya::Element e, int rows,
+                 bool separator = false) {
     if (rows < 1) rows = 1;
     m.ui.frozen.push_back(std::move(e));
     m.ui.frozen_rows.push_back(rows);
+    m.ui.frozen_is_separator.push_back(separator);
     m.ui.frozen_row_total += static_cast<std::size_t>(rows);
+}
+
+// Strip leading separator entries (gap rows / compaction dividers) so
+// the frozen prefix always opens on a real turn. A separator at index 0
+// renders as a blank gap or an orphan rule at the top of the canvas
+// (the "saved thread opens with a hole" / "trim left a gap" bug). Adjusts
+// frozen_row_total in lockstep. Does NOT touch frozen_through (that is a
+// message-index bound, unrelated to leading-chrome trimming).
+void drop_leading_separators(Model& m) {
+    std::size_t drop = 0;
+    while (drop < m.ui.frozen_is_separator.size()
+           && m.ui.frozen_is_separator[drop])
+        ++drop;
+    if (drop == 0) return;
+    std::size_t removed_rows = 0;
+    for (std::size_t k = 0; k < drop; ++k)
+        removed_rows += static_cast<std::size_t>(m.ui.frozen_rows[k]);
+    const auto d = static_cast<std::ptrdiff_t>(drop);
+    m.ui.frozen.erase(m.ui.frozen.begin(), m.ui.frozen.begin() + d);
+    m.ui.frozen_rows.erase(m.ui.frozen_rows.begin(), m.ui.frozen_rows.begin() + d);
+    m.ui.frozen_is_separator.erase(m.ui.frozen_is_separator.begin(),
+                                   m.ui.frozen_is_separator.begin() + d);
+    m.ui.frozen_row_total -= removed_rows;
 }
 
 // Run-level safety gate: a frozen turn captures an Element snapshot
@@ -328,7 +355,7 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         }
 
         if (needs_compaction_divider(i)) {
-            push_frozen(m, compaction_divider_row(), 1);
+            push_frozen(m, compaction_divider_row(), 1, /*separator=*/true);
         }
 
         // Leading gap: one blank row before every turn except the
@@ -341,7 +368,7 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
             m.ui.frozen_midrun && i == m.ui.frozen_through
             && m.d.current.messages[i].role == Role::Assistant;
         if (!first_overall && !completing_midrun) {
-            push_frozen(m, gap_row(), kGapRows);
+            push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
         }
 
         const Message& head = m.d.current.messages[i];
@@ -726,6 +753,7 @@ void freeze_streaming_text_prefix(Model& m) {
 void clear_frozen(Model& m) {
     m.ui.frozen.clear();
     m.ui.frozen_rows.clear();
+    m.ui.frozen_is_separator.clear();
     m.ui.frozen_row_total = 0;
     m.ui.frozen_through = 0;
     m.ui.frozen_turn    = 0;
@@ -809,6 +837,12 @@ void rehydrate_frozen(Model& m) {
     m.ui.frozen_turn = skipped_assistant_runs;
 
     freeze_range(m, start, total);
+
+    // A mid-run cut (giant final run) can make the first frozen entry a
+    // continuation whose own header was skipped, OR the run-boundary
+    // gap can land first — either opens the canvas on a hole. Strip any
+    // leading separator so the prefix opens on a real turn.
+    drop_leading_separators(m);
 }
 
 maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
@@ -929,7 +963,8 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     }
     if (drop == 0) return maya::Cmd<Msg>::none();
 
-    // Keep frozen / frozen_rows / frozen_row_total in lockstep.
+    // Keep frozen / frozen_rows / frozen_is_separator / frozen_row_total
+    // in lockstep.
     std::size_t removed_rows = 0;
     for (std::size_t k = 0; k < drop; ++k)
         removed_rows += static_cast<std::size_t>(m.ui.frozen_rows[k]);
@@ -937,7 +972,15 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
                       m.ui.frozen.begin() + static_cast<std::ptrdiff_t>(drop));
     m.ui.frozen_rows.erase(m.ui.frozen_rows.begin(),
                            m.ui.frozen_rows.begin() + static_cast<std::ptrdiff_t>(drop));
+    m.ui.frozen_is_separator.erase(
+        m.ui.frozen_is_separator.begin(),
+        m.ui.frozen_is_separator.begin() + static_cast<std::ptrdiff_t>(drop));
     m.ui.frozen_row_total -= removed_rows;
+
+    // A turn's leading gap is its own entry pushed BEFORE it; dropping
+    // the turn above can leave that gap (or a divider) at index 0, a
+    // blank hole at the top of the canvas. Strip it.
+    drop_leading_separators(m);
 
     // commit_scrollback_overflow lets maya derive the safe row count
     // itself (max(0, prev_rows - term_h)) — the Cmd is just a trigger
@@ -1022,7 +1065,16 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
                       m.ui.frozen.begin() + static_cast<std::ptrdiff_t>(drop));
     m.ui.frozen_rows.erase(m.ui.frozen_rows.begin(),
                            m.ui.frozen_rows.begin() + static_cast<std::ptrdiff_t>(drop));
+    m.ui.frozen_is_separator.erase(
+        m.ui.frozen_is_separator.begin(),
+        m.ui.frozen_is_separator.begin() + static_cast<std::ptrdiff_t>(drop));
     m.ui.frozen_row_total -= removed_rows;
+
+    // The dropped boundary can leave a turn's leading gap (its own
+    // entry, pushed before the turn) at index 0 — a blank hole at the
+    // top. Those rows were already above the viewport, so stripping
+    // them keeps the "provably off-screen" proof intact.
+    drop_leading_separators(m);
 
     return maya::Cmd<Msg>::commit_scrollback_overflow();
 }

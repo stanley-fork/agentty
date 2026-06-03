@@ -231,11 +231,19 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             release_to_kernel();
             // Wholesale model swap into a fresh (empty) thread. The old
             // thread may have overflowed the viewport, leaving rows in
-            // native scrollback that commit_scrollback_overflow cannot
-            // erase — a stranded duplicate above the new short frame.
-            // reset_inline hard-wipes (viewport + saved-lines) so the
-            // new thread paints clean. See ResetInline doc in cmd.hpp.
-            return {std::move(m), Cmd<Msg>::reset_inline()};
+            // native scrollback. Commit that overflow (drop the stale
+            // prev_cells prefix so the diff scans the full visible
+            // viewport against the new empty frame) and soft-repaint.
+            // We deliberately do NOT reset_inline here: \x1b[3J would
+            // wipe the user's pre-agentty shell scrollback AND the old
+            // thread's history. The old thread's overflow rows stay in
+            // native scrollback as history; the new (shorter) frame
+            // paints clean, and the renderer's overflow→shrink guard
+            // commits any remaining overflow on the next frame without
+            // a destructive wipe.
+            return {std::move(m), Cmd<Msg>::batch(
+                Cmd<Msg>::commit_scrollback_overflow(),
+                Cmd<Msg>::force_redraw())};
         },
         [&](ThreadsLoaded& e) -> Step {
             m.d.threads = std::move(e.threads);
@@ -295,13 +303,20 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 std::fflush(prof_out);
                 std::fclose(prof_out);
             }
-            // Wholesale model swap into the loaded thread. Hard-reset
-            // (not commit-overflow): the new thread can be shorter than
-            // the old, and the old thread's overflow rows in native
-            // scrollback would otherwise strand above the new frame.
-            // reset_inline wipes viewport + saved-lines and repaints
-            // clean. See ResetInline doc in cmd.hpp.
-            return {std::move(m), Cmd<Msg>::reset_inline()};
+            // Wholesale model swap into the loaded thread. Commit the
+            // old thread's viewport overflow (so the diff scans the
+            // full visible range against the rehydrated frame) and
+            // soft-repaint. We deliberately do NOT reset_inline: its
+            // \x1b[3J wipes the user's terminal scrollback (both the
+            // pre-agentty shell history and the prior thread's lines).
+            // The old overflow rows remain in native scrollback as
+            // history; the rehydrated thread repaints clean in the
+            // viewport, and the renderer's overflow→shrink guard
+            // commits any remaining overflow non-destructively if the
+            // loaded thread is shorter.
+            return {std::move(m), Cmd<Msg>::batch(
+                Cmd<Msg>::commit_scrollback_overflow(),
+                Cmd<Msg>::force_redraw())};
         },
     }, tm);
 }

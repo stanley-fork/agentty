@@ -198,6 +198,17 @@ struct Model {
         // the same length as `frozen`.
         std::vector<int>           frozen_rows;
 
+        // Parallel to `frozen`: true iff the entry is an inter-turn
+        // SEPARATOR (gap row or compaction divider) rather than a real
+        // Turn. A separator only makes visual sense BETWEEN two turns;
+        // if a front-trim or a mid-run rehydrate cut leaves one at
+        // index 0 it renders as a blank gap (or an orphan rule) at the
+        // very top of the canvas — the "saved threads open with a hole"
+        // bug. Both trims and rehydrate strip leading separators so the
+        // frozen prefix always opens on a turn header. Always the same
+        // length as `frozen`.
+        std::vector<bool>          frozen_is_separator;
+
         // Running sum of frozen_rows, maintained on push/trim so the
         // oversize check is O(1).
         std::size_t                frozen_row_total = 0;

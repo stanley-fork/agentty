@@ -271,6 +271,123 @@ static void test_trailing_tool_batch_freezes() {
           "idle run froze the last sub-turn via the active-only path");
 }
 
+// Return the first NON-BLANK rendered row, or "" if every row is blank.
+static std::string first_nonblank_row(const Model& m) {
+    auto txt = render_dump(m);
+    std::size_t p = 0;
+    while (p < txt.size()) {
+        std::size_t eol = txt.find('\n', p);
+        std::string line = txt.substr(p, eol == std::string::npos ? std::string::npos : eol - p);
+        bool blank = line.find_first_not_of(" ") == std::string::npos;
+        if (!blank) return line;
+        if (eol == std::string::npos) break;
+        p = eol + 1;
+    }
+    return {};
+}
+
+// How many leading rows are blank before the first content row.
+static int leading_blank_rows(const Model& m) {
+    auto txt = render_dump(m);
+    int n = 0;
+    std::size_t p = 0;
+    while (p < txt.size()) {
+        std::size_t eol = txt.find('\n', p);
+        std::string line = txt.substr(p, eol == std::string::npos ? std::string::npos : eol - p);
+        if (line.find_first_not_of(" ") != std::string::npos) break;
+        ++n;
+        if (eol == std::string::npos) break;
+        p = eol + 1;
+    }
+    return n;
+}
+
+// 6. Saved-thread reload (rehydrate). A long IDLE thread whose final
+//    run is GIANT forces rehydrate_frozen's sub-turn cut. The rebuilt
+//    frozen prefix must NOT open with a blank gap or a header-less
+//    continuation — the top of the canvas must be a real turn header.
+//    (The reported bug: saved threads render with a blank hole / a
+//    turn whose header was cut off.)
+static void test_rehydrate_top_is_header() {
+    Model m;
+    m.d.current.id = agentty::ThreadId{"saved"};
+    // Several complete user+assistant exchanges, then one GIANT final
+    // auto-pilot run (many big write/edit sub-turns) settled idle.
+    for (int t = 0; t < 4; ++t) {
+        Message u; u.role = Role::User;
+        u.text = "request " + std::to_string(t);
+        m.d.current.messages.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+        a.text = "reply " + std::to_string(t);
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // Giant final run: a user turn then 60 settled-edit sub-turns +
+    // a closing text sub-turn. ~60 fat cards >> the rehydrate budget,
+    // so the cut lands MID-RUN.
+    Message gu; gu.role = Role::User; gu.text = "do a huge refactor";
+    m.d.current.messages.push_back(std::move(gu));
+    for (int e = 0; e < 60; ++e) {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("big" + std::to_string(e)));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    Message done; done.role = Role::Assistant; done.text = "all done";
+    m.d.current.messages.push_back(std::move(done));
+    m.s.phase = agentty::phase::Idle{};
+
+    agentty::app::detail::rehydrate_frozen(m);
+
+    // The whole transcript is idle, so nothing should be live.
+    CHECK(m.ui.frozen_through == m.d.current.messages.size(),
+          "rehydrate left messages unfrozen on an idle thread");
+    // The canvas must not open with a HOLE. A single blank row is the
+    // Turn widget's own top margin (every turn has it); a real bug is a
+    // stranded multi-row gap (a leading separator entry) or a header-
+    // less continuation. Allow the 1-row intrinsic margin.
+    CHECK(leading_blank_rows(m) <= 1,
+          "rehydrated saved thread opens with a blank gap at the top");
+    // The first visible row must be a turn header (model badge / meta),
+    // not stray body content from a header-less continuation. The
+    // assistant badge is the model name; a user header is the prompt.
+    // Either way the first row should carry a speaker, not a bare edit
+    // diff line.
+    const std::string top = first_nonblank_row(m);
+    CHECK(!top.empty(), "rehydrated thread rendered nothing");
+    CHECK(top.find("src/big") == std::string::npos,
+          "rehydrated thread opens MID-card (header-less continuation) "
+          "— the run header was cut off");
+}
+
+// 7. Trim must never strand a leading blank gap row. After
+//    trim_frozen_if_oversized drops front entries, the new first frozen
+//    entry must be a turn, not the inter-turn gap_row that preceded it.
+static void test_trim_no_leading_gap() {
+    Model m;
+    m.d.current.id = agentty::ThreadId{"trim"};
+    // Many complete idle exchanges so freeze pushes [turn][gap][turn]...
+    // and the row budget is exceeded, forcing a front trim.
+    for (int t = 0; t < 80; ++t) {
+        Message u; u.role = Role::User;
+        u.text = "q" + std::to_string(t);
+        m.d.current.messages.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("t" + std::to_string(t)));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+    auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
+    (void)cmd;
+
+    CHECK(leading_blank_rows(m) <= 1,
+          "trim stranded a blank gap row at the top of the frozen prefix");
+    const std::string top = first_nonblank_row(m);
+    CHECK(top.find("src/t") == std::string::npos,
+          "trim left a header-less card at the top (dropped a run header "
+          "but kept its body)");
+}
+
 int main() {
     std::printf("midrun_freeze_test\n");
     test_live_bounded();
@@ -278,6 +395,8 @@ int main() {
     test_single_turn_header();
     test_split_preserves_content();
     test_trailing_tool_batch_freezes();
+    test_rehydrate_top_is_header();
+    test_trim_no_leading_gap();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) { std::printf("FAILED\n"); return 1; }
     std::printf("PASSED\n");
