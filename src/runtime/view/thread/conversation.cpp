@@ -180,15 +180,19 @@ void build_live_tail(const Model& m, int& running_turn,
 
                 cfg.body.emplace_back(
                     maya::ActivityIndicator{std::move(ind)}.build());
-            } else if (reserve_slot) {
-                // Invisible 2-row spacer that mirrors the
-                // ActivityIndicator's natural height (one blank row +
-                // one content row, see activity_indicator.hpp's
-                // `v(blank(), h(parts))`). Keeps body height stable
-                // across the indicator↔content transition.
-                using namespace maya::dsl;
-                cfg.body.emplace_back(v(text(""), text("")).build());
             }
+            // NOTE: no trailing spacer once real content exists. The
+            // indicator occupies the body ONLY while the tail is an
+            // empty placeholder; the moment the first text/tool slot
+            // lands, the content itself holds the body height. Reserving
+            // a 2-row spacer for the whole active phase (the old
+            // behaviour) meant settled content carried dead trailing
+            // space that VANISHED at turn-end — a visible 2-row collapse
+            // the instant the run finished and the spacer dropped. The
+            // indicator→first-content flip it was meant to smooth is a
+            // non-event in practice: the first content slot is ≥1 row,
+            // so the height step is small and happens once, mid-stream,
+            // rather than as a jolt at every turn boundary.
 
             // Cache the settled-but-not-yet-frozen run. A run sitting in
             // the live tail with every tool terminal and no active
