@@ -229,8 +229,13 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // abandoned along with the thread).
             m.s.phase = phase::Idle{};
             release_to_kernel();
-            // Model swap — see ThreadListSelect comment above.
-            return {std::move(m), Cmd<Msg>::commit_scrollback_overflow()};
+            // Wholesale model swap into a fresh (empty) thread. The old
+            // thread may have overflowed the viewport, leaving rows in
+            // native scrollback that commit_scrollback_overflow cannot
+            // erase — a stranded duplicate above the new short frame.
+            // reset_inline hard-wipes (viewport + saved-lines) so the
+            // new thread paints clean. See ResetInline doc in cmd.hpp.
+            return {std::move(m), Cmd<Msg>::reset_inline()};
         },
         [&](ThreadsLoaded& e) -> Step {
             m.d.threads = std::move(e.threads);
@@ -290,7 +295,13 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 std::fflush(prof_out);
                 std::fclose(prof_out);
             }
-            return {std::move(m), Cmd<Msg>::commit_scrollback_overflow()};
+            // Wholesale model swap into the loaded thread. Hard-reset
+            // (not commit-overflow): the new thread can be shorter than
+            // the old, and the old thread's overflow rows in native
+            // scrollback would otherwise strand above the new frame.
+            // reset_inline wipes viewport + saved-lines and repaints
+            // clean. See ResetInline doc in cmd.hpp.
+            return {std::move(m), Cmd<Msg>::reset_inline()};
         },
     }, tm);
 }
