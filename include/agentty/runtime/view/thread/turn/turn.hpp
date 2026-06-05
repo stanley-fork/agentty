@@ -58,4 +58,26 @@ namespace agentty::ui {
 [[nodiscard]] std::size_t turn_run_end(const std::vector<Message>& messages,
                                        std::size_t from);
 
+// Compute the freezable-prefix cut for the Assistant run [run_start,
+// run_end): the exclusive upper bound of the contiguous leading
+// sub-turns that are byte-stable and safe to render as a settled,
+// hash-keyed Turn (settled terminal-tool batches and settled text-only
+// blocks). The remaining [cut, run_end) is the still-live tail.
+//
+// SINGLE SOURCE OF TRUTH for the live/frozen split. Both build_live_tail
+// (which renders [run_start, cut) as its own keyed Turn so the freeze
+// handoff is a pure cache hit, even when the card overflows the
+// viewport) and freeze_settled_subturns call this, so the live card and
+// the frozen card cover exactly the same messages under exactly the
+// same key — zero row shift at the seam.
+//
+// The last sub-turn is kept live (cut clamped to run_end-1) UNLESS it's
+// a settled terminal-TOOL batch that is no longer msgs.back() (a
+// continuation message already follows it), in which case the whole
+// settled prefix is eligible. A tool-only message that is still the
+// mutable back can grow a trailing text block, so it stays live until
+// the continuation lands.
+[[nodiscard]] std::size_t freezable_prefix_cut(
+    const Model& m, std::size_t run_start, std::size_t run_end);
+
 } // namespace agentty::ui

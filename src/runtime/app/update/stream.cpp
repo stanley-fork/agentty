@@ -921,19 +921,21 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // canvas resizes to fit total transcript height and every
         // render clears + paints all of it.
         //
-        // commit_scrollback_overflow goes ONLY on the trim path. Trim
-        // actually removes entries from the frozen tree, so committing
-        // the overflowed rows to native scrollback matches a real
-        // shrink of the live tree — the next diff measures the smaller
-        // settled frame against a baseline that lost the same rows.
-        // The non-trim path must NOT commit: there the frozen tree
-        // still owns every visible row, so committing overflow rebases
-        // prev_cells without a matching tree shrink — the next render's
-        // canvas grows back to full height and the diff re-emits the
-        // committed rows, fighting the rebase every frame (visible as
-        // heavy flicker / stuck redraws). The freeze-seam height delta
-        // on the non-trim path is small (±N live-tail rows) and the
-        // normal new-vs-prev diff absorbs it on its own.
+        // The trim itself removes entries from the frozen tree and
+        // returns commit_scrollback(removed_rows) — committing EXACTLY
+        // the rows it dropped from the front to native scrollback. This
+        // matches the real shrink of the live tree: the next diff
+        // measures the smaller settled frame against a baseline that
+        // lost the same rows. (It deliberately does NOT use the generic
+        // commit_scrollback_overflow, which releases down to one viewport
+        // — over-committing the ~0.5 viewport the trim still KEEPS and
+        // re-emitting it as a stranded duplicate one screen up.) The
+        // non-trim path commits nothing: there the frozen tree still owns
+        // every visible row, so rebasing prev_cells without a matching
+        // tree shrink makes the next render grow back to full height and
+        // re-emit the committed rows every frame (heavy flicker). The
+        // freeze-seam height delta on the non-trim path is small (±N
+        // live-tail rows) and the normal new-vs-prev diff absorbs it.
         if (auto trim = trim_frozen_if_oversized(m); !trim.is_none()) {
             kp = Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
                 std::move(trim), std::move(kp)});

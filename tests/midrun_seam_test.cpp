@@ -875,6 +875,264 @@ static void test_giant_fence_prefix_freeze() {
     run_giant_fence("~~~rust");     // tilde fence
 }
 
+// THE reported bug: a settled write/edit card TALLER than the viewport
+// sits in the live tail UNFROZEN (keyed over the whole live run), then
+// freeze_settled_subturns moves it into the frozen prefix (keyed over
+// just the settled sub-turn). If the live-tail key and the frozen key
+// differ, maya rebuilds the card on freeze and re-emits its rows shifted
+// over the copy already committed to native scrollback -> the duplicate.
+//
+// We render the LIVE frame (settled prefix present but NOT yet frozen)
+// and the POST-FREEZE frame, and assert the committed prefix is
+// byte-identical across that exact handoff. The live-tail settled-prefix
+// split (build_live_tail) makes both renders key [run_start, cut)
+// identically, so the handoff is seamless even for an over-viewport card.
+static void test_tall_card_live_to_frozen_seam() {
+    constexpr int kTermH = 40;
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"tall"};
+    Message u; u.role = Role::User; u.text = "write a big file";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);   // User frozen
+
+    // A settled edit whose diff body is FAR taller than the viewport.
+    Message a; a.role = Role::Assistant;
+    {
+        ToolUse t;
+        t.id   = ToolCallId{"edit_tall"};
+        t.name = ToolName{"edit"};
+        t.args = {{"path", "src/tall.cpp"}};
+        auto now = steady_clock::now();
+        t.status = ToolUse::Done{now - milliseconds{5}, now,
+                                 edit_diff_output("tall", 120)};
+        a.tool_calls.push_back(std::move(t));
+    }
+    m.d.current.messages.push_back(std::move(a));
+
+    // The post-tool continuation placeholder lands (still streaming),
+    // so the settled edit is no longer the mutable back. At this point
+    // the settled card is in the LIVE tail, not yet frozen.
+    Message ph; ph.role = Role::Assistant; ph.streaming_text = "working";
+    m.d.current.messages.push_back(std::move(ph));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    // Frame LIVE: settled prefix present, frozen_through still at 1.
+    const std::size_t frozen_through_before = m.ui.frozen_through;
+    auto live = render_rows(m);
+    CHECK(frozen_through_before == 1,
+          "settled prefix unexpectedly frozen before the freeze call");
+
+    // Now the mid-run freeze fires (ToolExecOutput cadence).
+    agentty::app::detail::freeze_settled_subturns(m);
+    auto frozen = render_rows(m);
+
+    // The freeze MUST have advanced past the settled edit.
+    CHECK(m.ui.frozen_through >= 2,
+          "freeze_settled_subturns did not freeze the settled edit prefix");
+
+    // Committed prefix (rows that overflowed the viewport top) must be
+    // byte-identical across the live->frozen handoff.
+    int d = first_committed_divergence(live, frozen, kTermH);
+    if (d >= 0) {
+        std::fprintf(stderr,
+            "  --- live->frozen committed divergence at row %d ---\n", d);
+        for (int y = d; y < std::min<int>(d + 3,
+                 (int)std::max(live.size(), frozen.size())); ++y) {
+            const char* lv = (y < (int)live.size())   ? live[y].c_str()   : "<none>";
+            const char* fv = (y < (int)frozen.size()) ? frozen[y].c_str() : "<none>";
+            std::fprintf(stderr, "    row %2d LIVE   |%s|\n", y, lv);
+            std::fprintf(stderr, "    row %2d FROZEN |%s|\n", y, fv);
+        }
+    }
+    CHECK(d < 0,
+          "tall settled card shifted the committed prefix on freeze "
+          "(the overflow->scrollback duplication)");
+
+    // And the diff body must appear EXACTLY once across the whole render
+    // (no second copy stranded). Count a distinctive body line.
+    int copies = 0;
+    for (const auto& row : frozen)
+        if (row.find("compute(60) + offset") != std::string::npos) ++copies;
+    CHECK(copies == 1,
+          "edit diff body rendered more than once after freeze (duplicate)");
+}
+
+// A full write turn's body: the settled write tool + a short text
+// continuation, the exact (tool, text) pair shape the agent emits per
+// turn. `content` rows make the write card overflow the viewport.
+static void push_write_turn(Model& m, const std::string& tag, int rows) {
+    Message a; a.role = Role::Assistant;
+    ToolUse t;
+    t.id   = ToolCallId{"write_" + tag};
+    t.name = ToolName{"write"};
+    std::string content;
+    for (int i = 0; i < rows; ++i)
+        content += tag + " line " + std::to_string(i)
+                +  ": plausible file content here\n";
+    t.args = {{"file_path", "/tmp/" + tag + ".txt"}, {"content", content}};
+    auto now = steady_clock::now();
+    t.status = ToolUse::Done{now - milliseconds{5}, now,
+                             "Created /tmp/" + tag + ".txt"};
+    a.tool_calls.push_back(std::move(t));
+    m.d.current.messages.push_back(std::move(a));
+}
+
+// THE multi-turn reproduction: user asks for a write THREE times. Each
+// turn is a (write tool, text summary) pair. "After the third write, the
+// SECOND duplicates." By turn 3, turns 1 & 2 are fully frozen (each
+// split across a head [write] + cont [text] entry by the per-tick
+// freeze cadence). When turn 3's write streams and overflows the
+// viewport, the already-committed rows of turn 2 must NOT move. If the
+// frozen prefix's row sequence shifts when turn 3's live tail grows,
+// turn 2's card re-emits over its scrollback copy — the duplicate.
+//
+// We drive the real reducer-path cadence for each turn:
+//   submit (freeze_through user) -> write Done -> placeholder text
+//   streams -> freeze_settled_subturns (writes the head) -> text settles
+//   -> finalize freeze_through (writes the cont). Then the next submit.
+// At turn 3 the write is settled but its continuation still streams, so
+// the tall card sits live; we snapshot before and after its freeze and
+// assert turn 2's committed rows are byte-stable across the whole turn-3
+// sequence.
+static void test_multi_turn_write_pairs_seam() {
+    constexpr int kTermH = 40;
+    constexpr int kRows  = 60;   // each write overflows a 40-row viewport
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"multi"};
+    agentty::app::detail::clear_frozen(m);
+
+    auto& msgs = m.d.current.messages;
+
+    // A distinctive body line of a given turn, to count copies.
+    auto body_marker = [](const std::string& tag) {
+        return tag + " line 30:";
+    };
+
+    // Drive turns 1 and 2 to completion (fully frozen).
+    std::vector<std::string> snapshots_before_turn3;
+    for (int turn = 1; turn <= 2; ++turn) {
+        const std::string tag = "t" + std::to_string(turn);
+        // ── submit
+        Message u; u.role = Role::User;
+        u.text = "write a file (" + tag + ")";
+        msgs.push_back(std::move(u));
+        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+        agentty::app::detail::freeze_through(m, msgs.size());
+
+        // ── write settles. ToolExecOutput runs freeze_settled_subturns
+        //    BEFORE the continuation placeholder is pushed (the write is
+        //    still msgs.back(), so nothing freezes yet).
+        push_write_turn(m, tag, kRows);
+        agentty::app::detail::freeze_settled_subturns(m);   // no-op: write is back
+        // kick_pending_tools then pushes the placeholder synchronously.
+        Message ph; ph.role = Role::Assistant; ph.streaming_text = "done writing";
+        msgs.push_back(std::move(ph));
+        // Next Tick: now the placeholder follows the write, so the
+        // settled write head freezes.
+        agentty::app::detail::freeze_settled_subturns(m);
+
+        // ── continuation text settles, turn finalizes (idle).
+        auto& back = msgs.back();
+        back.text = std::move(back.streaming_text);
+        back.streaming_text.clear();
+        m.s.phase = agentty::phase::Idle{};
+        agentty::app::detail::freeze_through(m, msgs.size());
+    }
+
+    // Both turns must be fully frozen now (nothing live).
+    CHECK(m.ui.frozen_through == msgs.size(),
+          "turns 1 & 2 not fully frozen before turn 3");
+
+    // Snapshot the settled two-turn transcript — this is the committed
+    // baseline turn 3 must never disturb.
+    auto baseline = render_rows(m);
+
+    // ── Turn 3: submit, then the third write streams in (overflowing).
+    {
+        Message u; u.role = Role::User; u.text = "write a file (t3)";
+        msgs.push_back(std::move(u));
+        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+        agentty::app::detail::freeze_through(m, msgs.size());
+    }
+    auto after_submit = render_rows(m);
+
+    // Write Running (full content present, card windowed) + placeholder.
+    push_write_turn(m, "t3", kRows);
+    // Demote the just-pushed write to Running to model the streaming
+    // arrival before it settles.
+    agentty::app::detail::with_live_tool(
+        m, ToolCallId{"write_t3"}, [&](ToolUse& t) {
+            t.status = ToolUse::Running{steady_clock::now(), ""};
+        });
+    Message ph3; ph3.role = Role::Assistant; ph3.streaming_text = "...";
+    msgs.push_back(std::move(ph3));
+    auto frame_running = render_rows(m);
+
+    // Write settles. In ToolExecOutput, freeze_settled_subturns runs
+    // FIRST — but the write is NOT msgs.back() (the placeholder from the
+    // PREVIOUS sub-turn boundary follows it). So the settled write head
+    // is eligible immediately.
+    agentty::app::detail::with_live_tool(
+        m, ToolCallId{"write_t3"}, [&](ToolUse& t) {
+            auto now = steady_clock::now();
+            t.status = ToolUse::Done{now - milliseconds{5}, now,
+                                     "Created /tmp/t3.txt"};
+        });
+    // Critical frame: write Done + placeholder present, freeze has NOT
+    // run yet. The live tail keys this run; the split must key the
+    // settled write prefix [write, cut) IDENTICALLY to the freeze that
+    // follows, or the tall card re-emits on freeze (turn-2 ghost).
+    auto frame_settled = render_rows(m);
+
+    // Mid-run freeze fires (the tall write head moves frozen).
+    agentty::app::detail::freeze_settled_subturns(m);
+    auto frame_frozen = render_rows(m);
+
+    // The committed prefix (everything that overflowed the viewport top)
+    // must be byte-stable across EVERY turn-3 step. Turn 2's card lives
+    // in that committed region; any shift duplicates it.
+    struct Step { const char* name; const std::vector<std::string>* rows; };
+    const Step steps[] = {
+        {"baseline",     &baseline},
+        {"after_submit", &after_submit},
+        {"running",      &frame_running},
+        {"settled",      &frame_settled},
+        {"frozen",       &frame_frozen},
+    };
+    for (std::size_t s = 1; s < std::size(steps); ++s) {
+        int d = first_committed_divergence(*steps[s - 1].rows,
+                                           *steps[s].rows, kTermH);
+        if (d >= 0) {
+            std::fprintf(stderr,
+                "  multi-turn committed divergence %s->%s at row %d\n",
+                steps[s - 1].name, steps[s].name, d);
+            const auto& p = *steps[s - 1].rows;
+            const auto& c = *steps[s].rows;
+            for (int y = d; y < std::min<int>(d + 4,
+                     (int)std::max(p.size(), c.size())); ++y) {
+                std::fprintf(stderr, "    row %2d P |%s|\n", y,
+                             y < (int)p.size() ? p[y].c_str() : "<none>");
+                std::fprintf(stderr, "    row %2d C |%s|\n", y,
+                             y < (int)c.size() ? c[y].c_str() : "<none>");
+            }
+        }
+        CHECK(d < 0,
+              "turn-3 write shifted a committed scrollback row "
+              "(turn 2 duplicates)");
+    }
+
+    // Turn 2's body must appear EXACTLY once in the final frame.
+    int t2_copies = 0;
+    for (const auto& row : frame_frozen)
+        if (row.find(body_marker("t2")) != std::string::npos) ++t2_copies;
+    CHECK(t2_copies == 1,
+          "turn 2's write body rendered more than once after the third "
+          "write (the reported duplicate)");
+}
+
 int main() {
     std::printf("midrun_seam_test\n");
     test_incremental_freeze_prefix_stable();
@@ -883,6 +1141,8 @@ int main() {
     test_read_then_edit_batch_freeze();
     test_streaming_text_prefix_freeze();
     test_giant_fence_prefix_freeze();
+    test_tall_card_live_to_frozen_seam();
+    test_multi_turn_write_pairs_seam();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) { std::printf("FAILED\n"); return 1; }
     std::printf("PASSED\n");

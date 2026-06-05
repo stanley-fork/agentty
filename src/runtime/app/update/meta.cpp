@@ -206,12 +206,17 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // with turn length — the progressive slowdown felt mid-stream.
             //
             // Freeze any sub-turns that became terminal (into the
-            // zero-copy, hash-keyed frozen prefix maya blits) and trim the
-            // prefix to a viewport margin. trim_frozen_above_viewport drops
-            // only entries provably above the viewport, so it can't trigger
-            // the mid-run duplication bug. Both no-op when nothing is
-            // freezable / the prefix is within margin.
-            maya::Cmd<Msg> tick_trim = maya::Cmd<Msg>::none();
+            // zero-copy, hash-keyed frozen prefix maya blits). Do NOT
+            // trim mid-stream: trim_frozen_above_viewport's off-screen
+            // proof rests on frozen_rows[] never over-counting an
+            // entry's real height, which a byte/cols estimate can't
+            // guarantee — an over-count drops a still-visible entry and
+            // maya re-emits the rows below it shifted over already-
+            // committed scrollback, showing the turn twice. Freezing
+            // alone keeps per-frame cost flat (the prefix is blitted
+            // O(1)); the canvas is bounded by the full trim at turn
+            // boundaries (stream finish / next submit), where every
+            // dropped row has provably overflowed.
             if (m.s.active()) {
                 // Bound a long PURE-TEXT answer first: split its committed
                 // markdown prefix into a settled sub-turn so the next
@@ -220,7 +225,6 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 // (~13 ms/frame); with it only the ~2KB live tail does.
                 freeze_streaming_text_prefix(m);
                 freeze_settled_subturns(m);
-                tick_trim = trim_frozen_above_viewport(m);
             }
 
             // ── Stream-stall watchdog ──────────────────────────────────
@@ -279,8 +283,6 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     a->rate_last_sample_bytes = a->live_delta_bytes;
                 }
             }
-            if (!tick_trim.is_none())
-                return {std::move(m), std::move(tick_trim)};
             return done(std::move(m));
         },
         [&](Quit) -> Step {

@@ -229,40 +229,22 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // (list_ref) and hash-keyed, so maya blits it — a tall
             // mid-run prefix costs O(1) per frame to re-present.
             freeze_settled_subturns(m);
-            // Do NOT trim mid-run with trim_frozen_if_oversized — it drops
-            // whole entries from the FRONT of m.ui.frozen down to a row
-            // budget; mid-run that budget can be smaller than what's
-            // still on screen, so the trim removes a frozen entry (e.g.
-            // the run's User header) whose rows have NOT yet overflowed
-            // the viewport. maya's inline diff then re-emits every row
-            // below the drop at a shifted position — but the pre-drop
-            // copies are already committed to native terminal
-            // scrollback and unrewritable, so the turn appears TWICE
-            // (the duplication bug). agent_session never trims mid-
-            // stream for exactly this reason: it bounds scrollback only
-            // at MessageStop. The full trim runs at stream finish
-            // (stream.cpp) and on the next user submit (modal.cpp), both
-            // turn boundaries where the whole run is settled and the
-            // dropped rows have provably overflowed.
-            //
-            // BUT freeze_settled_subturns alone does NOT bound the canvas
-            // during a single long auto-pilot run: a turn that emits many
-            // big tool panels keeps growing frozen_row_total without ever
-            // hitting a turn boundary, and render_tree + canvas.clear() +
-            // the shadow verify all walk the whole oversized canvas every
-            // frame — the progressive slowdown (and the visible top-to-
-            // bottom Divergent repaint once a coherence event hits a huge
-            // canvas). trim_frozen_above_viewport is the mid-run-SAFE
-            // bound: it drops only entries that are provably ABOVE the
-            // viewport (a 3x-viewport keep margin guarantees the dropped
-            // rows already overflowed into native scrollback), so it can
-            // never trigger the duplication bug. No-op until the prefix
-            // is well over the margin.
-            auto trim = trim_frozen_above_viewport(m);
+            // No mid-run trim. trim_frozen_above_viewport's safety proof
+            // rests on frozen_rows[] never OVER-counting an entry's real
+            // rendered height — a byte/cols heuristic can't actually
+            // guarantee that (wide chars, wrapped tool bodies, a stale
+            // term_dims read all break it). When it over-counts, the
+            // keep-loop stops early, a still-on-screen entry is dropped,
+            // maya re-emits the rows below it shifted, and the pre-drop
+            // copies already committed to native scrollback show the turn
+            // TWICE. agent_session never trims mid-stream for exactly
+            // this reason — it bounds scrollback only at turn boundaries
+            // where every dropped row has provably overflowed. The full
+            // trim runs at stream finish (stream.cpp) and on the next
+            // user submit (modal.cpp); freeze_settled_subturns already
+            // keeps per-frame cost flat by making the frozen prefix
+            // zero-copy + hash-keyed (maya blits it O(1)).
             auto cmd  = cmd::kick_pending_tools(m);
-            if (!trim.is_none())
-                return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
-                    std::move(trim), std::move(cmd)})};
             return {std::move(m), std::move(cmd)};
         },
 

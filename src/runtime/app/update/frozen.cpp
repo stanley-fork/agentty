@@ -442,69 +442,11 @@ void freeze_settled_subturns(Model& m) {
 
     const std::size_t run_end = ui::turn_run_end(msgs, run_start);
 
-    // Find the first sub-turn that is NOT yet freezable — i.e. carries a
-    // non-terminal tool. We freeze the contiguous terminal prefix
-    // [run_start, cut) and leave [cut, run_end) live. A sub-turn with no
-    // tools at all (pure streaming text) is also a stop point: its text
-    // may still be growing, so it must stay live.
-    std::size_t cut = run_start;
-    for (std::size_t i = run_start; i < run_end; ++i) {
-        const Message& mm = msgs[i];
-        bool terminal_tools = !mm.tool_calls.empty();
-        for (const auto& tc : mm.tool_calls)
-            if (!tc.is_terminal()) { terminal_tools = false; break; }
-        // A settled TEXT-ONLY sub-turn is also freezable: no tools, a
-        // committed `text` body, and nothing still streaming into it.
-        // This is the prefix freeze_streaming_text_prefix carves off a
-        // long prose answer — its bytes are final, so it can graduate
-        // into the frozen prefix immediately. The ACTIVE tail keeps its
-        // bytes in streaming_text, so it never matches here and stays
-        // live.
-        const bool settled_text_only =
-            mm.tool_calls.empty()
-            && !mm.text.empty()
-            && mm.streaming_text.empty()
-            && mm.pending_stream.empty();
-        // Freeze a sub-turn only if it's a settled terminal-tool batch
-        // OR a settled text-only block. The active streaming placeholder
-        // (empty, or growing streaming_text) stays live.
-        if (!terminal_tools && !settled_text_only) break;
-        cut = i + 1;
-    }
-
-    // agent_session roll-up parity. In agent_session a settled tool
-    // BATCH is folded into the assistant body and cleared from the
-    // live `m.tools` the instant the next block starts OR at
-    // MessageStop — it NEVER lingers as a live, full-body card that
-    // can overflow the viewport while still mutable. agentty's
-    // equivalent is freezing it here.
-    //
-    // The clamp below kept the LAST sub-turn live so there's always a
-    // continuation remainder and the active prose tail isn't frozen
-    // mid-stream. But for a TOOL-batch last sub-turn that is fully
-    // terminal, keeping it live is exactly the bug: a single big
-    // `write`/`edit` settles, sits in the live tail re-rendering its
-    // full body every frame, overflows native scrollback while
-    // mutable, then freezes — leaving one copy stranded in scrollback
-    // and a second in the frozen prefix (the duplicated card the user
-    // sees). When the stream is still ACTIVE a continuation is coming,
-    // so freezing the whole settled run now is safe: frozen_midrun
-    // makes the next message render as a header-suppressed continuation
-    // (no duplicate glyph/label), and the big body lands in the
-    // zero-copy, paint-once frozen prefix instead of churning live.
-    //
-    // We only lift the clamp when the LAST sub-turn is a terminal
-    // TOOL batch (not a settled-text-only block, which could be the
-    // active prose tail freeze_streaming_text_prefix just carved and
-    // whose successor bytes may still be streaming). A text-only last
-    // sub-turn keeps the old clamp so the live prose edge stays
-    // animating.
-    const bool last_is_terminal_tool_batch =
-        cut == run_end
-        && run_end > run_start
-        && !msgs[run_end - 1].tool_calls.empty()
-        && m.s.active();
-    if (cut >= run_end && !last_is_terminal_tool_batch) cut = run_end - 1;
+    // Shared cut: the boundary the live tail ALSO uses to render the
+    // settled prefix as its own keyed Turn. Keeping the two in lockstep
+    // is what makes the freeze handoff a pure cache hit (zero row shift).
+    const std::size_t cut =
+        ui::freezable_prefix_cut(m, run_start, run_end);
     if (cut <= run_start) return;   // nothing freezable yet
 
     // The frozen entry is a CONTINUATION iff this run's header was
@@ -979,17 +921,26 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
 
     // A turn's leading gap is its own entry pushed BEFORE it; dropping
     // the turn above can leave that gap (or a divider) at index 0, a
-    // blank hole at the top of the canvas. Strip it.
+    // blank hole at the top of the canvas. Strip it. This removes more
+    // rows from the front, so fold them into removed_rows below.
+    const std::size_t rows_before_sep_strip = m.ui.frozen_row_total;
     drop_leading_separators(m);
+    removed_rows += rows_before_sep_strip - m.ui.frozen_row_total;
 
-    // commit_scrollback_overflow lets maya derive the safe row count
-    // itself (max(0, prev_rows - term_h)) — the Cmd is just a trigger
-    // saying "please release whatever has already overflowed." This
-    // is the safe variant; the row-counted commit_scrollback was
-    // retired in the maya audit (see scrollback-corruption-audit.md
-    // finding #1) because no caller outside the renderer can know
-    // the right physical-row count.
-    return maya::Cmd<Msg>::commit_scrollback_overflow();
+    // commit_scrollback(removed_rows): commit EXACTLY the rows this
+    // trim dropped from the front — no more. The generic
+    // commit_scrollback_overflow() commits down to a single viewport
+    // (prev_rows - term_h), but this trim KEEPS ~1.5 viewports
+    // (frozen_row_budget). Over-committing the extra ~0.5 viewport
+    // releases rows that are STILL in the live frozen tree: the next
+    // render re-emits them above the committed boundary, stranding a
+    // duplicate copy of the most-recent off-budget turn one screen up
+    // (the "after the third write the second duplicates" ghost). The
+    // dropped rows all overflowed (we retain >= term_h on screen), so
+    // commit_inline_prefix's clamp to (prev_rows - term_h) never bites
+    // and the committed boundary lands exactly at the new tree's top.
+    return maya::Cmd<Msg>::commit_scrollback(
+        static_cast<int>(removed_rows));
 }
 
 maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {

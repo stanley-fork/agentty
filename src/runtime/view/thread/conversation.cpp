@@ -82,9 +82,68 @@ void build_live_tail(const Model& m, int& running_turn,
     out.reserve(out.size() + (total - start) * 2);
 
     bool first_in_tail = true;
+    // Set true once a settled-prefix Turn has been emitted for the first
+    // live run: the remainder [cut, run_end) must then render as a
+    // header-suppressed continuation (its header lives in the prefix
+    // card we just pushed / the freeze will push).
+    bool prefix_emitted_continuation = false;
     std::size_t i = start;
     while (i < total) {
-        const std::size_t run_end = turn_run_end(m.d.current.messages, i);
+        std::size_t run_end = turn_run_end(m.d.current.messages, i);
+
+        // ── Seam-stable settled-prefix split ───────────────────────────
+        // When the FIRST live run has a byte-stable settled prefix
+        // [i, cut) with a still-live remainder after it (cut < run_end),
+        // render that prefix as its OWN keyed Turn now — using the EXACT
+        // key + bounds freeze_settled_subturns will stamp. The freeze
+        // handoff then moves identical cells under an identical hash_id,
+        // so maya blits instead of re-emitting: zero row shift even when
+        // the card is taller than the viewport (the overflow→scrollback
+        // duplication this guards against). Without the split the live
+        // run is keyed over [i, run_end) (whole run) while the freeze
+        // keys [i, cut) (prefix) — different keys, so the tall card the
+        // live tail already committed to native scrollback gets re-built
+        // and re-emitted on freeze: the duplicate.
+        //
+        // Only the FIRST run, only while active, only when a true live
+        // remainder exists. After emitting the prefix we advance i to cut
+        // and let the NORMAL loop body render [cut, run_end) as a
+        // continuation (header suppressed).
+        if (first_in_tail && m.s.active()
+            && m.d.current.messages[i].role == Role::Assistant) {
+            const std::size_t cut = freezable_prefix_cut(m, i, run_end);
+            if (cut > i && cut < run_end) {
+                const bool prefix_continuation =
+                    m.ui.frozen_midrun && i == m.ui.frozen_through;
+                const bool first_overall_pfx =
+                    m.ui.frozen.empty() && i == 0;
+                if (!first_overall_pfx && !prefix_continuation)
+                    out.push_back(gap_row());
+
+                auto pcfg = turn_config_for_assistant_run(
+                    i, cut, running_turn, m,
+                    /*continuation=*/prefix_continuation);
+                // SAME key shape freeze_settled_subturns stamps for
+                // [i, cut) — a prefix-vs-self-freeze cache HIT.
+                maya::CacheIdBuilder kb;
+                kb.add(std::string_view{"agentty.turn.assistant_run"})
+                  .add(prefix_continuation ? std::string_view{"cont"}
+                                           : std::string_view{"head"})
+                  .add(static_cast<std::uint64_t>(cut - i));
+                for (std::size_t j = i; j < cut; ++j) {
+                    kb.add(std::string_view{m.d.current.messages[j].id.value});
+                    kb.add(m.d.current.messages[j].compute_render_key());
+                }
+                pcfg.hash_id = kb.build();
+                out.push_back(maya::Turn{std::move(pcfg)}.build());
+                ++running_turn;
+
+                first_in_tail = false;
+                prefix_emitted_continuation = true;
+                i = cut;
+                run_end = turn_run_end(m.d.current.messages, i);
+            }
+        }
 
         // The remainder of a run whose completed prefix was frozen
         // mid-run (freeze_settled_subturns) is a CONTINUATION: its
@@ -92,11 +151,14 @@ void build_live_tail(const Model& m, int& running_turn,
         // remainder draws rail-only and gets NO leading gap (the gap
         // belongs to the header turn above the frozen prefix). Only the
         // FIRST live run — the one starting exactly at frozen_through —
-        // can be a mid-run continuation.
+        // can be a mid-run continuation. The settled-prefix split above
+        // also produces a continuation remainder (header in the prefix
+        // card we just emitted).
         const bool midrun_continuation =
-            first_in_tail && m.ui.frozen_midrun
-            && i == m.ui.frozen_through
-            && m.d.current.messages[i].role == Role::Assistant;
+            prefix_emitted_continuation
+            || (first_in_tail && m.ui.frozen_midrun
+                && i == m.ui.frozen_through
+                && m.d.current.messages[i].role == Role::Assistant);
 
         const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
         if (!first_overall && !midrun_continuation) {

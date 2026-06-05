@@ -30,6 +30,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
+#include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
 #include "agentty/runtime/view/composer.hpp"
 #include "agentty/runtime/view/status_bar/status_bar.hpp"
@@ -220,21 +221,24 @@ static void test_split_preserves_content() {
     CHECK(both == N, "split and whole renders disagree on content presence");
 }
 
-// 5. agent_session roll-up parity: a settled tool batch that is the
-//    LAST message in an active run (the state right after
-//    ToolExecOutput, before any continuation message is appended) must
-//    NOT linger in the live tail re-rendering its full body. It freezes
-//    immediately, so the big write/edit card lands in the zero-copy
-//    frozen prefix instead of overflowing scrollback while mutable —
-//    the duplicated-card bug. Mirrors agent_session clearing m.tools
-//    into assistant_body the instant the batch settles.
+// 5. agent_session roll-up parity, corrected. A settled tool batch is
+//    frozen mid-run so its big write/edit card doesn't linger live
+//    re-rendering its full body. BUT it must NOT be frozen while it is
+//    still the mutable back message (a trailing "Done — …" text block
+//    can still append to the SAME message, and freezing then snapshots
+//    a stale card + advances frozen_through onto a message freeze_range
+//    can roll back, re-pushing the card as a fresh head — the duplicated
+//    write/edit the user sees). It freezes the instant cmd_factory has
+//    pushed the continuation placeholder after it (no longer the back).
 static void test_trailing_tool_batch_freezes() {
     Model m;
     m.d.current.id = agentty::ThreadId{"trailing"};
     Message u; u.role = Role::User; u.text = "write a file";
     m.d.current.messages.push_back(std::move(u));
-    // ONE assistant sub-turn with a settled tool, and NO continuation
-    // message yet — exactly the live tail at ToolExecOutput time.
+    // ONE assistant sub-turn with a settled tool, still the live back
+    // (exactly the state at ToolExecOutput, BEFORE the continuation
+    // placeholder is pushed). It must stay LIVE — freezing the mutable
+    // back is the duplicated-card bug.
     Message a; a.role = Role::Assistant;
     a.tool_calls.push_back(settled_edit("only"));
     m.d.current.messages.push_back(std::move(a));
@@ -242,13 +246,21 @@ static void test_trailing_tool_batch_freezes() {
 
     agentty::app::detail::clear_frozen(m);
     agentty::app::detail::freeze_through(m, 1);          // User frozen
-    agentty::app::detail::freeze_settled_subturns(m);    // should freeze the tool batch
+    agentty::app::detail::freeze_settled_subturns(m);    // back is mutable: no-op
 
-    CHECK(m.ui.frozen_through == m.d.current.messages.size(),
-          "trailing settled tool batch did NOT freeze — it lingers live "
-          "and will overflow scrollback (the duplicated-card bug)");
+    CHECK(m.ui.frozen_through == 1,
+          "froze the mutable back tool message — the duplicated-card bug");
+
+    // Now cmd_factory's continuation placeholder lands after it. The
+    // settled tool message is no longer the back, so it freezes.
+    Message cont; cont.role = Role::Assistant;
+    m.d.current.messages.push_back(std::move(cont));
+    agentty::app::detail::freeze_settled_subturns(m);
+
+    CHECK(m.ui.frozen_through == 2,
+          "settled tool batch did NOT freeze once a continuation followed it");
     CHECK(m.ui.frozen_midrun,
-          "frozen_midrun not set — the coming continuation would repaint a header");
+          "frozen_midrun not set — the continuation would repaint a header");
     // The body must still be present (frozen, not dropped).
     auto txt = render_dump(m);
     CHECK(txt.find("src/only.cpp") != std::string::npos,
@@ -388,6 +400,76 @@ static void test_trim_no_leading_gap() {
           "but kept its body)");
 }
 
+// 8. The over-budget trim must commit EXACTLY the rows it dropped via a
+//    row-counted commit_scrollback(removed_rows) — never the generic
+//    commit_scrollback_overflow(), which releases down to a single
+//    viewport (prev_rows - term_h) while the trim KEEPS ~1.5 viewports.
+//    Over-committing the extra ~0.5 viewport releases rows still in the
+//    live frozen tree; the next render re-emits them above the committed
+//    boundary and the most-recent off-budget turn duplicates one screen
+//    up. This is the "after the third write, the second duplicates" bug.
+//    The commit must never exceed the dropped (estimated) rows.
+static void test_trim_commits_exact_dropped_rows() {
+    Model m;
+    m.d.current.id = agentty::ThreadId{"trimrows"};
+    // A handful of tall write turns, each well over a viewport, so the
+    // frozen prefix blows past frozen_row_budget() and the front trim
+    // fires — the exact shape of the reported repro (repeated big writes).
+    for (int t = 0; t < 6; ++t) {
+        Message u; u.role = Role::User;
+        u.text = "write a file (" + std::to_string(t) + ")";
+        m.d.current.messages.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+        agentty::ToolUse tw;
+        tw.id   = agentty::ToolCallId{"w" + std::to_string(t)};
+        tw.name = agentty::ToolName{"write"};
+        std::string content;
+        for (int i = 0; i < 80; ++i)
+            content += "line " + std::to_string(i) + ": file body content\n";
+        tw.args = {{"file_path", "/tmp/f" + std::to_string(t) + ".txt"},
+                   {"content", content}};
+        auto now = std::chrono::steady_clock::now();
+        tw.status = agentty::ToolUse::Done{
+            now - std::chrono::milliseconds{5}, now, "Created"};
+        a.tool_calls.push_back(std::move(tw));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+
+    // Record the row totals before the trim so we can compute exactly
+    // how many rows the trim drops.
+    const std::size_t rows_before = m.ui.frozen_row_total;
+    const std::size_t entries_before = m.ui.frozen.size();
+
+    auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
+
+    const std::size_t rows_after   = m.ui.frozen_row_total;
+    const std::size_t dropped_rows = rows_before - rows_after;
+    CHECK(entries_before > m.ui.frozen.size(),
+          "trim did not drop any entries despite an over-budget prefix");
+    CHECK(dropped_rows > 0, "trim dropped entries but no rows");
+
+    // The returned Cmd MUST be a row-counted commit_scrollback whose
+    // count equals exactly the dropped rows — NOT commit_scrollback_
+    // overflow (which would over-commit and duplicate the kept turn).
+    using Cmd = maya::Cmd<agentty::Msg>;
+    const auto* exact = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    const auto* overflow =
+        std::get_if<Cmd::CommitScrollbackOverflow>(&cmd.inner);
+    CHECK(overflow == nullptr,
+          "trim used commit_scrollback_overflow() (over-commits the kept "
+          "~0.5 viewport -> duplicate). Must use commit_scrollback(removed).");
+    CHECK(exact != nullptr,
+          "trim did not return a row-counted commit_scrollback");
+    if (exact) {
+        CHECK(static_cast<std::size_t>(exact->rows) == dropped_rows,
+              "trim committed a row count != the rows it dropped "
+              "(over-commit strands a duplicate, under-commit leaks rows)");
+    }
+}
+
 int main() {
     std::printf("midrun_freeze_test\n");
     test_live_bounded();
@@ -397,6 +479,7 @@ int main() {
     test_trailing_tool_batch_freezes();
     test_rehydrate_top_is_header();
     test_trim_no_leading_gap();
+    test_trim_commits_exact_dropped_rows();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) { std::printf("FAILED\n"); return 1; }
     std::printf("PASSED\n");

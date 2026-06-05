@@ -241,9 +241,14 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // paints clean, and the renderer's overflow→shrink guard
             // commits any remaining overflow on the next frame without
             // a destructive wipe.
-            return {std::move(m), Cmd<Msg>::batch(
-                Cmd<Msg>::commit_scrollback_overflow(),
-                Cmd<Msg>::force_redraw())};
+            //
+            // NOT force_redraw: it demotes Synced→Divergent (RESIZE-ONLY
+            // path), which can wipe native scrollback. The example
+            // (agent_session) never redraws on a swap; commit-overflow
+            // alone is sufficient and the soft-repaint lands on the next
+            // frame.
+            return {std::move(m),
+                Cmd<Msg>::commit_scrollback_overflow()};
         },
         [&](ThreadsLoaded& e) -> Step {
             m.d.threads = std::move(e.threads);
@@ -314,9 +319,13 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // viewport, and the renderer's overflow→shrink guard
             // commits any remaining overflow non-destructively if the
             // loaded thread is shorter.
-            return {std::move(m), Cmd<Msg>::batch(
-                Cmd<Msg>::commit_scrollback_overflow(),
-                Cmd<Msg>::force_redraw())};
+            //
+            // NOT force_redraw: it demotes Synced→Divergent (RESIZE-ONLY
+            // path) and can wipe native scrollback. agent_session never
+            // redraws on a swap; commit-overflow + the next-frame soft
+            // repaint is enough.
+            return {std::move(m),
+                Cmd<Msg>::commit_scrollback_overflow()};
         },
     }, tm);
 }

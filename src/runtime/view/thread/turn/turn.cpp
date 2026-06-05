@@ -620,4 +620,54 @@ std::size_t turn_run_end(const std::vector<Message>& messages,
     return end;
 }
 
+std::size_t freezable_prefix_cut(const Model& m, std::size_t run_start,
+                                 std::size_t run_end)
+{
+    const auto& msgs  = m.d.current.messages;
+    const std::size_t total = msgs.size();
+    if (run_start >= run_end || run_end > total) return run_start;
+
+    // Walk the contiguous leading sub-turns that are byte-stable:
+    //  - a settled terminal-TOOL batch (every tool_call terminal), or
+    //  - a settled TEXT-ONLY block (no tools, committed text, nothing
+    //    still streaming). The first sub-turn that fails both stops the
+    //    walk; everything after it stays live.
+    std::size_t cut = run_start;
+    for (std::size_t i = run_start; i < run_end; ++i) {
+        const Message& mm = msgs[i];
+        bool terminal_tools = !mm.tool_calls.empty();
+        for (const auto& tc : mm.tool_calls)
+            if (!tc.is_terminal()) { terminal_tools = false; break; }
+        const bool settled_text_only =
+            mm.tool_calls.empty()
+            && !mm.text.empty()
+            && mm.streaming_text.empty()
+            && mm.pending_stream.empty();
+        if (!terminal_tools && !settled_text_only) break;
+        cut = i + 1;
+    }
+
+    // The last sub-turn of the run is normally kept LIVE so the active
+    // edge keeps animating and frozen_through never lands on a still-
+    // mutable message. The one exception: a settled terminal-TOOL batch
+    // that is no longer msgs.back() (a continuation message already
+    // follows it). That message can no longer grow a trailing text block
+    // appended to itself, so the whole settled prefix is eligible — and
+    // we WANT it eligible so the big write/edit card lands in the
+    // zero-copy frozen prefix instead of re-rendering live every frame.
+    //
+    // A settled-text-only last sub-turn always stays live (it may be the
+    // active prose tail freeze_streaming_text_prefix just carved, whose
+    // successor bytes are still streaming).
+    const bool last_is_settled_tool_batch_not_back =
+        cut == run_end
+        && run_end > run_start
+        && run_end < total                 // a later (continuation) msg exists
+        && !msgs[run_end - 1].tool_calls.empty()
+        && m.s.active();
+    if (cut >= run_end && !last_is_settled_tool_batch_not_back)
+        cut = (run_end > run_start) ? run_end - 1 : run_start;
+    return cut;
+}
+
 } // namespace agentty::ui
