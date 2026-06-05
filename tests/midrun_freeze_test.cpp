@@ -470,6 +470,71 @@ static void test_trim_commits_exact_dropped_rows() {
     }
 }
 
+// 9. trim_frozen_above_viewport (mid-run-safe variant) must ALSO commit
+//    exactly the rows it dropped — NOT commit_scrollback_overflow. It has
+//    no production caller today, but a row-exact commit makes it safe by
+//    construction: even if re-wired into a mid-run path, commit_inline_
+//    prefix clamps the count to (prev_rows - term_h), so a still-visible
+//    row can never be committed and no duplicate can strand. This guards
+//    the latent footgun against ever shipping the overflow variant.
+static void test_trim_above_viewport_commits_exact() {
+    Model m;
+    m.d.current.id = agentty::ThreadId{"trimabove"};
+    // Many tall write turns so frozen_row_total blows well past the
+    // ~1.5-viewport keep margin and the above-viewport trim fires.
+    for (int t = 0; t < 8; ++t) {
+        Message u; u.role = Role::User;
+        u.text = "write a file (" + std::to_string(t) + ")";
+        m.d.current.messages.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+        agentty::ToolUse tw;
+        tw.id   = agentty::ToolCallId{"a" + std::to_string(t)};
+        tw.name = agentty::ToolName{"write"};
+        std::string content;
+        for (int i = 0; i < 80; ++i)
+            content += "line " + std::to_string(i) + ": file body content\n";
+        tw.args = {{"file_path", "/tmp/a" + std::to_string(t) + ".txt"},
+                   {"content", content}};
+        auto now = std::chrono::steady_clock::now();
+        tw.status = agentty::ToolUse::Done{
+            now - std::chrono::milliseconds{5}, now, "Created"};
+        a.tool_calls.push_back(std::move(tw));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // Leave an active streaming tail so it models a mid-run state (the
+    // only context this trim was ever meant to run in).
+    Message tail; tail.role = Role::Assistant; tail.streaming_text = "...";
+    m.d.current.messages.push_back(std::move(tail));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size() - 1);
+
+    const std::size_t rows_before    = m.ui.frozen_row_total;
+    const std::size_t entries_before = m.ui.frozen.size();
+
+    auto cmd = agentty::app::detail::trim_frozen_above_viewport(m);
+
+    const std::size_t dropped_rows = rows_before - m.ui.frozen_row_total;
+    CHECK(entries_before > m.ui.frozen.size(),
+          "above-viewport trim dropped nothing despite a tall prefix");
+    CHECK(dropped_rows > 0, "above-viewport trim dropped entries but no rows");
+
+    using Cmd = maya::Cmd<agentty::Msg>;
+    const auto* exact = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    const auto* overflow =
+        std::get_if<Cmd::CommitScrollbackOverflow>(&cmd.inner);
+    CHECK(overflow == nullptr,
+          "above-viewport trim used commit_scrollback_overflow() — must use "
+          "row-exact commit_scrollback(removed) to stay scrollback-safe");
+    CHECK(exact != nullptr,
+          "above-viewport trim did not return a row-counted commit_scrollback");
+    if (exact) {
+        CHECK(static_cast<std::size_t>(exact->rows) == dropped_rows,
+              "above-viewport trim committed a row count != the rows it "
+              "dropped");
+    }
+}
+
 int main() {
     std::printf("midrun_freeze_test\n");
     test_live_bounded();
@@ -480,6 +545,7 @@ int main() {
     test_rehydrate_top_is_header();
     test_trim_no_leading_gap();
     test_trim_commits_exact_dropped_rows();
+    test_trim_above_viewport_commits_exact();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) { std::printf("FAILED\n"); return 1; }
     std::printf("PASSED\n");

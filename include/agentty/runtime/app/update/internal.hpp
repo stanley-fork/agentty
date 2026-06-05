@@ -148,8 +148,14 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
 // all walk the whole oversized canvas every frame (the progressive
 // slowdown). Unlike trim_frozen_if_oversized this NEVER drops an
 // on-screen entry, so it can't trigger the mid-run duplication bug.
-// Returns commit_scrollback_overflow() when it drops anything; no-op
-// otherwise.
+// Returns commit_scrollback(removed_rows) — EXACTLY the rows it
+// dropped — when it drops anything; no-op otherwise.
+//
+// NOTE: currently has NO production caller (mid-run trimming was
+// removed — see tool.cpp / meta.cpp). Kept for the o1_probe bench and
+// the seam tests. Its commit is row-exact (not commit_scrollback_
+// overflow) so it stays scrollback-safe even if a future caller wires
+// it back into the live path.
 maya::Cmd<Msg> trim_frozen_above_viewport(Model& m);
 
 // Set a transient status toast that auto-clears after `ttl`. Returns a

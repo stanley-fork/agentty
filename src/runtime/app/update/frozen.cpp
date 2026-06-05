@@ -1024,10 +1024,25 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
     // The dropped boundary can leave a turn's leading gap (its own
     // entry, pushed before the turn) at index 0 — a blank hole at the
     // top. Those rows were already above the viewport, so stripping
-    // them keeps the "provably off-screen" proof intact.
+    // them keeps the "provably off-screen" proof intact. Fold them into
+    // removed_rows so the commit count below covers them too.
+    const std::size_t rows_before_sep_strip = m.ui.frozen_row_total;
     drop_leading_separators(m);
+    removed_rows += rows_before_sep_strip - m.ui.frozen_row_total;
 
-    return maya::Cmd<Msg>::commit_scrollback_overflow();
+    // Commit EXACTLY the rows this trim dropped — same discipline as
+    // trim_frozen_if_oversized — NOT commit_scrollback_overflow(), which
+    // releases down to one viewport (prev_rows - term_h) regardless of
+    // how much this trim actually removed. This function is currently
+    // unreachable from the app (no production caller), but issuing an
+    // exact row-counted commit makes it SAFE BY CONSTRUCTION: even if it
+    // were re-wired into a mid-run path, commit_inline_prefix clamps the
+    // count to (prev_rows - term_h), so a row still in the viewport can
+    // never be committed and no duplicate can be stranded. The keep
+    // margin already guarantees >= term_h rows stay on screen, so every
+    // dropped row overflowed and the clamp never bites.
+    return maya::Cmd<Msg>::commit_scrollback(
+        static_cast<int>(removed_rows));
 }
 
 } // namespace agentty::app::detail
