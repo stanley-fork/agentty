@@ -58,6 +58,7 @@ namespace {
 void print_usage() {
     std::fprintf(stderr,
         "usage: agentty airgap [--setup] [--remote-agentty PATH] <user@host>\n"
+        "       agentty airgap [--setup] <user@host> --acp [acp flags…]\n"
         "\n"
         "  Opens an SSH session to <user@host> with `-R 1080`, which makes\n"
         "  OpenSSH expose a SOCKS5 proxy on the remote's localhost:1080.\n"
@@ -82,6 +83,13 @@ void print_usage() {
         "                     after re-OAuthing locally.\n"
         "  --remote-agentty PATH Absolute path to agentty on the remote.  Default:\n"
         "                     `agentty` (resolved via remote PATH).\n"
+        "  --acp [acp flags…] Don't launch the TUI — instead print a ready-to-\n"
+        "                     paste Zed `agent_servers` config that runs the\n"
+        "                     remote `agentty acp` over this same SSH+SOCKS\n"
+        "                     tunnel, with Zed owning the process. Everything\n"
+        "                     after --acp is forwarded to the remote acp agent\n"
+        "                     (e.g. --acp -m claude-haiku-4-5 --profile ask).\n"
+        "                     Must come AFTER <user@host>.\n"
         "  --clipboard-relay  Make Ctrl+V image paste work on the remote.\n"
         "                     Adds a reverse tunnel back to this laptop's\n"
         "                     sshd and points the remote's clipboard reader\n"
@@ -427,6 +435,82 @@ std::string sh_squote(std::string_view v) {
     std::_Exit(1);
 }
 
+// Emit a ready-to-paste Zed `agent_servers` config that makes Zed itself
+// own the airgap tunnel: `command` is `ssh`, and its args open the reverse
+// SOCKS tunnel AND exec `agentty acp` on the remote in one invocation. The
+// ACP JSON-RPC rides ssh's stdio, so there's nothing to babysit — no separate
+// `ssh -N`, no remote wrapper script, no env block. Zed spawns it, Zed kills
+// it. This is the whole point of `--acp`: copy-paste and go.
+//
+// `acp_extra` is the agentty-acp tail the user passed after `--acp`
+// (e.g. "-m claude-haiku-4-5 --profile ask --workspace /"). It's appended
+// verbatim to the remote `agentty acp` command.
+void print_acp_config(const std::string& remote,
+                      const std::string& remote_agentty,
+                      const std::string& acp_extra) {
+    // Remote command: point agentty at the tunnelled SOCKS proxy, then exec
+    // the ACP agent. `exec` so signals reach agentty directly and ssh tears
+    // it down cleanly when Zed closes stdin.
+    std::string remote_cmd =
+        "AGENTTY_SOCKS_PROXY=localhost:1080 exec " + remote_agentty + " acp";
+    if (!acp_extra.empty()) remote_cmd += " " + acp_extra;
+
+    // The ssh args, as a JSON array. -T: no PTY (ACP is a byte protocol, a
+    // PTY would corrupt it with echo/CR translation). -R 1080: the reverse
+    // SOCKS proxy. Liveness opts keep the long-lived session up.
+    auto jstr = [](const std::string& s) {
+        std::string o = "\"";
+        for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; }
+        o += '"';
+        return o;
+    };
+    const std::vector<std::string> ssh_args = {
+        "-T",
+        "-R", "1080",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+        remote,
+        remote_cmd,
+    };
+
+    std::string args_json;
+    for (std::size_t i = 0; i < ssh_args.size(); ++i) {
+        if (i) args_json += ", ";
+        args_json += jstr(ssh_args[i]);
+    }
+
+    // Best-effort: tell the user exactly which file to paste into.
+    std::string settings_hint;
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        // Linux: ~/.config/zed/settings.json. macOS uses the same path under
+        // ~/.config for Zed too. Print it if it exists, else still name it.
+        fs::path p = fs::path{home} / ".config" / "zed" / "settings.json";
+        settings_hint = p.string();
+    }
+
+    std::fprintf(stderr,
+        "agentty airgap --acp: add this to Zed's settings.json%s%s\n"
+        "  (the laptop's settings — NOT the remote's; Zed runs `ssh` locally\n"
+        "   and the agent over its stdio, so this works for a LOCAL Zed\n"
+        "   project too, not just an SSH-remote one):\n"
+        "\n"
+        "  \"agent_servers\": {\n"
+        "    \"agentty (airgap)\": {\n"
+        "      \"command\": \"ssh\",\n"
+        "      \"args\": [%s]\n"
+        "    }\n"
+        "  }\n"
+        "\n"
+        "Then pick “agentty (airgap)” in Zed's agent panel. One ssh process is\n"
+        "the tunnel, the agent, and the transport — nothing to keep running by\n"
+        "hand. Make sure `%s` has agentty installed and its credentials\n"
+        "(run `agentty airgap --setup %s` once to copy them over).\n",
+        settings_hint.empty() ? "" : "\n  → ",
+        settings_hint.c_str(),
+        args_json.c_str(), remote.c_str(), remote.c_str());
+}
+
 #endif // !_WIN32
 
 } // namespace
@@ -445,14 +529,27 @@ int cmd_airgap(int argc, char** argv) {
 #else
     bool        setup_mode = false;
     bool        clipboard_relay = false;
+    bool        acp_mode = false;
     std::string remote_agentty = "agentty";
     std::string remote;
+    std::string acp_extra;   // everything after --acp, forwarded to `agentty acp`
 
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-h" || a == "--help") { print_usage(); return 0; }
         else if (a == "--setup")       { setup_mode = true; }
         else if (a == "--clipboard-relay") { clipboard_relay = true; }
+        else if (a == "--acp") {
+            // Everything after --acp is the agentty-acp flag tail (model,
+            // profile, workspace, sandbox …). Slurp the rest verbatim and
+            // stop parsing our own flags.
+            acp_mode = true;
+            for (int j = i + 1; j < argc; ++j) {
+                if (!acp_extra.empty()) acp_extra += ' ';
+                acp_extra += argv[j];
+            }
+            break;
+        }
         else if (a == "--remote-agentty" && i + 1 < argc) {
             remote_agentty = argv[++i];
         }
@@ -471,6 +568,14 @@ int cmd_airgap(int argc, char** argv) {
 
     if (setup_mode) {
         if (int rc = copy_credentials(remote); rc != 0) return rc;
+    }
+
+    // --acp doesn't launch anything itself: it prints the Zed config that
+    // wires ssh-as-agent-server, then exits. Zed owns the process lifecycle
+    // from there.
+    if (acp_mode) {
+        print_acp_config(remote, remote_agentty, acp_extra);
+        return 0;
     }
 
     if (clipboard_relay) {

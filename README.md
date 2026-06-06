@@ -331,6 +331,29 @@ the Zed `args`:
 With `--workspace /` the startup line honestly reports `sandbox: degraded` —
 binding the whole filesystem means there's no containment left to enforce.
 
+### agentty-in-Zed on an air-gapped remote (one command)
+
+Want Zed to drive agentty running on a box with no direct internet? Don't
+hand-assemble tunnels — let one command print the exact config:
+
+```bash
+agentty airgap --setup user@airgapped-host           # once: copy your creds over
+agentty airgap user@airgapped-host --acp -m claude-haiku-4-5 --profile ask
+```
+
+The `--acp` form **doesn't launch anything** — it prints a ready-to-paste Zed
+`agent_servers` block (and the path to your `settings.json`). The trick: the
+block's `command` is `ssh` itself, and its args open the reverse SOCKS tunnel
+*and* exec the remote `agentty acp` in one invocation. The ACP JSON-RPC rides
+ssh's stdio, so **a single ssh process is the tunnel, the agent, and the
+transport** — Zed spawns it, Zed kills it. No `ssh -N` to babysit, no remote
+wrapper script, no env block. Everything after `--acp` (model, `--profile`,
+`--workspace`, `--sandbox`) is forwarded verbatim to the remote agent.
+
+Paste the printed block, pick **agentty (airgap)** in Zed's agent panel, prompt.
+The remote just needs agentty installed and its credentials (the `--setup` line
+above copies them at `chmod 600`).
+
 > Run `agentty acp` by hand and it'll sit waiting for newline-delimited
 > JSON-RPC on stdin (diagnostics go to stderr, stdout is the protocol channel).
 > `scripts/acp_smoke.py` is a tiny reference client that drives a full
