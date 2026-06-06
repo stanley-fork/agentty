@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -44,6 +45,53 @@ constexpr unsigned char kAlpn[] = {
     2, 'h', '2',
     8, 'h', 't', 't', 'p', '/', '1', '.', '1',
 };
+
+// --------------------------------------------------------------------------
+// Client-side TLS session resumption.
+//
+// SSL_SESS_CACHE_CLIENT enables OpenSSL's internal client cache, but on the
+// client side OpenSSL does NOT auto-attach a cached session on SSL_new — you
+// must call SSL_set_session() yourself before the handshake, and you must
+// CAPTURE the session OpenSSL hands you (TLS 1.3 tickets arrive in
+// post-handshake NewSessionTicket frames) via the new-session callback.
+// Without both halves, every dial pays a full handshake — resumption never
+// fires. We keep one most-recent SSL_SESSION per SNI host in a tiny
+// process-wide map; a single-endpoint client (api.anthropic.com) only ever
+// has a couple of distinct hosts, so a flat map under a mutex is ample.
+//
+// Resumption to api.anthropic.com is a 1-RTT (TLS 1.3) abbreviated handshake
+// instead of the full 2-RTT exchange — ~30-150 ms saved on every fresh dial
+// after the connection-pool idle TTL evicts the live socket.
+// --------------------------------------------------------------------------
+std::mutex&                                          sess_mu() {
+    static std::mutex m; return m;
+}
+std::unordered_map<std::string, SSL_SESSION*>&       sess_map() {
+    static auto* m = new std::unordered_map<std::string, SSL_SESSION*>{};
+    return *m;
+}
+
+// ex_data slot carrying the SNI host string pointer through to new_session_cb
+// (which only gets the SSL*, and SSL_get_servername is server-side only).
+int sni_ex_index() {
+    static int idx = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
+    return idx;
+}
+
+// Called by OpenSSL when a usable session/ticket is established. Takes
+// ownership of `sess` (return 1) and stashes it as the latest for this host,
+// freeing any prior one. Thread-safe.
+int new_session_cb(SSL* ssl, SSL_SESSION* sess) {
+    const auto* host = static_cast<const std::string*>(
+        SSL_get_ex_data(ssl, sni_ex_index()));
+    if (!host) return 0;   // not ours to keep — let OpenSSL free it
+    std::lock_guard<std::mutex> lk(sess_mu());
+    auto& m = sess_map();
+    auto it = m.find(*host);
+    if (it != m.end() && it->second) SSL_SESSION_free(it->second);
+    m[*host] = sess;       // we now own one ref (cb gives us a ref to keep)
+    return 1;
+}
 
 // --------------------------------------------------------------------------
 // Platform root store loaders. We load on top of OpenSSL's default paths
@@ -169,13 +217,17 @@ SSL_CTX* build_ctx(bool insecure) {
     // the connection-pool TTL (90 s) skips the full TLS handshake and does
     // a 1-RTT resume — saving one RTT to api.anthropic.com (~30-150 ms).
     //
-    // Critical: don't combine with SSL_SESS_CACHE_NO_INTERNAL_STORE unless
-    // you also install SSL_CTX_sess_set_new_cb + sess_get_cb to do your own
-    // bookkeeping. The earlier code did the former without the latter, which
-    // silently disabled session caching entirely. SSL_SESS_CACHE_CLIENT
-    // alone is enough — OpenSSL stores tickets per SSL_CTX automatically,
-    // and we share one SSL_CTX process-wide so all reconnects benefit.
+    // SSL_SESS_CACHE_CLIENT enables the cache mode, but on the CLIENT side
+    // OpenSSL neither auto-stores the ticket nor auto-attaches it on the next
+    // SSL_new. Both halves are wired explicitly: new_session_cb captures each
+    // NewSessionTicket per SNI host (below), and wrap_client calls
+    // SSL_set_session() with the saved one before connecting. Relying on the
+    // cache mode alone — as the prior comment here claimed — silently does a
+    // full handshake every time.
     SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT);
+    // Capture TLS 1.3 NewSessionTicket sessions ourselves — the internal
+    // cache alone never gets consulted on the client side (see new_session_cb).
+    SSL_CTX_sess_set_new_cb(ctx, new_session_cb);
     // I/O mode flags, essential for our pump-send loop:
     //   ENABLE_PARTIAL_WRITE    — SSL_write may return a positive value less
     //                             than the request; callers handle partial
@@ -289,7 +341,22 @@ SSL* wrap_client(int fd, std::string_view sni_host) {
     SSL_set1_host(ssl, host.c_str());
     SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
 
+    // Resumption: attach the most recent ticket for this host (if any) so the
+    // upcoming handshake is a 1-RTT resume. Also stash an owned copy of the
+    // host in ex_data so new_session_cb knows which key to file the fresh
+    // ticket under (it fires post-handshake, only sees the SSL*). The string
+    // is freed in free_ssl.
+    auto* host_key = new std::string{host};
+    SSL_set_ex_data(ssl, sni_ex_index(), host_key);
+    {
+        std::lock_guard<std::mutex> lk(sess_mu());
+        auto& m = sess_map();
+        if (auto it = m.find(host); it != m.end() && it->second)
+            SSL_set_session(ssl, it->second);
+    }
+
     if (SSL_set_fd(ssl, fd) != 1) {
+        delete host_key;
         SSL_free(ssl);
         return nullptr;
     }
@@ -299,6 +366,12 @@ SSL* wrap_client(int fd, std::string_view sni_host) {
 
 void free_ssl(SSL* ssl) noexcept {
     if (!ssl) return;
+    // Free the owned SNI host key we stashed in ex_data (wrap_client).
+    if (auto* host_key = static_cast<std::string*>(
+            SSL_get_ex_data(ssl, sni_ex_index()))) {
+        SSL_set_ex_data(ssl, sni_ex_index(), nullptr);
+        delete host_key;
+    }
     // Best-effort bidirectional shutdown.  If the peer hasn't ACK'd we don't
     // block on it — the fd is about to close anyway.
     (void)SSL_shutdown(ssl);
