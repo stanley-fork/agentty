@@ -358,6 +358,23 @@ std::size_t estimate_msg_rows(const Message& mm, int cols) {
             tool_rows += wrapped_rows(tc.output(), cols);
         if (out_cap > 0 && tool_rows > out_cap)
             tool_rows = out_cap;
+        // Settled-body cap (write / edit). tool_body_preview drops
+        // show_all and renders a bounded head+tail preview once a settled
+        // write/edit body exceeds kSettledBodyLineCap source lines (see
+        // cap_settled_body) — so a giant body renders ~head+tail rows,
+        // not one-row-per-line. The estimate MUST follow or it over-counts
+        // a capped entry, and trim_frozen_above_viewport's keep-loop would
+        // then drop an on-screen entry (the duplication ghost). Clamp the
+        // tool body to the elided ceiling here. UNDER/exact is the safe
+        // side, so use a conservative ceiling above the widget's real
+        // head+tail budget. Mirrors kSettledBodyLineCap in
+        // tool_body_preview.cpp.
+        constexpr std::size_t kSettledBodyLineCap   = 80;
+        constexpr std::size_t kCappedBodyRowCeiling = 48;
+        if ((tc.name.value == "write" || tc.name.value == "edit")
+            && tc.is_terminal() && tool_rows > kSettledBodyLineCap) {
+            tool_rows = kCappedBodyRowCeiling;
+        }
         rows += tool_rows;
         // Header / footer / chrome rows per tool card (~4 rows even
         // for an empty body — title, divider, status, blank). Fixed

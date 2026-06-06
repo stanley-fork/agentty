@@ -537,10 +537,17 @@ static void test_single_write_stream_to_freeze() {
 
     // The FROZEN snapshot (frame_c) must carry the WHOLE file. So must
     // frame_b: once the write SETTLES (terminal) the live card renders
-    // the full body too, byte-identical to the frozen card that replaces
-    // it. A windowed live card vs a full-body frozen card is the seam
-    // mismatch that stranded the duplicate — the rows the live card
-    // committed to scrollback must equal what the freeze re-presents.
+    // A settled write/edit body taller than kSettledBodyLineCap (80
+    // lines) renders as a bounded head+tail PREVIEW, not the full file
+    // (see cap_settled_body in tool_body_preview.cpp) — one 170-line
+    // write must not become a 170-row frozen entry that pins per-frame
+    // render. The seam invariant is unchanged: the live settled card and
+    // the frozen card make the IDENTICAL capped decision (pure function
+    // of the final bytes), so the committed prefix stays byte-stable
+    // across the handoff (checked via first_committed_divergence below).
+    // Here we assert the cap engaged: the LAST line (tail) is present in
+    // both renders, the live and frozen bodies are byte-identical, and a
+    // deep-middle line is elided away (proving it's a preview, not full).
     {
         auto joined = [](const std::vector<std::string>& rows) {
             std::string s;
@@ -549,16 +556,13 @@ static void test_single_write_stream_to_freeze() {
         };
         const std::string b = joined(frame_b);
         const std::string c = joined(frame_c);
-        CHECK(c.find("line 0: some plausible") != std::string::npos,
-              "frozen write snapshot missing the FIRST line of the file");
         CHECK(c.find("line 169: some plausible") != std::string::npos,
-              "frozen write snapshot missing the LAST line of the file");
-        CHECK(b.find("line 0: some plausible") != std::string::npos,
-              "settled-live write card missing the FIRST line — a windowed "
-              "live card diverges from the full-body frozen card at the "
-              "freeze seam (stranded duplicate)");
+              "frozen write snapshot missing the LAST (tail) line");
         CHECK(b.find("line 169: some plausible") != std::string::npos,
-              "settled-live write card missing the LAST line of the file");
+              "settled-live write card missing the LAST (tail) line");
+        CHECK(c.find("line 85: some plausible") == std::string::npos,
+              "frozen write snapshot showed a deep-middle line — the "
+              "settled-body cap did not engage (giant body pins render)");
     }
 
     int d_ab = first_committed_divergence(frame_a, frame_b, kTermH);
@@ -951,10 +955,15 @@ static void test_tall_card_live_to_frozen_seam() {
           "(the overflow->scrollback duplication)");
 
     // And the diff body must appear EXACTLY once across the whole render
-    // (no second copy stranded). Count a distinctive body line.
+    // (no second copy stranded). A 120-hunk edit is taller than the
+    // settled-body cap, so it renders as a head+tail preview — count a
+    // line from the LAST hunk (always in the tail, never elided) so the
+    // assertion targets a line the capped card actually shows. A deep
+    // middle line would be legitimately elided (count 0), which wouldn't
+    // distinguish "elided" from "duplicated."
     int copies = 0;
     for (const auto& row : frozen)
-        if (row.find("compute(60) + offset") != std::string::npos) ++copies;
+        if (row.find("compute(119) + offset") != std::string::npos) ++copies;
     CHECK(copies == 1,
           "edit diff body rendered more than once after freeze (duplicate)");
 }

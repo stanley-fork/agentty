@@ -111,6 +111,44 @@ constexpr std::size_t kStreamTailLines = 64;
     return std::string{body};
 }
 
+// Newline count + 1 — the physical line count of a body, the proxy the
+// settled-body cap uses to decide full-vs-elided render.
+[[nodiscard]] std::size_t count_lines(std::string_view s) {
+    if (s.empty()) return 0;
+    std::size_t n = 1;
+    for (char c : s) if (c == '\n') ++n;
+    return n;
+}
+
+// Settled-body height cap.
+//
+// write / edit / git_diff render their FULL body (show_all) when settled
+// so the user can review exactly what changed. For a normal-sized change
+// that's right. But a single 3000-line `write` becomes ONE ~3000-row
+// frozen entry, and maya re-blits every cached cell of the canvas each
+// frame (the hash_id cache skips the body REBUILD, not the per-cell
+// copy) — so a giant body pins per-frame render at tens-to-hundreds of
+// ms and the whole UI lags (measured: a 3000-line write = ~116 ms/frame
+// warm). It also can't be trimmed: a single message is one frozen entry
+// the trims must keep.
+//
+// Above this many physical lines we drop show_all and fall back to the
+// head+tail elision profile ("⋯ N more"), bounding the card to a few
+// dozen rows. The full content is still on disk and — for a body that
+// streamed live — in the terminal's native scrollback. The decision is a
+// PURE FUNCTION of the final bytes, so the live settled card and the
+// frozen snapshot make the IDENTICAL choice (byte-identical render → no
+// freeze-handoff seam mismatch), and a capped card never overflows the
+// viewport so it can never strand a scrollback duplicate. Mirrors how
+// bash / read / grep already cap (tool_output_render_cap).
+constexpr std::size_t kSettledBodyLineCap = 80;
+
+// True iff a settled body of `lines` physical lines should render
+// elided (head+tail) instead of in full.
+[[nodiscard]] bool cap_settled_body(std::size_t lines) {
+    return lines > kSettledBodyLineCap;
+}
+
 } // namespace
 
 // ── Frozen-build scope ──────────────────────────────────────────────
@@ -198,7 +236,12 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 // frozen snapshot emits the same full body so the handoff
                 // is seamless (no height jump).
                 out.text     = body.substr(a, b - a);
-                out.show_all = true;
+                // Cap a giant diff to a head+tail preview (see
+                // cap_settled_body): a 3000-line change as one frozen
+                // entry pins per-frame render. The cap is a pure function
+                // of the final bytes, so live and frozen agree.
+                out.show_all   = !cap_settled_body(count_lines(out.text));
+                out.tail_only  = false;
                 out.text_color = text_tertiary;
                 return out;
             }
@@ -225,15 +268,21 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 // settled the hunks are final, so expanding immediately
                 // avoids the "stub then sudden expand" lag and matches
                 // what freeze_range will build (seamless handoff).
-                out.show_all     = !streaming_now;
                 out.is_streaming = streaming_now;
                 out.hunks.reserve(it->size());
+                std::size_t hunk_lines = 0;
                 for (const auto& e : *it) {
                     if (!e.is_object()) continue;
                     auto ot = e.value("old_text", e.value("old_string", std::string{}));
                     auto nt = e.value("new_text", e.value("new_string", std::string{}));
+                    hunk_lines += count_lines(ot) + count_lines(nt);
                     out.hunks.push_back({std::move(ot), std::move(nt)});
                 }
+                // Settled: full hunks unless the edit is huge, in which
+                // case fall back to the per-hunk head+tail elision so one
+                // massive edit doesn't pin per-frame render. Pure function
+                // of the final hunks → live and frozen agree.
+                out.show_all = !streaming_now && !cap_settled_body(hunk_lines);
                 return out;
             }
             auto ot = safe_arg(tc.args, "old_text");
@@ -329,13 +378,19 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 out.text = tail_window(content, kStreamTailLines);
                 out.show_footer_stats = false;
             } else {
-                // Terminal: full body, show_all. Identical bytes whether
-                // this is the live-but-unfrozen card or the frozen
-                // snapshot, so the freeze handoff is seamless — the rows
-                // the live card committed to scrollback match the frozen
-                // card exactly, no stranded duplicate. Per-frame cost over
-                // a STABLE settled body for the one-or-two frames before
-                // the freeze is negligible (split_lines on final bytes).
+                // Terminal: full body, show_all — unless it's a giant file,
+                // in which case render a head+tail preview ("⋯ N more") so
+                // one 3000-line write doesn't pin per-frame render at
+                // ~100 ms. Identical bytes + identical show_all decision
+                // (pure function of the content) whether this is the
+                // live-but-unfrozen card or the frozen snapshot, so the
+                // freeze handoff is seamless and a capped card never
+                // overflows the viewport (no stranded scrollback copy).
+                // The full content is on disk and in native scrollback.
+                if (cap_settled_body(count_lines(content))) {
+                    out.show_all  = false;
+                    out.tail_only = false;   // head+tail elision, not tail-only
+                }
                 out.text = std::move(content);
             }
         } else if (tc.is_running()) {
