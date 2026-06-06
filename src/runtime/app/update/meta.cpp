@@ -202,21 +202,26 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // or one auto-pilot turn with many write/edit cards) grows the
             // live canvas unboundedly: every settled-but-unfrozen sub-turn
             // re-lays-out + re-paints each tick, and the shadow verify +
-            // canvas.clear() walk the whole oversized canvas. Cost climbs
-            // with turn length — the progressive slowdown felt mid-stream.
+            // canvas.clear() walk the whole oversized canvas. Even AFTER a
+            // sub-turn freezes, layout + per-cell blit still scale with
+            // frozen_row_total — so we must both freeze settled prefixes
+            // AND trim the part of the frozen prefix above the viewport.
+            // Cost otherwise climbs with turn length (the mid-stream lag).
             //
             // Freeze any sub-turns that became terminal (into the
-            // zero-copy, hash-keyed frozen prefix maya blits). Do NOT
-            // trim mid-stream: trim_frozen_above_viewport's off-screen
-            // proof rests on frozen_rows[] never over-counting an
-            // entry's real height, which a byte/cols estimate can't
-            // guarantee — an over-count drops a still-visible entry and
-            // maya re-emits the rows below it shifted over already-
-            // committed scrollback, showing the turn twice. Freezing
-            // alone keeps per-frame cost flat (the prefix is blitted
-            // O(1)); the canvas is bounded by the full trim at turn
-            // boundaries (stream finish / next submit), where every
-            // dropped row has provably overflowed.
+            // zero-copy, hash-keyed frozen prefix maya blits), THEN trim
+            // the part of that prefix that has scrolled above the
+            // viewport. Freezing alone does NOT bound per-frame cost: a
+            // hash-keyed frozen entry skips the body REBUILD but still
+            // pays layout + per-cell blit + canvas.clear + shadow verify
+            // every tick, all O(frozen_row_total). A long single turn
+            // grows that prefix without limit, so per-frame cost climbs
+            // with turn length — the progressive mid-stream slowdown.
+            // trim_frozen_above_viewport drops only entries PROVABLY
+            // above the viewport (keeps ~3 screens, robust to the
+            // byte-wrap over-count) and commits EXACTLY the dropped rows,
+            // so the bound holds mid-stream without stranding a duplicate.
+            maya::Cmd<Msg> midrun_trim = maya::Cmd<Msg>::none();
             if (m.s.active()) {
                 // Bound a long PURE-TEXT answer first: split its committed
                 // markdown prefix into a settled sub-turn so the next
@@ -225,6 +230,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 // (~13 ms/frame); with it only the ~2KB live tail does.
                 freeze_streaming_text_prefix(m);
                 freeze_settled_subturns(m);
+                midrun_trim = trim_frozen_above_viewport(m);
             }
 
             // ── Stream-stall watchdog ──────────────────────────────────
@@ -283,6 +289,8 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     a->rate_last_sample_bytes = a->live_delta_bytes;
                 }
             }
+            if (!midrun_trim.is_none())
+                return {std::move(m), std::move(midrun_trim)};
             return done(std::move(m));
         },
         [&](Quit) -> Step {

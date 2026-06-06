@@ -222,29 +222,30 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // Mid-run incremental freeze: this tool settling may have
             // made the leading sub-turns of the active run fully
             // terminal. Freeze that completed prefix now so the live
-            // canvas holds only the active sub-turn — keeps per-frame
-            // cost flat as edits/writes pile up in one long auto-pilot
-            // turn (no-op when nothing new is freezable). This is the
-            // SPEED path and stays: the frozen prefix is zero-copy
-            // (list_ref) and hash-keyed, so maya blits it — a tall
-            // mid-run prefix costs O(1) per frame to re-present.
+            // canvas holds only the active sub-turn. The frozen prefix
+            // is zero-copy (list_ref) + hash-keyed, so maya skips the
+            // body REBUILD — but it does NOT make re-presenting it free:
+            // layout + per-cell blit still run every frame O(rows). The
+            // trim below is what actually bounds that cost mid-run.
             freeze_settled_subturns(m);
-            // No mid-run trim. trim_frozen_above_viewport's safety proof
-            // rests on frozen_rows[] never OVER-counting an entry's real
-            // rendered height — a byte/cols heuristic can't actually
-            // guarantee that (wide chars, wrapped tool bodies, a stale
-            // term_dims read all break it). When it over-counts, the
-            // keep-loop stops early, a still-on-screen entry is dropped,
-            // maya re-emits the rows below it shifted, and the pre-drop
-            // copies already committed to native scrollback show the turn
-            // TWICE. agent_session never trims mid-stream for exactly
-            // this reason — it bounds scrollback only at turn boundaries
-            // where every dropped row has provably overflowed. The full
-            // trim runs at stream finish (stream.cpp) and on the next
-            // user submit (modal.cpp); freeze_settled_subturns already
-            // keeps per-frame cost flat by making the frozen prefix
-            // zero-copy + hash-keyed (maya blits it O(1)).
-            auto cmd  = cmd::kick_pending_tools(m);
+            // Mid-run-safe trim: bound the live canvas to ~3 viewports
+            // DURING a long auto-pilot run. freeze_settled_subturns alone
+            // does NOT bound per-frame cost — a frozen entry is hash-keyed
+            // so maya skips the BODY REBUILD, but it still re-runs layout
+            // and copies every cached cell into the back buffer each frame
+            // (O(frozen_row_total) per tick: clear + layout + blit +
+            // witness). A 40-edit run grows the prefix to thousands of
+            // rows and pins per-frame render at tens of ms — the lag.
+            // trim_frozen_above_viewport only drops entries PROVABLY above
+            // the viewport (keeps ~3 screens, robust to the byte-wrap
+            // over-count) and commits EXACTLY the dropped rows, so no
+            // on-screen row is released and no duplicate is stranded.
+            auto trim = trim_frozen_above_viewport(m);
+            auto kick = cmd::kick_pending_tools(m);
+            auto cmd  = trim.is_none()
+                ? std::move(kick)
+                : maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                      std::move(trim), std::move(kick)});
             return {std::move(m), std::move(cmd)};
         },
 

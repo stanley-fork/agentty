@@ -1001,8 +1001,20 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
     // mismatch across a frame is exactly what desyncs the "provably above
     // the viewport" proof.
     const int term_h = term_dims().rows;
+    // Keep ~3 viewports on the canvas — NOT 1.5. The keep-loop stops
+    // once the ESTIMATED kept rows reach this margin, and estimate_msg_
+    // rows wraps on BYTE length (wrapped_rows), which OVER-counts
+    // multibyte prose by up to ~2x (a CJK/emoji line is 2-4 bytes per
+    // 1-2 display cols). At a 1.5x margin a heavily-multibyte tail could
+    // over-count enough that real-kept < term_h, dropping an on-screen
+    // entry and re-emitting committed scrollback shifted (the duplication
+    // ghost the no-mid-run-trim comments feared). 3x absorbs the worst-
+    // case 2x over-count: even then real-kept >= 1.5x term_h > term_h, so
+    // every dropped entry is provably above the viewport. The canvas
+    // stays bounded to ~3 screens DURING a long run instead of growing
+    // to the full run height — per-frame clear+layout+blit stays flat.
     const std::size_t kViewportKeepRows =
-        static_cast<std::size_t>(std::max(64, (term_h * 3) / 2));
+        static_cast<std::size_t>(std::max(96, term_h * 3));
 
     // Only worth doing once the canvas is meaningfully over the keep
     // margin — trimming churns maya's inline diff (commit_scrollback_

@@ -151,11 +151,17 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
 // Returns commit_scrollback(removed_rows) — EXACTLY the rows it
 // dropped — when it drops anything; no-op otherwise.
 //
-// NOTE: currently has NO production caller (mid-run trimming was
-// removed — see tool.cpp / meta.cpp). Kept for the o1_probe bench and
-// the seam tests. Its commit is row-exact (not commit_scrollback_
-// overflow) so it stays scrollback-safe even if a future caller wires
-// it back into the live path.
+// NOTE: wired into the live mid-run path — tool.cpp (after each tool
+// settles) and meta.cpp's Tick (after the per-tick freeze). It keeps
+// ~3x term_h rows on the canvas (a margin chosen to absorb the byte-
+// based wrap over-count in estimate_msg_rows, so real-kept >= term_h
+// even for all-multibyte prose) and only fires once frozen_row_total
+// exceeds ~4x term_h, so it trims infrequently. Its commit is row-exact
+// (commit_scrollback(removed), not commit_scrollback_overflow) AND maya
+// clamps that count to (prev_rows - term_h) in commit_inline_prefix —
+// two independent nets, so an on-screen row can never be committed and
+// no duplicate is ever stranded. Also exercised by o1_probe + seam
+// tests.
 maya::Cmd<Msg> trim_frozen_above_viewport(Model& m);
 
 // Set a transient status toast that auto-clears after `ttl`. Returns a
