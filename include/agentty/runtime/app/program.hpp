@@ -263,7 +263,8 @@ struct AgenttyApp {
             m.s.active()
             && !m.d.current.messages.empty()
             && m.d.current.messages.back().role == Role::Assistant
-            && !m.d.current.messages.back().streaming_text.empty();
+            && (!m.d.current.messages.back().streaming_text.empty()
+                || !m.d.current.messages.back().pending_stream.empty());
         const std::int64_t kRevealBucketMs = 16;   // == kAnimationFrameInterval
 
         if (revealing_text) {

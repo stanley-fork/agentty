@@ -109,6 +109,13 @@ const std::vector<Axis>& visual_axes() {
         {"live tail message text (render_key)", [](Model& m) {
             m.d.current.messages.back().text += " more";
         }},
+        {"live tail pending_stream (render_key)", [](Model& m) {
+            // A delta that lands only in the Tick pacer's buffer must
+            // still advance the hash, or the render gate skips the frame
+            // and the live tail's reveal stops re-arming — the stream
+            // freezes until an unrelated axis flips.
+            m.d.current.messages.back().pending_stream += "buffered";
+        }},
         {"profile cycle", [](Model& m) {
             m.d.profile = (m.d.profile == agentty::Profile::Write)
                         ? agentty::Profile::Ask : agentty::Profile::Write;

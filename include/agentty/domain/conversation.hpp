@@ -308,6 +308,15 @@ struct Message {
     // attached, body bytes changed) bumps the key and forces a rebuild
     // instead of silently serving a stale cached Element back.
     //
+    // pending_stream.size() is mixed in so a delta that lands only in
+    // the Tick pacer's buffer (before it drips into streaming_text)
+    // still advances the key. Without it the render gate
+    // (program.hpp::visual_hash) sees an unchanged hash and skips the
+    // frame; the live tail's reveal cursor, having caught up to
+    // streaming_text, then stops re-arming its animation frame, so the
+    // stream visibly freezes until an unrelated axis flips — the "md
+    // streaming gets stuck" symptom.
+    //
     // Keep this in sync with the actual reads in
     // src/runtime/view/thread/turn/turn.cpp.
     [[nodiscard]] std::uint64_t compute_render_key() const {
@@ -316,6 +325,7 @@ struct Message {
         mix(static_cast<std::uint64_t>(role));
         mix(text.size());
         mix(streaming_text.size());
+        mix(pending_stream.size());
         mix(images.size());
         mix(attachments.size());
         for (const auto& a : attachments) {
