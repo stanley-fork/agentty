@@ -34,8 +34,11 @@
 
 #include <maya/dsl.hpp>
 #include <maya/element/text.hpp>   // maya::string_width (display-column count)
+#include <maya/layout/yoga.hpp>     // maya::layout::compute (exact rendered height)
 #include <maya/platform/io.hpp>
 #include <maya/render/cache_id.hpp>
+#include <maya/render/renderer.hpp> // maya::render_detail::build_layout_tree
+#include <maya/style/theme.hpp>
 #include <maya/widget/conversation.hpp>
 #include <maya/widget/turn.hpp>
 
@@ -397,18 +400,66 @@ std::size_t estimate_run_rows(const Model& m, std::size_t from, std::size_t to) 
     return estimate_run_rows(m, from, to, estimate_wrap_cols());
 }
 
-// Push a built frozen Element together with its estimated row count,
+// EXACT rendered height of a built frozen Element, measured through
+// maya's REAL layout engine at the live content width — the same
+// build_layout_tree + compute path render_tree runs. This is the ground
+// truth: the number maya WILL emit for this entry, not a reimplemented
+// guess (estimate_msg_rows). Storing the measured height in frozen_rows[]
+// is what makes the trims scrollback-safe by CONSTRUCTION: the keep-loop
+// margin and the commit count both derive from the same number maya
+// renders, so they can never drift from the wire (the drift was the
+// entire root cause of the recurring mid-run duplication / wipe bugs —
+// agentty estimating a height maya renders differently).
+//
+// Cost: one build_layout_tree + compute per freeze (NOT per frame).
+// Frozen entries are hash-keyed ComponentElements, so the measure is an
+// O(1) cached-height leaf for the heavy bodies; the surrounding chrome
+// is a handful of nodes. Freezes happen at most once per ~budget rows of
+// growth, far off the per-frame hot path.
+//
+// `cols` is the FULL terminal width: the frozen Turn owns its rail +
+// padding in its own FlexStyle, so the layout engine subtracts that
+// chrome itself — measuring at term_cols reproduces exactly what the
+// real thread-column render does (the thread fills the terminal width).
+// Returns 0 only on a degenerate width / empty tree, so callers fall
+// back to the estimate.
+std::size_t measure_element_rows(const maya::Element& e, int cols) {
+    if (cols < 1) return 0;
+    thread_local std::vector<maya::layout::LayoutNode> nodes;
+    nodes.clear();
+    const std::size_t root =
+        maya::render_detail::build_layout_tree(e, nodes, maya::theme::dark);
+    if (root >= nodes.size()) return 0;
+    maya::layout::compute(nodes, root, cols);
+    const int h = nodes[root].computed.size.height.raw();
+    return h > 0 ? static_cast<std::size_t>(h) : 0;
+}
+
+// Push a built frozen Element together with its rendered row count,
 // keeping m.ui.frozen / m.ui.frozen_rows / m.ui.frozen_is_separator /
 // m.ui.frozen_row_total in lockstep. EVERY push into m.ui.frozen must
-// go through here so the parallel vectors never drift. `separator` is
-// true for inter-turn gap rows / compaction dividers (entries that must
-// never lead the prefix). Takes std::size_t and clamps to INT_MAX before
-// storing in the int-typed frozen_rows[] — estimate_run_rows can exceed
-// INT_MAX on a pathological giant entry, and a negative-int store would
-// corrupt the row total (frozen_row_total accumulates the size_t value,
-// so an honest clamp keeps both vectors consistent).
+// go through here so the parallel vectors never drift.
+//
+// GROUND TRUTH: the stored row count is maya's REAL rendered height
+// (measure_element_rows runs the actual layout engine on the built
+// Element at the live width), NOT the estimate. The `rows` argument is
+// now only a FALLBACK for the degenerate case where measurement returns
+// 0 (zero/invalid width). This is THE fix for the recurring mid-run
+// scrollback corruption: frozen_rows[] drove both trim keep-loops and
+// their commit counts, and an estimate that disagreed with maya's render
+// by even one row dropped an on-screen entry (duplicate) or committed a
+// still-visible row (wipe). Measuring through the same layout maya
+// renders with makes frozen_rows[] equal to the wire by construction —
+// drift is structurally impossible.
+//
+// `separator` is true for inter-turn gap rows / compaction dividers
+// (entries that must never lead the prefix). Clamps to INT_MAX before
+// storing in the int-typed frozen_rows[].
 void push_frozen(Model& m, maya::Element e, std::size_t rows,
                  bool separator = false) {
+    const std::size_t measured =
+        measure_element_rows(e, estimate_wrap_cols(term_dims().cols));
+    if (measured > 0) rows = measured;
     if (rows < 1) rows = 1;
     const std::size_t clamped = std::min<std::size_t>(
         rows, static_cast<std::size_t>(std::numeric_limits<int>::max()));
@@ -1217,20 +1268,15 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
         if (kept_rows >= kViewportKeepRows) break;
     }
 
-    // STRUCTURAL anti-duplication slack: keep ONE extra entry below the
-    // row-margin cut. The keep-loop above trusts frozen_rows[k] (an
-    // estimate). It is one-sided UNDER for a fresh entry, but a widen
-    // resize can make a stamped count OVER-state an entry's real height —
-    // then the loop would reach kViewportKeepRows before the REAL rows do
-    // and the entry at keep_from could still be partly on screen. Dropping
-    // it removes Element rows the wire hasn't committed (maya clamps the
-    // commit to prev_rows-term_h) → the live tree is shorter than the
-    // wire and the entry re-emits below the committed boundary (the
-    // duplication ghost). Retaining one whole extra entry guarantees a
-    // full entry of real rows sits between the cut and the viewport top,
-    // absorbing ANY single-entry estimate over-count regardless of
-    // direction. Cheap: one extra blitted entry, evicted next trim once
-    // it has truly scrolled off.
+    // Belt-and-suspenders: keep ONE extra entry below the row-margin
+    // cut. frozen_rows[k] is now maya's REAL measured height (push_frozen
+    // measures the built Element), so the keep-loop margin already matches
+    // the wire exactly — the keystone fix. This extra entry is pure
+    // defense-in-depth against the one residual: a wide→narrow resize
+    // between freeze and trim re-wraps an entry taller than its stamped
+    // height (stamped UNDER-counts — safe, keeps more; this keeps one more
+    // still). Cheap: one extra blitted entry, evicted next trim once it
+    // has truly scrolled off.
     if (keep_from > 0) --keep_from;
 
     // Never drop the last 2 entries no matter what.

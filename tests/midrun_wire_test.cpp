@@ -1070,6 +1070,126 @@ static void test_midrun_trim_output_heavy_no_rewrite() {
     close(rfd);
 }
 
+static void test_midrun_trim_full_body_writes_no_rewrite() {
+    // THE screenshot scenario, end to end at the wire: repeated FULL-body
+    // writes during an active run, each overflowing the viewport, with the
+    // mid-run trim firing. Full bodies mean frozen_rows[] is now maya's
+    // REAL measured height (push_frozen measures the built Element), not
+    // an estimate. The trim's keep-loop and commit count both derive from
+    // that measured number, so the kept-real-rows >= term_h proof and the
+    // no-clamp (safe_n == commit_n) proof hold by construction even though
+    // every body renders in full.
+    constexpr int kWidth = 100;
+    constexpr int kTermH = 30;
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"wirefull"};
+    // Separate turns (user + full-body write each), so the frozen prefix
+    // is MANY entries the trim can actually drop — the real screenshot
+    // shape (repeated "write a file" turns), not one merged mega-run.
+    // Sized so the prefix is a couple viewports over the keep margin —
+    // the realistic per-Tick cadence (a few entries dropped), not a
+    // pathological single mega-trim.
+    for (int e = 0; e < 6; ++e) {
+        Message u; u.role = Role::User;
+        u.text = "write file " + std::to_string(e);
+        m.d.current.messages.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_write("f" + std::to_string(e), 40));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    Message ph; ph.role = Role::Assistant; ph.streaming_text = "continuing";
+    m.d.current.messages.push_back(std::move(ph));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size() - 1);
+    agentty::app::detail::freeze_settled_subturns(m);
+
+    StylePool pool;
+    auto [writer, rfd] = make_pipe_writer();
+
+    Canvas ca = paint(build_root(m), kWidth, pool);
+    auto oa = InlineFrame<Empty>{}.seed().render(
+        ca, content_rows(ca), term_rows_for_test(kTermH), pool, writer, false);
+    (void)drain(rfd);
+    InlineFrame<Synced> sa = std::visit(
+        [](auto&& arm) -> InlineFrame<Synced> {
+            using T = std::decay_t<decltype(arm)>;
+            if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                return std::move(arm);
+            else { std::fprintf(stderr, "  full-body trim frame A not Synced\n");
+                   std::abort(); }
+        }, std::move(oa));
+
+    const int rows_a = sa.rows();
+    const int committed_a = rows_a > kTermH ? rows_a - kTermH : 0;
+    CHECK(committed_a > 0,
+          "full-body trim setup: prefix must overflow the viewport");
+
+    auto cmd = agentty::app::detail::trim_frozen_above_viewport(m);
+    using Cmd = maya::Cmd<agentty::Msg>;
+    const auto* exact = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    CHECK(exact != nullptr,
+          "full-body trim did not fire on a tall full-body prefix");
+    if (!exact) { close(rfd); return; }
+
+    const int commit_n = exact->rows;
+    CHECK(commit_n <= committed_a,
+          "full-body trim commit exceeds safe max (rows_a - term_h)");
+
+    const int safe_max = rows_a > kTermH ? rows_a - kTermH : 0;
+    const int safe_n = std::min(commit_n, safe_max);
+    CHECK(safe_n == commit_n,
+          "full-body trim: maya clamped the commit below the dropped rows "
+          "— measured frozen_rows disagrees with the wire (impossible if "
+          "push_frozen measures the real height)");
+    InlineFrame<Synced> sb =
+        std::move(sa).commit(sa.scrollback_marker(safe_n));
+
+    Canvas cb = paint(build_root(m), kWidth, pool);
+    const int kept_real_rows = cb.max_content_row() + 1;
+    std::fprintf(stderr, "  [full-body trim] kept_real_rows=%d term_h=%d\n",
+                 kept_real_rows, kTermH);
+    CHECK(kept_real_rows >= kTermH,
+          "full-body trim left fewer than a viewport of REAL rows — a "
+          "measured entry disagreed with the render (ghost band)");
+
+    auto wit = sb.verify();
+    CHECK(wit.has_value(), "full-body trim: shadow verify failed");
+    std::string bytes_b;
+    if (wit) {
+        auto ob = std::move(sb).render(
+            cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
+            std::move(*wit), false);
+        bytes_b = drain(rfd);
+        bool synced_b = std::visit([](auto&& arm) {
+            using T = std::decay_t<decltype(arm)>;
+            return std::is_same_v<T, InlineFrame<Synced>>;
+        }, std::move(ob));
+        CHECK(synced_b,
+              "full-body trim freeze demoted out of Synced (ghost-band path)");
+    }
+    std::fprintf(stderr,
+        "  [full-body trim] rows_a=%d commit_n=%d emitted_bytes=%zu\n",
+        rows_a, commit_n, bytes_b.size());
+    // After a LARGE trim the kept rows shift up by commit_n positions, so
+    // their index-mixed row hashes change and maya re-emits the kept
+    // viewport — a bounded repaint proportional to kept_real_rows, NOT a
+    // ghost. The anti-corruption proof is the trio above (safe_n ==
+    // commit_n: measured rows matched the wire; kept_real_rows >= term_h:
+    // a viewport stayed on screen; synced_b: no recovery path). The byte
+    // bound here only guards against an UNBOUNDED repaint of the full
+    // pre-trim height (rows_a worth of bytes); a few hundred bytes per
+    // kept row is the expected cost. ~256 B/row is a generous ceiling.
+    CHECK(bytes_b.size()
+              < static_cast<std::size_t>(kept_real_rows) * 256 + 4096,
+          "full-body trim emitted more than a bounded kept-viewport "
+          "repaint — the commit boundary was wrong (ghost band)");
+
+    close(rfd);
+}
+
 int main() {
     std::printf("midrun_wire_test\n");
     test_write_freeze_no_rewrite();
@@ -1079,6 +1199,7 @@ int main() {
     test_text_turn_finish_shrink();
     test_overflowed_shrink_stays_synced();
     test_midrun_trim_output_heavy_no_rewrite();
+    test_midrun_trim_full_body_writes_no_rewrite();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) { std::printf("FAILED\n"); return 1; }
     std::printf("PASSED\n");
