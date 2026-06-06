@@ -190,11 +190,23 @@ void build_live_tail(const Model& m, int& running_turn,
             // the transcript already fills the viewport, and Composer
             // jumps up by the indicator's height.
             const Message& tail = m.d.current.messages[run_end - 1];
+            // "Empty placeholder" == nothing VISIBLE yet. Deliberately
+            // does NOT require pending_stream to be empty: the first
+            // content_block_delta lands its bytes in pending_stream
+            // (stream.cpp) and they only become visible one Tick later
+            // when meta.cpp drips them into streaming_text. If we
+            // dropped the placeholder the instant pending_stream filled,
+            // the indicator row (1 row) would vanish for that one frame
+            // BEFORE cached_markdown_for has any streaming_text to draw
+            // (has_text gates on text/streaming_text only) — a 1→0→1 row
+            // blink at the live seam that pushes the composer/status bar
+            // up for a split second at stream start. Holding the
+            // indicator until streaming_text actually has bytes makes
+            // the indicator→content swap a single height-stable step.
             const bool tail_is_empty_placeholder =
                 tail.role == Role::Assistant
                 && tail.text.empty()
                 && tail.streaming_text.empty()
-                && tail.pending_stream.empty()
                 && tail.tool_calls.empty();
             // Only the LAST run in the tail is the in-flight one whose
             // height must stay reserved across the indicator↔content

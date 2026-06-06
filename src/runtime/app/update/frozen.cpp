@@ -653,6 +653,28 @@ void freeze_streaming_text_prefix(Model& m) {
         fence_marker   = std::move(close_marker);
     }
 
+    // Last-resort line split for an UNBREAKABLE non-fence block. A long
+    // table (or any single block with no internal blank-line boundary)
+    // has no clean split point, so the clean scan above returns 0 and
+    // the whole block stays LIVE. Once that live block grows past one
+    // viewport it overflows into committed native scrollback, and the
+    // markdown widget's per-row reveal shifts a row by ±1 as each new
+    // line lands — rewriting a row already emitted to scrollback. That
+    // is the duplication ghost (e.g. a streaming table whose header
+    // re-appears one screen up, overlapping the prior turn). agent_session
+    // never hits this because it never carves a mid-stream prefix; we
+    // must, to bound per-frame relayout cost on huge replies. So when
+    // we're NOT in a fence, have no clean boundary, and the live region
+    // is well past a viewport, split at the last newline before the scan
+    // limit. The frozen prefix holds whole lines (a shorter but valid
+    // block); the live remainder keeps the trailing lines. Briefly a
+    // table's continuation rows render un-tabled in the small live tail
+    // until settle re-renders the whole message from msg.text — a far
+    // milder artifact than rewriting committed scrollback.
+    if (split == 0 && !fence_open && last_line_nl >= kMinSplitBytes) {
+        split = last_line_nl;
+    }
+
     if (split == 0) return;   // no safe boundary yet (still one short fence)
 
     // Carve the committed prefix out of the active tail. If this is the
