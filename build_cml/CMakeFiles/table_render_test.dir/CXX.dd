@@ -1,3 +1,0 @@
-ninja_dyndep_version = 1.0
-build CMakeFiles/table_render_test.dir/tests/table_render_test.cpp.o: dyndep
-

@@ -1,5 +1,0 @@
-ninja_dyndep_version = 1.0
-build CMakeFiles/fuzzy_match_smoke.dir/tests/fuzzy_match_smoke.cpp.o: dyndep
-
-build CMakeFiles/fuzzy_match_smoke.dir/src/tool/util/fuzzy_match.cpp.o: dyndep
-
