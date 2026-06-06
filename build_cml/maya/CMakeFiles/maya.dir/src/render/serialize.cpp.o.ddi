@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "maya/CMakeFiles/maya.dir/src/render/serialize.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

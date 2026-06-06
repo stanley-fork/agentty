@@ -1,0 +1,165 @@
+ninja_dyndep_version = 1.0
+build CMakeFiles/visual_hash_coverage_test.dir/tests/visual_hash_coverage_test.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/io/http.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/io/tls.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/io/auth.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/io/persistence.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/io/clipboard.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/util/base64.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/workspace/files.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/workspace/symbols.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/airgap/airgap.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/provider/anthropic/transport.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/diff/diff.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/registry.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/util/utf8.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/util/fs_helpers.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/util/glob_match.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/util/subprocess.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/util/sandbox.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/util/bash_validate.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/util/arg_reader.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/util/partial_json.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/util/fuzzy_match.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/read.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/write.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/edit.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/bash.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/grep.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/glob.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/list_dir.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/todo.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/web_fetch.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/web_search.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/find_definition.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/diagnostics.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/git.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/remember.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/forget.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/wipe.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/tool/memory_store.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/composer_attachment.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/deps.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/init.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/cmd_factory.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/composer.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/stream.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/modal.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/frozen.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/tool.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/login.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/picker.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/palette.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/mention.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/symbol.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/diff.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/update/meta.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/app/subscribe.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/cache.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/helpers.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/turn/agent_timeline/tool_args.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/turn/agent_timeline/tool_helpers.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/turn/agent_timeline/tool_body_preview.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/turn/agent_timeline/agent_timeline.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/turn/permission.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/turn/turn.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/welcome_screen.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/activity_indicator.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/conversation.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/thread/thread.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/composer.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/status_bar/title_chip.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/status_bar/phase_chip.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/status_bar/token_stream_sparkline.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/status_bar/context_gauge.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/status_bar/status_banner.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/status_bar/model_badge.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/status_bar/status_bar.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/changes_strip.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/pickers.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/diff_review.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/login.cpp.o: dyndep
+
+build CMakeFiles/visual_hash_coverage_test.dir/src/runtime/view/view.cpp.o: dyndep
+

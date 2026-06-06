@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "CMakeFiles/long_session_bench.dir/src/util/base64.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

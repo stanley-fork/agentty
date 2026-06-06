@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

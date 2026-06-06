@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "maya/CMakeFiles/maya.dir/src/app/inline.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

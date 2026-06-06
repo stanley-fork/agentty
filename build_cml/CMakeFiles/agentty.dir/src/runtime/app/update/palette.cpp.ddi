@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "CMakeFiles/agentty.dir/src/runtime/app/update/palette.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

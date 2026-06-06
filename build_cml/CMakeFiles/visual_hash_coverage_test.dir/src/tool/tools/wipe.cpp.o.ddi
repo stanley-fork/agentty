@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "CMakeFiles/visual_hash_coverage_test.dir/src/tool/tools/wipe.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

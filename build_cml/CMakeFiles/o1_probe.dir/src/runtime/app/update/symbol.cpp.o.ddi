@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "CMakeFiles/o1_probe.dir/src/runtime/app/update/symbol.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

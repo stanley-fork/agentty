@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/ayush/agentty/build_cml/_deps/nlohmann_json-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

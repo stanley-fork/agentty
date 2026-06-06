@@ -549,6 +549,12 @@ std::vector<Thread> load_all_threads() {
     if (!fs::exists(threads_dir(), ec)) return out;
     for (const auto& e : fs::directory_iterator(threads_dir(), ec)) {
         if (e.path().extension() != ".json") continue;
+        // acp_sessions.json is the ACP server's sidecar session index
+        // (sessionId → {cwd, title, updatedAt}), not a thread file. It
+        // lives in threads_dir() but has a different shape, so the meta
+        // SAX parser fails it — skip it instead of logging a spurious
+        // "metadata sax parse failed" on every startup.
+        if (e.path().filename() == "acp_sessions.json") continue;
         auto loaded = load_thread_meta_file(e.path());
         if (loaded) {
             out.push_back(std::move(*loaded));

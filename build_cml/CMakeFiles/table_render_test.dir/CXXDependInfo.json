@@ -1,0 +1,30 @@
+{
+	"bmi-installation" : null,
+	"compiler-frontend-variant" : "GNU",
+	"compiler-id" : "GNU",
+	"compiler-simulate-id" : "",
+	"config" : "Release",
+	"cxx-modules" : {},
+	"database-info" : null,
+	"dir-cur-bld" : "/home/ayush/agentty/build_cml",
+	"dir-cur-src" : "/home/ayush/agentty",
+	"dir-top-bld" : "/home/ayush/agentty/build_cml",
+	"dir-top-src" : "/home/ayush/agentty",
+	"exports" : [],
+	"forward-modules-from-target-dirs" : [],
+	"include-dirs" : 
+	[
+		"/home/ayush/agentty/maya/include"
+	],
+	"language" : "CXX",
+	"linked-target-dirs" : [],
+	"module-dir" : "/home/ayush/agentty/build_cml/CMakeFiles/table_render_test.dir",
+	"sources" : 
+	{
+		"CMakeFiles/table_render_test.dir/tests/table_render_test.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/tests/table_render_test.cpp"
+		}
+	}
+}

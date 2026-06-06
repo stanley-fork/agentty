@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "CMakeFiles/midrun_wire_test.dir/src/runtime/view/thread/turn/agent_timeline/agent_timeline.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

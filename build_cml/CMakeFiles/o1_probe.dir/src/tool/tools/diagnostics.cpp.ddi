@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "CMakeFiles/o1_probe.dir/src/tool/tools/diagnostics.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

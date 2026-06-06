@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "maya/CMakeFiles/maya.dir/src/terminal/input.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

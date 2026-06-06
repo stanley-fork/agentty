@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "CMakeFiles/midrun_freeze_test.dir/src/tool/util/sandbox.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

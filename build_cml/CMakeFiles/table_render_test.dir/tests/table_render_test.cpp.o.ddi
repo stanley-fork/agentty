@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "CMakeFiles/table_render_test.dir/tests/table_render_test.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

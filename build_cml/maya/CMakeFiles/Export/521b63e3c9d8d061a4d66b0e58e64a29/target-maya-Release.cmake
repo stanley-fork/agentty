@@ -1,0 +1,3 @@
+set_property(TARGET "maya::maya"
+  PROPERTY IMPORTED_CXX_MODULES_RELEASE
+)

@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/ayush/agentty/build_cml/cmake_install.cmake",
+		"/home/ayush/agentty/build_cml/maya/cmake_install.cmake",
+		"/home/ayush/agentty/build_cml/_deps/nlohmann_json-build/cmake_install.cmake",
+		"/home/ayush/agentty/build_cml/_deps/simdjson-build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

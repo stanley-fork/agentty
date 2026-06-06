@@ -1,0 +1,77 @@
+ninja_dyndep_version = 1.0
+build maya/CMakeFiles/maya.dir/src/app/app.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/app/events.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/app/inline.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/element/builder.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/element/text.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/terminal/ansi.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/terminal/input.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/terminal/writer.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/layout/yoga.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/render/canvas.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/render/renderer.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/render/diff.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/render/serialize.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/render/frame_bytes.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/render/inline_frame.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/render/canvas_witness.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/parser/parser_inline.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/parser/parser_block.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/parser/text_transform.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/engine/cm_block.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/engine/cm_inline.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/render/render_inline.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/render/render_block.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/render/syntax_lang.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/render/syntax_highlight.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/streaming/markdown_memo.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/streaming/boundary.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/streaming/commit.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/streaming/render_tail.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/streaming/build.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/streaming/reveal_fx.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/streaming/folding.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/markdown/streaming/async.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/html/tags.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/html/tokenizer.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/html/parser.cpp.o: dyndep
+
+build maya/CMakeFiles/maya.dir/src/widget/html/render.cpp.o: dyndep
+

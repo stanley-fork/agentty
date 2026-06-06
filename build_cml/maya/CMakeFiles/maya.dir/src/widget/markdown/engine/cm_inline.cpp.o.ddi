@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "maya/CMakeFiles/maya.dir/src/widget/markdown/engine/cm_inline.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}

@@ -1,0 +1,21 @@
+# ninja log v7
+0	14	1780774589114029109	simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-mkdir	cb8f6e9933e736ed
+0	14	1780774589114029109	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-mkdir	cb8f6e9933e736ed
+14	8464	1780774597563420619	simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-download	b0a1ce50ddd1a60
+14	8464	1780774597563420619	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-download	b0a1ce50ddd1a60
+8464	8473	1780774597564420665	simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-update	d3b59651f564c9a
+8464	8473	1780774597564420665	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-update	d3b59651f564c9a
+8473	8485	1780774597584421592	simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-patch	c47178aab3d86fb5
+8473	8485	1780774597584421592	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-patch	c47178aab3d86fb5
+8485	8496	1780774597595422102	simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-configure	812a8363d88814db
+8485	8496	1780774597595422102	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-configure	812a8363d88814db
+8496	8508	1780774597606422612	simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-build	493c268ab8c8a70f
+8496	8508	1780774597606422612	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-build	493c268ab8c8a70f
+8508	8522	1780774597620423260	simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-install	ba016de054796da7
+8508	8522	1780774597620423260	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-install	ba016de054796da7
+8522	8534	1780774597632423816	simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-test	91d159aac898dbe1
+8522	8534	1780774597632423816	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-test	91d159aac898dbe1
+8534	8552	1780774597650424651	CMakeFiles/simdjson-populate-complete	ad6a82c9b3625f45
+8534	8552	1780774597650424651	simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-done	ad6a82c9b3625f45
+8534	8552	1780774597650424651	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/CMakeFiles/simdjson-populate-complete	ad6a82c9b3625f45
+8534	8552	1780774597650424651	/home/ayush/agentty/build_cml/_deps/simdjson-subbuild/simdjson-populate-prefix/src/simdjson-populate-stamp/simdjson-populate-done	ad6a82c9b3625f45

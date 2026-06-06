@@ -1,0 +1,438 @@
+{
+	"bmi-installation" : null,
+	"compiler-frontend-variant" : "GNU",
+	"compiler-id" : "GNU",
+	"compiler-simulate-id" : "",
+	"config" : "Release",
+	"cxx-modules" : {},
+	"database-info" : null,
+	"dir-cur-bld" : "/home/ayush/agentty/build_cml",
+	"dir-cur-src" : "/home/ayush/agentty",
+	"dir-top-bld" : "/home/ayush/agentty/build_cml",
+	"dir-top-src" : "/home/ayush/agentty",
+	"exports" : [],
+	"forward-modules-from-target-dirs" : [],
+	"include-dirs" : 
+	[
+		"/home/ayush/agentty/include",
+		"/home/ayush/agentty/maya/include",
+		"_deps/nlohmann_json-src/include",
+		"_deps/simdjson-src/include"
+	],
+	"language" : "CXX",
+	"linked-target-dirs" : [],
+	"module-dir" : "/home/ayush/agentty/build_cml/CMakeFiles/o1_probe.dir",
+	"sources" : 
+	{
+		"CMakeFiles/o1_probe.dir/src/airgap/airgap.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/airgap/airgap.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/diff/diff.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/diff/diff.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/io/auth.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/io/auth.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/io/clipboard.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/io/clipboard.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/io/http.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/io/http.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/io/persistence.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/io/persistence.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/io/tls.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/io/tls.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/provider/anthropic/transport.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/provider/anthropic/transport.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/cmd_factory.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/cmd_factory.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/deps.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/deps.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/init.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/init.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/subscribe.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/subscribe.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/composer.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/composer.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/diff.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/diff.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/frozen.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/frozen.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/login.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/login.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/mention.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/mention.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/meta.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/meta.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/modal.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/modal.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/palette.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/palette.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/picker.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/picker.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/stream.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/stream.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/symbol.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/symbol.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/app/update/tool.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/app/update/tool.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/composer_attachment.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/composer_attachment.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/cache.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/cache.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/changes_strip.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/changes_strip.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/composer.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/composer.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/diff_review.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/diff_review.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/helpers.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/helpers.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/login.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/login.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/pickers.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/pickers.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/status_bar/context_gauge.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/status_bar/context_gauge.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/status_bar/model_badge.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/status_bar/model_badge.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/status_bar/phase_chip.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/status_bar/phase_chip.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/status_bar/status_banner.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/status_bar/status_banner.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/status_bar/status_bar.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/status_bar/status_bar.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/status_bar/title_chip.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/status_bar/title_chip.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/status_bar/token_stream_sparkline.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/status_bar/token_stream_sparkline.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/activity_indicator.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/activity_indicator.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/conversation.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/conversation.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/thread.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/thread.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/turn/agent_timeline/agent_timeline.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/turn/agent_timeline/agent_timeline.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/turn/agent_timeline/tool_args.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/turn/agent_timeline/tool_args.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/turn/agent_timeline/tool_body_preview.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/turn/agent_timeline/tool_body_preview.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/turn/agent_timeline/tool_helpers.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/turn/agent_timeline/tool_helpers.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/turn/permission.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/turn/permission.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/turn/turn.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/turn/turn.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/thread/welcome_screen.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/thread/welcome_screen.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/runtime/view/view.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/runtime/view/view.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/memory_store.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/memory_store.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/registry.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/registry.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/bash.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/bash.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/diagnostics.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/diagnostics.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/edit.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/edit.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/find_definition.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/find_definition.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/forget.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/forget.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/git.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/git.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/glob.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/glob.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/grep.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/grep.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/list_dir.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/list_dir.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/read.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/read.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/remember.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/remember.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/todo.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/todo.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/web_fetch.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/web_fetch.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/web_search.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/web_search.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/wipe.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/wipe.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/tools/write.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/tools/write.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/util/arg_reader.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/util/arg_reader.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/util/bash_validate.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/util/bash_validate.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/util/fs_helpers.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/util/fs_helpers.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/util/fuzzy_match.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/util/fuzzy_match.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/util/glob_match.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/util/glob_match.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/util/partial_json.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/util/partial_json.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/util/sandbox.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/util/sandbox.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/util/subprocess.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/util/subprocess.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/tool/util/utf8.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/tool/util/utf8.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/util/base64.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/util/base64.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/workspace/files.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/workspace/files.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/src/workspace/symbols.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/src/workspace/symbols.cpp"
+		},
+		"CMakeFiles/o1_probe.dir/tests/o1_probe.cpp.o" : 
+		{
+			"language" : "CXX",
+			"source" : "/home/ayush/agentty/tests/o1_probe.cpp"
+		}
+	}
+}
