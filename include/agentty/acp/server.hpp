@@ -25,7 +25,9 @@
 //   session/cancel      → (notification) trip the in-flight turn's cancel token
 //
 // While a turn runs we call BACK to the client:
-//   session/update              (notification) — message chunks, tool calls
+//   session/update              (notification) — message chunks, tool calls,
+//                              and a usage_update (token accounting) per
+//                              completion so the client's context meter tracks
 //   session/request_permission  (request)      — gate WriteFs/Exec tools
 //
 // The turn loop mirrors the TUI's launch_stream + kick_pending_tools

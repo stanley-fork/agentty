@@ -21,6 +21,7 @@
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/policy.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/spec.hpp"
@@ -719,6 +720,8 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     StopReason stop = StopReason::Unspecified;
     std::string cur_tool_json;   // accumulates input_json_delta for the open tool
     bool any_text_streamed = false;
+    StreamUsage last_usage;      // most recent usage frame this completion
+    bool have_usage = false;
     const std::string sid = sess.id;
     const std::string msg_id = assistant.id.value;
 
@@ -774,8 +777,11 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                         stop = ev.stop_reason;
                     } else if constexpr (std::is_same_v<E, StreamError>) {
                         out_error = ev.message;
+                    } else if constexpr (std::is_same_v<E, StreamUsage>) {
+                        last_usage = ev;
+                        have_usage = true;
                     }
-                    // StreamUsage / StreamHeartbeat / StreamStarted: ignored.
+                    // StreamHeartbeat / StreamStarted: ignored.
                 }, domain);
             }
         }, m);
@@ -789,6 +795,25 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
 
     if (sess.cancel && sess.cancel->is_cancelled()) {
         out_cancelled = true;
+    }
+
+    // Surface token accounting to the client as a usage_update so Zed's
+    // context meter tracks the session. `used` = tokens currently in context
+    // (this completion's input + the output it just produced); `size` = the
+    // model's context window. Anthropic reports input_tokens at message_start
+    // and the running output_tokens at message_delta, so last_usage holds the
+    // final tally once the stream ends.
+    if (have_usage) {
+        const std::string model = sess.model.empty() ? model_id_ : sess.model;
+        long long used = static_cast<long long>(last_usage.input_tokens) +
+                         last_usage.cache_creation_input_tokens +
+                         last_usage.cache_read_input_tokens +
+                         last_usage.output_tokens;
+        send_update(sid, json{
+            {"sessionUpdate", "usage_update"},
+            {"used", used < 0 ? 0 : used},
+            {"size", ui::context_max_for_model(model)},
+        });
     }
 
     sess.thread.messages.push_back(std::move(assistant));
