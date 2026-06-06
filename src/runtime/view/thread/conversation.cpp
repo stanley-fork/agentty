@@ -124,17 +124,11 @@ void build_live_tail(const Model& m, int& running_turn,
                     i, cut, running_turn, m,
                     /*continuation=*/prefix_continuation);
                 // SAME key shape freeze_settled_subturns stamps for
-                // [i, cut) — a prefix-vs-self-freeze cache HIT.
-                maya::CacheIdBuilder kb;
-                kb.add(std::string_view{"agentty.turn.assistant_run"})
-                  .add(prefix_continuation ? std::string_view{"cont"}
-                                           : std::string_view{"head"})
-                  .add(static_cast<std::uint64_t>(cut - i));
-                for (std::size_t j = i; j < cut; ++j) {
-                    kb.add(std::string_view{m.d.current.messages[j].id.value});
-                    kb.add(m.d.current.messages[j].compute_render_key());
-                }
-                pcfg.hash_id = kb.build();
+                // [i, cut) — a prefix-vs-self-freeze cache HIT. Built
+                // through the shared ui::assistant_run_hash_id so the
+                // three sites can't drift.
+                pcfg.hash_id = assistant_run_hash_id(
+                    m, i, cut, /*continuation=*/prefix_continuation);
                 out.push_back(maya::Turn{std::move(pcfg)}.build());
                 ++running_turn;
 
@@ -290,16 +284,8 @@ void build_live_tail(const Model& m, int& running_turn,
                 return true;
             }();
             if (run_terminal && !reserve_slot) {
-                maya::CacheIdBuilder kb;
-                kb.add(std::string_view{"agentty.turn.assistant_run"})
-                  .add(midrun_continuation ? std::string_view{"cont"}
-                                           : std::string_view{"head"})
-                  .add(static_cast<std::uint64_t>(run_end - i));
-                for (std::size_t j = i; j < run_end; ++j) {
-                    kb.add(std::string_view{m.d.current.messages[j].id.value});
-                    kb.add(m.d.current.messages[j].compute_render_key());
-                }
-                cfg.hash_id = kb.build();
+                cfg.hash_id = assistant_run_hash_id(
+                    m, i, run_end, /*continuation=*/midrun_continuation);
             }
             // NOTE: the in-flight (streaming) run is deliberately NOT
             // cached. Its Turn carries animated chrome — the tool

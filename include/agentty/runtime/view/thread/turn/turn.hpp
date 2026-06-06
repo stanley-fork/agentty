@@ -80,4 +80,18 @@ namespace agentty::ui {
 [[nodiscard]] std::size_t freezable_prefix_cut(
     const Model& m, std::size_t run_start, std::size_t run_end);
 
+// Build the maya hash_id (component-cache key) for the Assistant run
+// [run_start, run_end). SINGLE SOURCE OF TRUTH for the key shape, used
+// by all three sites that must agree byte-for-byte so the freeze handoff
+// is a cache HIT (zero row shift): conversation.cpp's live-tail prefix
+// split, freeze_settled_subturns (the mid-run freeze), and freeze_range
+// (the idle freeze). The `continuation` flag MUST be the same value all
+// three pass for the same run — a head-vs-cont mismatch produces
+// different keys, a cache miss, and the duplication ghost. Centralising
+// the build here means a future edit to the key shape can't silently
+// desync one caller.
+[[nodiscard]] maya::CacheId assistant_run_hash_id(
+    const Model& m, std::size_t run_start, std::size_t run_end,
+    bool continuation);
+
 } // namespace agentty::ui

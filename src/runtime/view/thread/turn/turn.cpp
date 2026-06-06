@@ -10,6 +10,7 @@
 
 #include <maya/widget/agent_timeline.hpp>
 #include <maya/widget/markdown.hpp>
+#include <maya/render/cache_id.hpp>
 #include <maya/app/app.hpp>
 
 #include "agentty/domain/catalog.hpp"
@@ -715,6 +716,22 @@ std::size_t freezable_prefix_cut(const Model& m, std::size_t run_start,
     if (cut >= run_end && !last_is_settled_tool_batch_not_back)
         cut = (run_end > run_start) ? run_end - 1 : run_start;
     return cut;
+}
+
+maya::CacheId assistant_run_hash_id(
+    const Model& m, std::size_t run_start, std::size_t run_end,
+    bool continuation)
+{
+    const auto& msgs = m.d.current.messages;
+    maya::CacheIdBuilder kb;
+    kb.add(std::string_view{"agentty.turn.assistant_run"})
+      .add(continuation ? std::string_view{"cont"} : std::string_view{"head"})
+      .add(static_cast<std::uint64_t>(run_end - run_start));
+    for (std::size_t j = run_start; j < run_end && j < msgs.size(); ++j) {
+        kb.add(std::string_view{msgs[j].id.value});
+        kb.add(msgs[j].compute_render_key());
+    }
+    return kb.build();
 }
 
 } // namespace agentty::ui

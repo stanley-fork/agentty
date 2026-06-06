@@ -27,10 +27,13 @@
 #include "agentty/runtime/app/update/internal.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 #include <maya/dsl.hpp>
+#include <maya/element/text.hpp>   // maya::string_width (display-column count)
 #include <maya/platform/io.hpp>
 #include <maya/render/cache_id.hpp>
 #include <maya/widget/conversation.hpp>
@@ -64,40 +67,39 @@ TermDims term_dims() {
     };
 }
 
-// Effective wrap width used by the row estimate. Clamped to a sane
-// floor so a transiently-bogus 1-col read can't blow the estimate up
-// to thousands of rows (which would over-trim). The renderer reserves
-// a couple of columns for the turn rail / gutter, so subtract a small
-// margin to bias the estimate toward OVER-counting rows (keep more) —
-// the safe direction for the trim's correctness.
-int estimate_wrap_cols() {
-    const int cols = term_dims().cols;
+// Effective wrap width used by the row estimate, derived from an explicit
+// terminal-column count. Clamped to a sane floor so a transiently-bogus
+// 1-col read can't blow the estimate up to thousands of rows (which would
+// over-trim). The renderer reserves a couple of columns for the turn rail
+// / gutter, so subtract a small margin. Callers that already hold a
+// term_dims() snapshot pass its .cols so every row-math call in one trim
+// reflects ONE terminal state (the proof depends on it); the no-arg
+// overload queries fresh for the one-shot freeze paths.
+int estimate_wrap_cols(int term_cols) {
     // Rail + padding eat ~4 columns of real content width.
-    return std::max(16, cols - 4);
+    return std::max(16, term_cols - 4);
 }
+int estimate_wrap_cols() { return estimate_wrap_cols(term_dims().cols); }
 
-// Live-canvas row budget = a small multiple of the terminal viewport.
+// Live-canvas row budget = a small multiple of the terminal viewport,
+// derived from an explicit terminal-row count (see estimate_wrap_cols for
+// the one-snapshot rationale).
 // The live m.ui.frozen vector IS the inline canvas; every full repaint
 // (resume swap, resize→Divergent wipe+repaint, Ctrl-L) walks it top to
 // bottom and the user sees the paint. Bounding it to ~2 screens keeps
 // all three cheap. Older rows live in native terminal scrollback (the
 // terminal redraws them instantly) and on disk (recall via picker).
-std::size_t frozen_row_budget() {
-    const int h = term_dims().rows;
+std::size_t frozen_row_budget(int term_rows) {
     // ~1 extra viewport beyond the on-screen region, floored so a tiny
     // window still keeps useful context. CALIBRATION: this budget is
-    // applied to estimate_msg_rows, which now counts REAL source lines
-    // with no double-count. An earlier estimate over-counted tool bodies
-    // ~2x (it summed both the parsed `args` AND the raw `args_streaming`
-    // of the same payload), so the same budget value retained only ~half
-    // this many REAL rows on the canvas. With the estimate corrected, a
-    // 2x budget would retain ~2x the REAL rows and per-frame render
-    // (O(real canvas rows): render_tree + clear + verify) slows as the
-    // session grows. 1.5x keeps a couple screens of recent context while
-    // holding the canvas — and the latency — flat. Older rows live in
-    // native terminal scrollback and on disk.
-    return static_cast<std::size_t>(std::max(48, (h * 3) / 2));
+    // applied to estimate_msg_rows, which counts REAL display rows with no
+    // double-count and no byte-based multibyte inflation. 1.5x keeps a
+    // couple screens of recent context while holding the canvas — and the
+    // latency — flat. Older rows live in native terminal scrollback and
+    // on disk.
+    return static_cast<std::size_t>(std::max(48, (term_rows * 3) / 2));
 }
+std::size_t frozen_row_budget() { return frozen_row_budget(term_dims().rows); }
 
 // Inter-turn gap: a blank row, the thin dim ─ rule, then another
 // blank row. Pushed before each fresh-speaker turn so settled turns
@@ -135,30 +137,44 @@ maya::Element compaction_divider_row() {
         && !mm.tool_calls.empty();
 }
 
-// Cheap byte-based row estimate for a single message's contribution
+// Cheap display-column row estimate for a single message's contribution
 // to a frozen Turn. NOT a render — a coarse proxy used only to BOUND
-// the frozen canvas height, where over/under by a few rows is harmless.
-// Shared by rehydrate_frozen (budget walk) and freeze_range (per-entry
-// frozen_rows accounting).
+// the frozen canvas height. Built to be one-sided (exact or UNDER, never
+// OVER) so both trims' keep-loops are safe by construction. Shared by
+// rehydrate_frozen (budget walk) and freeze_range (per-entry frozen_rows
+// accounting).
+
+// Display columns occupied by a single physical line (no embedded
+// newline), and the wrapped row count it produces at width `cols`.
+// Uses maya::string_width — the SAME UCD-backed width table the renderer
+// wraps with — so the estimate tracks real columns, not bytes. A CJK /
+// emoji line that is 3 bytes per glyph no longer inflates to ~3x its
+// real row count; the byte-based over-count that forced the trims'
+// asymmetric safety margins is gone, and the estimate is one-sided
+// (exact or under) as the trim proofs require.
+std::size_t line_display_rows(std::string_view line, std::size_t cols) {
+    if (cols < 1) cols = 1;
+    const int w = maya::string_width(line);
+    if (w <= 0) return 1;                 // blank / zero-width line = 1 row
+    return (static_cast<std::size_t>(w) + cols - 1) / cols;   // ceil
+}
 
 // Wrapped-row count for a text body at the given content width: each
-// hard newline starts a fresh row, and a line longer than `cols`
-// soft-wraps to ceil(width/cols) rows. This is what the renderer
-// actually does, so the estimate tracks the real canvas height instead
-// of assuming a fixed 60-col line. Byte length (not display columns) is
-// the wrap unit — a deliberate over-count for multibyte text, which is
-// the SAFE direction (keeps slightly more frozen than strictly needed).
+// hard newline starts a fresh row, and a line wider than `cols` display
+// columns soft-wraps to ceil(width/cols) rows. This mirrors what the
+// renderer actually does (display columns, not bytes), so the estimate
+// tracks the real canvas height closely and never OVER-counts multibyte
+// text — the safe direction for both trims' keep-loops.
 std::size_t wrapped_rows(std::string_view body, int cols) {
-    if (cols < 1) cols = 1;
-    const std::size_t w = static_cast<std::size_t>(cols);
+    const std::size_t w = static_cast<std::size_t>(cols < 1 ? 1 : cols);
     std::size_t rows = 0;
     std::size_t line_start = 0;
     while (true) {
         const std::size_t nl = body.find('\n', line_start);
         const std::size_t line_end =
             (nl == std::string_view::npos) ? body.size() : nl;
-        const std::size_t len = line_end - line_start;
-        rows += (len == 0) ? 1 : (len + w - 1) / w;   // ceil, blank = 1 row
+        rows += line_display_rows(
+            body.substr(line_start, line_end - line_start), w);
         if (nl == std::string_view::npos) break;
         line_start = nl + 1;
     }
@@ -251,8 +267,7 @@ std::size_t prose_rows(std::string_view body, int cols) {
             trimmed.remove_prefix(1);
         const bool is_fence =
             trimmed.rfind("```", 0) == 0 || trimmed.rfind("~~~", 0) == 0;
-        const std::size_t line_rows =
-            line.empty() ? 1 : (line.size() + w - 1) / w;
+        const std::size_t line_rows = line_display_rows(line, w);
         if (is_fence) {
             if (!in_fence) {
                 in_fence = true;
@@ -284,9 +299,12 @@ std::size_t prose_rows(std::string_view body, int cols) {
     return rows == 0 ? 1 : rows;
 }
 
-std::size_t estimate_msg_rows(const Message& mm) {
-    const int cols = estimate_wrap_cols();
-
+// Body estimate against an EXPLICIT content width. The trims capture one
+// term_dims() snapshot and pass its derived cols so every entry in a
+// single keep-walk is measured against the SAME terminal state the
+// margin was computed from — a width that drifts mid-walk is what
+// desyncs the "provably above the viewport" proof.
+std::size_t estimate_msg_rows(const Message& mm, int cols) {
     // Prose body: count real wrapped rows (newline-aware), folding long
     // code blocks to match the frozen render's auto-fold.
     std::size_t rows = 0;
@@ -320,22 +338,26 @@ std::size_t estimate_msg_rows(const Message& mm) {
         //                cleared) and would double the count.
         //   • streaming→ args not parsed yet; the live card renders from
         //                args_streaming, so count that instead.
+        //
+        // ELIDE CAP applies to the WHOLE body. For a tool whose maya
+        // renderer elides to a fixed head/tail budget (bash/read/grep/
+        // …), BOTH the args-derived rows AND the output() rows render
+        // capped, not just output — counting either at full height
+        // OVER-counts and trips the mid-run keep-loop into dropping an
+        // on-screen entry (the duplication ghost). So compute the raw
+        // body rows from whichever source the card draws from, then
+        // clamp the SUM to the cap. Uncapped tools (write/edit args,
+        // git_diff show_all) have cap==0 and count whole.
+        const std::size_t out_cap = tool_output_render_cap(tc.name.value);
         std::size_t tool_rows = 0;
         if (!tc.args.is_null())
             tool_rows += estimate_json_string_rows(tc.args, cols);
         else if (!tc.args_streaming.empty())
             tool_rows += wrapped_rows(tc.args_streaming, cols);
-        if (!tc.output().empty()) {
-            std::size_t out_rows = wrapped_rows(tc.output(), cols);
-            // Tools whose maya renderer elides output to a fixed head/
-            // tail budget render that many rows, NOT the full body —
-            // counting the full body OVER-counts and trips the mid-run
-            // keep-loop into dropping an on-screen entry (ghost band).
-            if (std::size_t cap = tool_output_render_cap(tc.name.value);
-                cap > 0 && out_rows > cap)
-                out_rows = cap;
-            tool_rows += out_rows;
-        }
+        if (!tc.output().empty())
+            tool_rows += wrapped_rows(tc.output(), cols);
+        if (out_cap > 0 && tool_rows > out_cap)
+            tool_rows = out_cap;
         rows += tool_rows;
         // Header / footer / chrome rows per tool card (~4 rows even
         // for an empty body — title, divider, status, blank). Fixed
@@ -347,13 +369,27 @@ std::size_t estimate_msg_rows(const Message& mm) {
     return rows;
 }
 
+// Convenience forwarder for the one-shot freeze paths (freeze_range,
+// rehydrate_frozen) that don't already hold a dims snapshot.
+std::size_t estimate_msg_rows(const Message& mm) {
+    return estimate_msg_rows(mm, estimate_wrap_cols());
+}
+
 // Estimated rows for the run messages[from..to) that collapse into
-// ONE frozen Turn entry.
-int estimate_run_rows(const Model& m, std::size_t from, std::size_t to) {
+// ONE frozen Turn entry, against an EXPLICIT content width. Returns
+// std::size_t — a pathological run (huge thread, tiny terminal inflating
+// wrap counts) can sum past INT_MAX, and truncating to a negative int
+// would clamp the entry to 1 row in push_frozen, badly under-counting a
+// giant entry so it never trims.
+std::size_t estimate_run_rows(const Model& m, std::size_t from,
+                              std::size_t to, int cols) {
     std::size_t rows = 0;
     for (std::size_t k = from; k < to && k < m.d.current.messages.size(); ++k)
-        rows += estimate_msg_rows(m.d.current.messages[k]);
-    return static_cast<int>(rows);
+        rows += estimate_msg_rows(m.d.current.messages[k], cols);
+    return rows;
+}
+std::size_t estimate_run_rows(const Model& m, std::size_t from, std::size_t to) {
+    return estimate_run_rows(m, from, to, estimate_wrap_cols());
 }
 
 // Push a built frozen Element together with its estimated row count,
@@ -361,37 +397,78 @@ int estimate_run_rows(const Model& m, std::size_t from, std::size_t to) {
 // m.ui.frozen_row_total in lockstep. EVERY push into m.ui.frozen must
 // go through here so the parallel vectors never drift. `separator` is
 // true for inter-turn gap rows / compaction dividers (entries that must
-// never lead the prefix).
-void push_frozen(Model& m, maya::Element e, int rows,
+// never lead the prefix). Takes std::size_t and clamps to INT_MAX before
+// storing in the int-typed frozen_rows[] — estimate_run_rows can exceed
+// INT_MAX on a pathological giant entry, and a negative-int store would
+// corrupt the row total (frozen_row_total accumulates the size_t value,
+// so an honest clamp keeps both vectors consistent).
+void push_frozen(Model& m, maya::Element e, std::size_t rows,
                  bool separator = false) {
     if (rows < 1) rows = 1;
+    const std::size_t clamped = std::min<std::size_t>(
+        rows, static_cast<std::size_t>(std::numeric_limits<int>::max()));
     m.ui.frozen.push_back(std::move(e));
-    m.ui.frozen_rows.push_back(rows);
+    m.ui.frozen_rows.push_back(static_cast<int>(clamped));
     m.ui.frozen_is_separator.push_back(separator);
-    m.ui.frozen_row_total += static_cast<std::size_t>(rows);
+    m.ui.frozen_row_total += clamped;
 }
 
-// Strip leading separator entries (gap rows / compaction dividers) so
-// the frozen prefix always opens on a real turn. A separator at index 0
-// renders as a blank gap or an orphan rule at the top of the canvas
-// (the "saved thread opens with a hole" / "trim left a gap" bug). Adjusts
-// frozen_row_total in lockstep. Does NOT touch frozen_through (that is a
-// message-index bound, unrelated to leading-chrome trimming).
-void drop_leading_separators(Model& m) {
-    std::size_t drop = 0;
-    while (drop < m.ui.frozen_is_separator.size()
-           && m.ui.frozen_is_separator[drop])
-        ++drop;
-    if (drop == 0) return;
+// Debug-time invariant: the three parallel vectors and the running sum
+// must always agree. A single edit that erases one vector but forgets
+// another is silent UB (an erase running past end()); this converts it
+// to a loud abort in debug builds and is a no-op in release.
+void assert_frozen_lockstep([[maybe_unused]] const Model& m) {
+#ifndef NDEBUG
+    assert(m.ui.frozen.size() == m.ui.frozen_rows.size());
+    assert(m.ui.frozen.size() == m.ui.frozen_is_separator.size());
+    std::size_t sum = 0;
+    for (int r : m.ui.frozen_rows) sum += static_cast<std::size_t>(r);
+    assert(sum == m.ui.frozen_row_total);
+#endif
+}
+
+// Drop the first `drop` frozen entries, keeping all four parallel
+// structures in lockstep. THE ONLY front-eviction primitive — every
+// trim routes through here so a future edit can't desync one vector
+// (which would make a later erase() run past end() = UB, the crash the
+// long_session_bench documents). Returns the exact row count removed so
+// the caller can size its commit_scrollback().
+std::size_t pop_front_frozen(Model& m, std::size_t drop) {
+    if (drop == 0) return 0;
+    if (drop > m.ui.frozen.size()) drop = m.ui.frozen.size();
     std::size_t removed_rows = 0;
     for (std::size_t k = 0; k < drop; ++k)
         removed_rows += static_cast<std::size_t>(m.ui.frozen_rows[k]);
     const auto d = static_cast<std::ptrdiff_t>(drop);
     m.ui.frozen.erase(m.ui.frozen.begin(), m.ui.frozen.begin() + d);
-    m.ui.frozen_rows.erase(m.ui.frozen_rows.begin(), m.ui.frozen_rows.begin() + d);
+    m.ui.frozen_rows.erase(m.ui.frozen_rows.begin(),
+                           m.ui.frozen_rows.begin() + d);
     m.ui.frozen_is_separator.erase(m.ui.frozen_is_separator.begin(),
                                    m.ui.frozen_is_separator.begin() + d);
     m.ui.frozen_row_total -= removed_rows;
+    assert_frozen_lockstep(m);
+    return removed_rows;
+}
+
+// Strip leading separator entries (gap rows / compaction dividers) so
+// the frozen prefix always opens on a real turn. A separator at index 0
+// renders as a blank gap or an orphan rule at the top of the canvas
+// (the "saved thread opens with a hole" / "trim left a gap" bug). Routes
+// through pop_front_frozen so all four structures stay in lockstep. Does
+// NOT touch frozen_through (that is a message-index bound, unrelated to
+// leading-chrome trimming). Returns the row count removed.
+std::size_t pop_front_frozen_leading_separators(Model& m) {
+    std::size_t drop = 0;
+    while (drop < m.ui.frozen_is_separator.size()
+           && m.ui.frozen_is_separator[drop])
+        ++drop;
+    return pop_front_frozen(m, drop);
+}
+
+// Back-compat shim for the void-returning callers (rehydrate_frozen,
+// freeze paths) that don't need the removed-row count.
+void drop_leading_separators(Model& m) {
+    (void)pop_front_frozen_leading_separators(m);
 }
 
 // Run-level safety gate: a frozen turn captures an Element snapshot
@@ -480,22 +557,14 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
             auto cfg = ui::turn_config_for_assistant_run(
                 i, run_end, turn_num, m, /*continuation=*/completing_midrun);
 
-            // Hash key: settled assistant run. The merge inputs (every
-            // run-member msg.id + the run length) all fold in so a
-            // different run produces a different key. Once frozen,
-            // none of the underlying bytes change — the key is stable
-            // for the lifetime of this entry, and maya's hash-keyed
-            // ComponentCache reuses the painted cells every frame.
-            maya::CacheIdBuilder kb;
-            kb.add(std::string_view{"agentty.turn.assistant_run"})
-              .add(completing_midrun ? std::string_view{"cont"}
-                                     : std::string_view{"head"})
-              .add(static_cast<std::uint64_t>(run_end - i));
-            for (std::size_t j = i; j < run_end; ++j) {
-                kb.add(std::string_view{m.d.current.messages[j].id.value});
-                kb.add(m.d.current.messages[j].compute_render_key());
-            }
-            cfg.hash_id = kb.build();
+            // Hash key: settled assistant run — built through the shared
+            // ui::assistant_run_hash_id so the live-tail prefix split and
+            // the mid-run freeze stamp a byte-identical key (cache HIT,
+            // zero row shift at the freeze seam). Once frozen, none of the
+            // underlying bytes change — the key is stable for the lifetime
+            // of this entry.
+            cfg.hash_id = ui::assistant_run_hash_id(
+                m, i, run_end, /*continuation=*/completing_midrun);
             push_frozen(m, maya::Turn{std::move(cfg)}.build(),
                         estimate_run_rows(m, i, run_end));
             ++m.ui.frozen_turn;
@@ -576,17 +645,10 @@ void freeze_settled_subturns(Model& m) {
 
     // Hash key identical in shape to freeze_range's so the freeze
     // handoff from the live tail is a cache HIT (same key the live tail
-    // stamped while the prefix waited). Includes a continuation marker
-    // so a prefix and its later self-freeze can't collide.
-    maya::CacheIdBuilder kb;
-    kb.add(std::string_view{"agentty.turn.assistant_run"})
-      .add(entry_continuation ? std::string_view{"cont"} : std::string_view{"head"})
-      .add(static_cast<std::uint64_t>(cut - run_start));
-    for (std::size_t j = run_start; j < cut; ++j) {
-        kb.add(std::string_view{msgs[j].id.value});
-        kb.add(msgs[j].compute_render_key());
-    }
-    cfg.hash_id = kb.build();
+    // stamped while the prefix waited). Built through the shared helper
+    // so a future key-shape edit can't desync the three sites.
+    cfg.hash_id = ui::assistant_run_hash_id(
+        m, run_start, cut, /*continuation=*/entry_continuation);
     push_frozen(m, maya::Turn{std::move(cfg)}.build(),
                 estimate_run_rows(m, run_start, cut));
 
@@ -1029,27 +1091,14 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     }
     if (drop == 0) return maya::Cmd<Msg>::none();
 
-    // Keep frozen / frozen_rows / frozen_is_separator / frozen_row_total
-    // in lockstep.
-    std::size_t removed_rows = 0;
-    for (std::size_t k = 0; k < drop; ++k)
-        removed_rows += static_cast<std::size_t>(m.ui.frozen_rows[k]);
-    m.ui.frozen.erase(m.ui.frozen.begin(),
-                      m.ui.frozen.begin() + static_cast<std::ptrdiff_t>(drop));
-    m.ui.frozen_rows.erase(m.ui.frozen_rows.begin(),
-                           m.ui.frozen_rows.begin() + static_cast<std::ptrdiff_t>(drop));
-    m.ui.frozen_is_separator.erase(
-        m.ui.frozen_is_separator.begin(),
-        m.ui.frozen_is_separator.begin() + static_cast<std::ptrdiff_t>(drop));
-    m.ui.frozen_row_total -= removed_rows;
-
-    // A turn's leading gap is its own entry pushed BEFORE it; dropping
-    // the turn above can leave that gap (or a divider) at index 0, a
-    // blank hole at the top of the canvas. Strip it. This removes more
-    // rows from the front, so fold them into removed_rows below.
-    const std::size_t rows_before_sep_strip = m.ui.frozen_row_total;
-    drop_leading_separators(m);
-    removed_rows += rows_before_sep_strip - m.ui.frozen_row_total;
+    // Drop the front in lockstep (frozen / frozen_rows /
+    // frozen_is_separator / frozen_row_total), then strip any leading
+    // separator the drop exposed — a turn's leading gap is its own entry
+    // pushed BEFORE it, so dropping the turn above can leave that gap (or
+    // a divider) at index 0, a blank hole at the top of the canvas. Both
+    // removals feed the exact commit count below.
+    std::size_t removed_rows = pop_front_frozen(m, drop);
+    removed_rows += pop_front_frozen_leading_separators(m);
 
     // commit_scrollback(removed_rows): commit EXACTLY the rows this
     // trim dropped from the front — no more. The generic
@@ -1082,41 +1131,40 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
     // frozen rows + live tail must exceed term_h; keeping >= term_h of
     // frozen alone already guarantees the oldest KEPT entry's top sits
     // at-or-above the viewport top, so everything dropped is provably in
-    // native scrollback. We keep ~1.5x viewport (a cushion over the 1x
+    // native scrollback. We keep ~2x viewport (a cushion over the 1x
     // floor) so the canvas stays near a single screen during a long run
     // — per-frame cost (clear + verify + blit) stays flat and minimal —
     // while never racing the visible region.
     //
     // PROOF DEPENDS ON: frozen_rows[k] never OVER-counting an entry's
-    // real rendered height. The keep-loop stops once the ESTIMATED sum
-    // of kept entries reaches kViewportKeepRows; if an estimate were
-    // high, the loop would stop early and the kept entries' REAL rows
-    // could fall short of a viewport, leaving a dropped entry on screen
-    // (the duplication ghost). estimate_msg_rows is built to under-count
-    // or hit exactly, never over (see its body), so estimated-kept >=
-    // margin implies real-kept >= margin >= term_h. An under-count only
-    // keeps a few extra entries — a slightly taller canvas, never a
-    // corrupt one.
-    // Query terminal geometry through the SAME helper the row estimate
-    // uses (term_dims) so the keep-margin and the per-entry row counts
-    // are computed against one consistent terminal state — a width/height
-    // mismatch across a frame is exactly what desyncs the "provably above
-    // the viewport" proof.
-    const int term_h = term_dims().rows;
-    // Keep ~3 viewports on the canvas — NOT 1.5. The keep-loop stops
-    // once the ESTIMATED kept rows reach this margin, and estimate_msg_
-    // rows wraps on BYTE length (wrapped_rows), which OVER-counts
-    // multibyte prose by up to ~2x (a CJK/emoji line is 2-4 bytes per
-    // 1-2 display cols). At a 1.5x margin a heavily-multibyte tail could
-    // over-count enough that real-kept < term_h, dropping an on-screen
-    // entry and re-emitting committed scrollback shifted (the duplication
-    // ghost the no-mid-run-trim comments feared). 3x absorbs the worst-
-    // case 2x over-count: even then real-kept >= 1.5x term_h > term_h, so
-    // every dropped entry is provably above the viewport. The canvas
-    // stays bounded to ~3 screens DURING a long run instead of growing
-    // to the full run height — per-frame clear+layout+blit stays flat.
+    // real rendered height AT THE CURRENT WIDTH. The keep-loop stops
+    // once the stored sum of kept entries reaches kViewportKeepRows; if
+    // a stored count were high, the loop would stop early and the kept
+    // entries' REAL rows could fall short of a viewport, leaving a
+    // dropped entry on screen (the duplication ghost). The row estimate
+    // is now DISPLAY-COLUMN accurate (maya::string_width, one-sided
+    // under), so a fresh entry never over-counts. The one residual
+    // drift is a wide→narrow→... resize: frozen_rows[] was stamped at
+    // the width when the entry froze, and a narrow resize makes the real
+    // rows GROW beyond the stored count (stored now UNDER-counts — the
+    // safe direction, keeps more). A widen makes stored OVER-count; the
+    // margin below carries a 2x cushion to absorb that until the entry
+    // is evicted and the next freeze re-estimates at the live width.
+    //
+    // Capture ONE term_dims() snapshot and derive both the keep-margin
+    // (rows) and — implicitly, via the stamped frozen_rows — the row
+    // counts from it, so a resize landing mid-function can't desync the
+    // "provably above the viewport" proof.
+    const TermDims dims = term_dims();
+    const int term_h = dims.rows;
+    // Keep ~2 viewports on the canvas. With the byte-based multibyte
+    // over-count eliminated (the estimate now wraps on display columns),
+    // the old 3x cushion that absorbed a worst-case ~2x byte inflation is
+    // no longer needed; 2x covers the residual wide→narrow resize drift
+    // (stored frozen_rows under a now-narrower width) while bounding the
+    // canvas tighter — per-frame clear+layout+blit stays flat.
     const std::size_t kViewportKeepRows =
-        static_cast<std::size_t>(std::max(96, term_h * 3));
+        static_cast<std::size_t>(std::max(96, term_h * 2));
 
     // Only worth doing once the canvas is meaningfully over the keep
     // margin — trimming churns maya's inline diff (commit_scrollback_
@@ -1145,26 +1193,13 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
     const std::size_t drop = keep_from;
     if (drop == 0) return maya::Cmd<Msg>::none();
 
-    std::size_t removed_rows = 0;
-    for (std::size_t k = 0; k < drop; ++k)
-        removed_rows += static_cast<std::size_t>(m.ui.frozen_rows[k]);
-    m.ui.frozen.erase(m.ui.frozen.begin(),
-                      m.ui.frozen.begin() + static_cast<std::ptrdiff_t>(drop));
-    m.ui.frozen_rows.erase(m.ui.frozen_rows.begin(),
-                           m.ui.frozen_rows.begin() + static_cast<std::ptrdiff_t>(drop));
-    m.ui.frozen_is_separator.erase(
-        m.ui.frozen_is_separator.begin(),
-        m.ui.frozen_is_separator.begin() + static_cast<std::ptrdiff_t>(drop));
-    m.ui.frozen_row_total -= removed_rows;
-
-    // The dropped boundary can leave a turn's leading gap (its own
-    // entry, pushed before the turn) at index 0 — a blank hole at the
-    // top. Those rows were already above the viewport, so stripping
-    // them keeps the "provably off-screen" proof intact. Fold them into
-    // removed_rows so the commit count below covers them too.
-    const std::size_t rows_before_sep_strip = m.ui.frozen_row_total;
-    drop_leading_separators(m);
-    removed_rows += rows_before_sep_strip - m.ui.frozen_row_total;
+    // Drop the front in lockstep, then strip any leading separator the
+    // drop exposed (a turn's leading gap is its own entry pushed before
+    // it). Those rows were already above the viewport, so stripping them
+    // keeps the "provably off-screen" proof intact. Both removals feed
+    // the exact commit count below.
+    std::size_t removed_rows = pop_front_frozen(m, drop);
+    removed_rows += pop_front_frozen_leading_separators(m);
 
     // Commit EXACTLY the rows this trim dropped — same discipline as
     // trim_frozen_if_oversized — NOT commit_scrollback_overflow(), which
