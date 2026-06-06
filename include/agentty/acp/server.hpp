@@ -84,6 +84,10 @@ private:
 
     nlohmann::json on_initialize(const nlohmann::json& params);
     nlohmann::json on_new_session(const nlohmann::json& params);
+    // session/load: restore a persisted Thread from disk, replay its history
+    // as session/update notifications, then resolve. Returns the load result
+    // (null body). Throws on unknown / unreadable session id.
+    nlohmann::json on_load_session(const nlohmann::json& params);
     void           on_prompt(const nlohmann::json& id, const nlohmann::json& params);
     void           on_cancel(const nlohmann::json& params);
 
@@ -114,6 +118,16 @@ private:
 
     Session* find_session(const std::string& id);
 
+    // Persist a session's Thread to the on-disk store (same format the TUI
+    // uses, so ACP sessions show up in the thread picker and survive a
+    // subprocess restart). Called after every turn and on session creation.
+    void persist(const Session& sess);
+
+    // Replay a thread's full conversation history to the client as
+    // session/update notifications (user_message_chunk / agent_message_chunk
+    // + tool_call cards), per the session/load contract.
+    void replay_history(const std::string& session_id, const Thread& thread);
+
     // Wire tool list, built once from the static tools::registry(). The
     // registry never changes at runtime, so we snapshot it on first use
     // instead of rebuilding the vector every completion.
@@ -130,7 +144,6 @@ private:
 
     std::mutex                                   session_mtx_;
     std::unordered_map<std::string, Session>     sessions_;
-    std::uint64_t                                next_session_ = 1;
     std::uint64_t                                next_tool_uid_ = 1;
 };
 

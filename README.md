@@ -289,6 +289,13 @@ What works over ACP:
   network) trigger Zed's native allow/reject dialog before they run; the
   `--profile` flag (above) tunes exactly which tools prompt.
 - **Cancellation** — stop a turn from Zed and the in-flight stream tears down.
+- **Session persistence + reload** — every session is written to agentty's
+  on-disk thread store after each turn (the *same* format the TUI uses), so it
+  survives a subprocess restart. Zed can call `session/load` to resume a past
+  conversation: agentty replays the full transcript (user + assistant messages
+  and tool cards) as `session/update` notifications, then hands back control.
+  Sessions started in Zed also show up in the standalone TUI's thread picker,
+  and vice versa.
 - **Workspace sandbox** — file tools stay inside the session's `cwd` (the
   folder you opened in Zed); `bash` is wrapped in bwrap/sandbox-exec exactly
   like the standalone TUI.

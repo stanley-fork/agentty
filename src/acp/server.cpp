@@ -16,6 +16,7 @@
 
 #include "agentty/diff/diff.hpp"
 #include "agentty/domain/profile.hpp"
+#include "agentty/io/persistence.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -197,6 +198,72 @@ const std::vector<provider::ToolSpec>& AgentServer::wire_tools() {
     return wire_tools_;
 }
 
+void AgentServer::persist(const Session& sess) {
+    // Same on-disk format the TUI writes (threads_dir()/<id>.json), so the
+    // session survives a subprocess restart, is loadable via session/load,
+    // and shows up in the TUI's thread picker. Cheap even for a 0-message
+    // stub written right after session/new.
+    persistence::save_thread(sess.thread);
+}
+
+void AgentServer::replay_history(const std::string& session_id,
+                                 const Thread& thread) {
+    // Reconstruct the conversation as session/update notifications, in order,
+    // exactly as the client would have seen them live. User turns replay as
+    // user_message_chunk; assistant text as agent_message_chunk; each tool
+    // call as a completed tool_call card (announce + final state in one).
+    for (const auto& m : thread.messages) {
+        if (m.role == Role::User) {
+            if (m.text.empty()) continue;
+            send_update(session_id, json{
+                {"sessionUpdate", "user_message_chunk"},
+                {"messageId", m.id.value},
+                {"content", {{"type", "text"}, {"text", m.text}}},
+            });
+        } else if (m.role == Role::Assistant) {
+            const std::string body = m.text.empty() ? m.streaming_text : m.text;
+            if (!body.empty()) {
+                send_update(session_id, json{
+                    {"sessionUpdate", "agent_message_chunk"},
+                    {"messageId", m.id.value},
+                    {"content", {{"type", "text"}, {"text", body}}},
+                });
+            }
+            for (const auto& tc : m.tool_calls) {
+                // Announce the call with its final input.
+                send_update(session_id, json{
+                    {"sessionUpdate", "tool_call"},
+                    {"toolCallId", tc.id.value},
+                    {"title", tool_title(tc)},
+                    {"kind", acp_tool_kind(tc.name.value)},
+                    {"status", "pending"},
+                    {"rawInput", tc.args},
+                    {"locations", tool_locations(tc)},
+                });
+                // Then its terminal status + output, so the card renders
+                // complete on reload.
+                const char* status = tc.is_failed()   ? "failed"
+                                   : tc.is_rejected()  ? "failed"
+                                   :                     "completed";
+                const std::string out = tc.output();
+                json update{
+                    {"sessionUpdate", "tool_call_update"},
+                    {"toolCallId", tc.id.value},
+                    {"status", status},
+                };
+                if (!out.empty()) {
+                    update["content"] = json::array({
+                        json{{"type", "content"},
+                             {"content", {{"type", "text"}, {"text", out}}}},
+                    });
+                    update["rawOutput"] = json{{"text", out}};
+                }
+                send_update(session_id, update);
+            }
+        }
+    }
+}
+
 rpc::Outcome AgentServer::handle_request(const std::string& method,
                                          const json& params,
                                          const json& id) {
@@ -213,6 +280,8 @@ rpc::Outcome AgentServer::handle_request(const std::string& method,
         }
         if (method == "session/new")
             return rpc::Outcome::ok(on_new_session(params));
+        if (method == "session/load")
+            return rpc::Outcome::ok(on_load_session(params));
         if (method == "session/prompt") {
             // Long-running: kick off the turn on a worker and reply later via
             // Peer::respond(id, ...). Tell the peer not to reply synchronously.
@@ -248,7 +317,7 @@ json AgentServer::on_initialize(const json& params) {
             {"version", AGENTTY_VERSION},
         }},
         {"agentCapabilities", {
-            {"loadSession", false},
+            {"loadSession", true},
             {"promptCapabilities", {
                 {"image", false},
                 {"audio", false},
@@ -263,13 +332,63 @@ json AgentServer::on_initialize(const json& params) {
 json AgentServer::on_new_session(const json& params) {
     std::string cwd = params.value("cwd", "");
     std::lock_guard<std::mutex> lk(session_mtx_);
-    std::string sid = "sess-" + std::to_string(next_session_++);
+    // Use a real ThreadId as the session id so the session is loadable from
+    // the on-disk thread store (threads_dir()/<id>.json) after a restart and
+    // shows up in the TUI's thread picker.
+    ThreadId tid = persistence::new_id();
+    std::string sid = tid.value;
     Session s;
     s.id  = sid;
     s.cwd = cwd;
-    s.thread.id = ThreadId{sid};
-    sessions_.emplace(sid, std::move(s));
+    s.thread.id = tid;
+    s.thread.title = cwd.empty() ? std::string{"ACP session"}
+                                 : std::string{"ACP "} + cwd;
+    const Session& stored = sessions_.emplace(sid, std::move(s)).first->second;
+    persist(stored);
     return json{{"sessionId", sid}};
+}
+
+json AgentServer::on_load_session(const json& params) {
+    std::string sid = params.value("sessionId", "");
+    std::string cwd = params.value("cwd", "");
+    if (sid.empty())
+        throw std::runtime_error("session/load: missing sessionId");
+
+    Thread thread;
+    bool   from_memory = false;
+
+    // If this subprocess already has the session live in memory, use that —
+    // it's authoritative and sidesteps any not-yet-flushed async disk write.
+    {
+        std::lock_guard<std::mutex> lk(session_mtx_);
+        if (auto it = sessions_.find(sid); it != sessions_.end()) {
+            if (!cwd.empty()) it->second.cwd = cwd;
+            thread      = it->second.thread;   // copy under lock
+            from_memory = true;
+        }
+    }
+
+    if (!from_memory) {
+        // Cross-restart path: restore the persisted Thread from disk (same
+        // store the TUI writes), then register it as a live session.
+        auto path = persistence::threads_dir() / (sid + ".json");
+        auto loaded = persistence::load_thread_file(path);
+        if (!loaded)
+            throw std::runtime_error("session/load: no such session: " + sid);
+        thread = std::move(*loaded);
+
+        std::lock_guard<std::mutex> lk(session_mtx_);
+        Session s;
+        s.id     = sid;
+        s.cwd    = cwd;
+        s.thread = thread;
+        sessions_.insert_or_assign(sid, std::move(s));
+    }
+
+    // Replay the full conversation so the client rebuilds the transcript,
+    // THEN resolve (the dispatcher wraps this return value as the response).
+    replay_history(sid, thread);
+    return json(nullptr);
 }
 
 void AgentServer::on_cancel(const json& params) {
@@ -346,7 +465,12 @@ void AgentServer::run_turn(json prompt_id, std::string session_id) {
         // Loop: feed tool results back to the model.
     }
 
-    if (Session* s = find_session(session_id)) s->cancel.reset();
+    if (Session* s = find_session(session_id)) {
+        s->cancel.reset();
+        // Persist the updated transcript so the session survives a restart
+        // and can be reloaded via session/load.
+        persist(*s);
+    }
 
     json result{{"stopReason", acp_stop_reason(last_stop, cancelled, errored)}};
     if (errored && !error_msg.empty()) result["_meta"] = json{{"error", error_msg}};
