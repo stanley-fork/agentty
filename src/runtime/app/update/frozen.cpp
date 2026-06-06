@@ -1067,14 +1067,15 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
     // Commit EXACTLY the rows this trim dropped — same discipline as
     // trim_frozen_if_oversized — NOT commit_scrollback_overflow(), which
     // releases down to one viewport (prev_rows - term_h) regardless of
-    // how much this trim actually removed. This function is currently
-    // unreachable from the app (no production caller), but issuing an
-    // exact row-counted commit makes it SAFE BY CONSTRUCTION: even if it
-    // were re-wired into a mid-run path, commit_inline_prefix clamps the
-    // count to (prev_rows - term_h), so a row still in the viewport can
-    // never be committed and no duplicate can be stranded. The keep
-    // margin already guarantees >= term_h rows stay on screen, so every
-    // dropped row overflowed and the clamp never bites.
+    // how much this trim actually removed. Production callers: tool.cpp
+    // (after each tool settles, on the ToolExecOutput cadence) and
+    // meta.cpp (Tick, after the per-tick freeze) — both mid-run paths.
+    // The exact row-counted commit makes it SAFE BY CONSTRUCTION on
+    // those paths: commit_inline_prefix clamps the count to (prev_rows -
+    // term_h), so a row still in the viewport can never be committed and
+    // no duplicate can be stranded. The keep margin already guarantees
+    // >= term_h rows stay on screen, so every dropped row overflowed and
+    // the clamp never bites.
     return maya::Cmd<Msg>::commit_scrollback(
         static_cast<int>(removed_rows));
 }

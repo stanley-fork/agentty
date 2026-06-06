@@ -486,16 +486,22 @@ struct RenderStats { Stats cold; Stats warm; };
         agentty::app::detail::rehydrate_frozen(m);
         // Force-pad m.ui.frozen past the soft cap so the trim actually fires.
         // (The cap lives inside frozen.cpp; we just keep duplicating an
-        // existing entry to stress the erase path.) Keep the parallel
-        // frozen_rows / frozen_row_total accounting in lockstep —
-        // trim_frozen_if_oversized indexes frozen_rows by entry.
+        // existing entry to stress the erase path.) Keep ALL THREE parallel
+        // arrays in lockstep — trim_frozen_if_oversized erases
+        // frozen / frozen_rows / frozen_is_separator together, so a short
+        // frozen_is_separator makes its erase() run past end() (UB / crash).
         if (!m.ui.frozen.empty()) {
             const auto exemplar = m.ui.frozen.back();
             const int  exemplar_rows = m.ui.frozen_rows.empty()
                 ? 1 : m.ui.frozen_rows.back();
+            // Seed the separator flag vector to the current frozen length
+            // first (rehydrate may leave it shorter), then grow in step.
+            while (m.ui.frozen_is_separator.size() < m.ui.frozen.size())
+                m.ui.frozen_is_separator.push_back(false);
             while (m.ui.frozen.size() < 200) {
                 m.ui.frozen.push_back(exemplar);
                 m.ui.frozen_rows.push_back(exemplar_rows);
+                m.ui.frozen_is_separator.push_back(false);
                 m.ui.frozen_row_total += static_cast<std::size_t>(exemplar_rows);
             }
         }
@@ -505,6 +511,63 @@ struct RenderStats { Stats cold; Stats warm; };
         samples.push_back(ms(t1 - t0));
     }
     return summarise(samples);
+}
+
+// Mid-run per-frame steady state — the cost the user actually feels
+// DURING a long auto-pilot turn. Production bounds the canvas with
+// trim_frozen_above_viewport (frozen kept to ~3 viewports) and only the
+// live tail is rebuilt each frame; the frozen prefix blits. This phase
+// reproduces that: rehydrate, run the mid-run trim until it's a no-op
+// (frozen at its bounded steady size), build the element tree ONCE, then
+// time a WARM render (same canvas/pool) which is the real per-tick cost.
+// If this stays flat across the D/E/G/H shapes (200t, 3000-line writes)
+// the per-frame path is genuinely bounded; if it scales with thread size
+// the trim isn't engaging on that shape.
+struct MidrunStats { Stats frame; std::size_t frozen_rows_after = 0;
+                     std::size_t frozen_entries_after = 0; };
+
+[[nodiscard]] MidrunStats midrun_frame(const Shape& sh) {
+    auto m = build_model(sh);
+    agentty::app::detail::rehydrate_frozen(m);
+    // Drive the mid-run trim to its fixed point so frozen is at the
+    // bounded steady size production holds during a long run.
+    for (int guard = 0; guard < 64; ++guard) {
+        auto c = agentty::app::detail::trim_frozen_above_viewport(m);
+        if (c.is_none()) break;
+    }
+
+    auto root = maya::AppLayout{{
+        .thread        = agentty::ui::thread_config(m),
+        .changes_strip = agentty::ui::changes_strip_config(m),
+        .composer      = agentty::ui::composer_config(m),
+        .status_bar    = agentty::ui::status_bar_config(m),
+        .overlay       = std::nullopt,
+    }}.build();
+
+    constexpr int kCanvasW = 120;
+    constexpr int kCanvasH = 4000;
+    maya::StylePool pool;
+    maya::Canvas canvas(kCanvasW, kCanvasH, &pool);
+    canvas.clear();
+    // Prime once (cold) so the warm timings below are pure cache-hit.
+    maya::render_tree(root, canvas, pool, maya::theme::dark,
+                      /*auto_height=*/true);
+
+    std::vector<double> samples;
+    samples.reserve(static_cast<std::size_t>(sh.iters));
+    for (int i = 0; i < sh.iters; ++i) {
+        canvas.clear();
+        auto t0 = Clock::now();
+        maya::render_tree(root, canvas, pool, maya::theme::dark,
+                          /*auto_height=*/true);
+        auto t1 = Clock::now();
+        samples.push_back(ms(t1 - t0));
+    }
+    MidrunStats out;
+    out.frame                = summarise(samples);
+    out.frozen_rows_after    = m.ui.frozen_row_total;
+    out.frozen_entries_after = m.ui.frozen.size();
+    return out;
 }
 
 } // namespace phase
@@ -523,6 +586,9 @@ struct ScenarioResult {
     Stats cold_render;
     Stats warm_render;
     Stats trim;
+    Stats midrun_frame;
+    std::size_t midrun_rows = 0;
+    std::size_t midrun_entries = 0;
     std::size_t total_msgs = 0;
     std::size_t total_bytes = 0;
     std::size_t frozen_entries = 0;
@@ -580,6 +646,11 @@ void print_footnote(const ScenarioResult& r) {
         r.total_bytes,
         r.frozen_entries,
         warm_speedup);
+    std::printf("    %-26s   MIDRUN per-frame=%.2f / %.2fp99 ms  "
+                "(trimmed frozen: %zu rows, %zu entries)\n",
+        "",
+        r.midrun_frame.median, r.midrun_frame.p99,
+        r.midrun_rows, r.midrun_entries);
 }
 
 void emit_json(const ScenarioResult& r) {
@@ -612,6 +683,9 @@ void emit_json(const ScenarioResult& r) {
     j["cold_render"]     = pack(r.cold_render);
     j["warm_render"]     = pack(r.warm_render);
     j["trim"]            = pack(r.trim);
+    j["midrun_frame"]    = pack(r.midrun_frame);
+    j["midrun_rows"]     = r.midrun_rows;
+    j["midrun_entries"]  = r.midrun_entries;
     std::printf("%s\n", j.dump().c_str());
     std::fflush(stdout);
 }
@@ -693,6 +767,10 @@ ScenarioResult run_one(const Shape& sh) {
     r.cold_render = rs.cold;
     r.warm_render = rs.warm;
     r.trim        = phase::trim(sh);
+    auto mid      = phase::midrun_frame(sh);
+    r.midrun_frame   = mid.frame;
+    r.midrun_rows    = mid.frozen_rows_after;
+    r.midrun_entries = mid.frozen_entries_after;
 
     // Stats snapshot of the model shape for the footnote.
     auto m = build_model(sh);
