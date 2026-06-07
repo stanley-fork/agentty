@@ -1117,6 +1117,47 @@ if(AGENTTY_BUILD_TESTS)
     endif()
     add_test(NAME tool_result_budget_test COMMAND tool_result_budget_test)
 
+    # frozen_invariant_fuzz — randomized property test for the frozen-
+    # scrollback subsystem. Drives arbitrary sequences of conversation
+    # growth + freeze/trim/rehydrate ops and asserts the structural
+    # invariants (array lockstep, row-total accounting, no leading
+    # separator, never-freeze-mutable-back, row-exact trim commit) after
+    # EVERY op. Complements the curated midrun_* scenario tests. A
+    # failure prints SEED=<n> for a deterministic repro.
+    add_executable(frozen_invariant_fuzz EXCLUDE_FROM_ALL
+        tests/frozen_invariant_fuzz.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(frozen_invariant_fuzz PRIVATE include)
+    target_compile_definitions(frozen_invariant_fuzz PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(frozen_invariant_fuzz PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(frozen_invariant_fuzz PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(frozen_invariant_fuzz PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME frozen_invariant_fuzz COMMAND frozen_invariant_fuzz)
+
     # Aggregate target so CI can build every ctest-registered binary in one
     # shot. The individual test targets are EXCLUDE_FROM_ALL (kept out of the
     # default `cmake --build` so a plain build stays lean), which means
@@ -1131,5 +1172,6 @@ if(AGENTTY_BUILD_TESTS)
         midrun_wire_test
         table_render_test
         visual_hash_coverage_test
-        tool_result_budget_test)
+        tool_result_budget_test
+        frozen_invariant_fuzz)
 endif()
