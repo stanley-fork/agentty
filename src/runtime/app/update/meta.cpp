@@ -186,6 +186,73 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     Msg{StreamError{std::move(msg)}})};
             }
 
+            // ── ExecutingTool wedge watchdog ───────────────────────────
+            // The stream-stall watchdog above never covers ExecutingTool
+            // (is_streaming() is false there) and no SSE events flow once
+            // a tool runs, so a turn that strands in this phase has no
+            // recovery — it just dies silently (spinner stops, no error,
+            // only a new submit revives the app). Two distinct wedges:
+            //
+            //   (a) NO tool is actually is_running() on the back message,
+            //       yet the phase is ExecutingTool. Nothing in flight will
+            //       ever dispatch a terminal ToolExecOutput, so the FSM is
+            //       permanently stuck. This is a true logic wedge — recover
+            //       after a short grace measured from last_event_at (the
+            //       phase clock, untouched during ExecutingTool).
+            //
+            //   (b) A tool IS running but its worker is hung in a blocking
+            //       syscall (dead NFS/FUSE mount, frozen network). This is
+            //       indistinguishable from a legitimately slow tool by time
+            //       alone, so the net is intentionally LONG (kToolWedge) and
+            //       measured from the tool's own started_at — never the
+            //       stale last_event_at. It is a last-resort safety valve,
+            //       NOT the per-tool timeout that was removed at user
+            //       request; normal builds / `gh run watch` finish well
+            //       under it.
+            //
+            // Recovery in both cases: fail the offending running tool(s)
+            // (or, for (a), just re-fire the scheduler) and call
+            // kick_pending_tools, which either continues the turn
+            // (post-tool sub-turn) or drops cleanly to Idle.
+            constexpr auto kNoRunningGrace = std::chrono::seconds(30);
+            constexpr auto kToolWedge      = std::chrono::seconds(600);
+            if (m.s.is_executing_tool()
+                && !m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                auto& back = m.d.current.messages.back();
+                bool any_running = false;
+                bool wedged      = false;
+                for (auto& tc : back.tool_calls) {
+                    if (!tc.is_running()) continue;
+                    any_running = true;
+                    auto started = tc.started_at();
+                    if (started.time_since_epoch().count() != 0
+                        && now - started >= kToolWedge) {
+                        auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                                        now - started).count();
+                        tc.status = ToolUse::Failed{started, now,
+                            "tool ran " + std::to_string(secs) + "s with no "
+                            "result — worker likely hung on a blocking "
+                            "syscall; failing it so the turn can recover. "
+                            "The worker thread may continue in the "
+                            "background; its result is discarded if it "
+                            "ever returns."};
+                        wedged = true;
+                    }
+                }
+                if (!any_running) {
+                    auto* a = active_ctx(m.s.phase);
+                    if (a && a->last_event_at.time_since_epoch().count() != 0
+                        && now - a->last_event_at >= kNoRunningGrace) {
+                        wedged = true;   // FSM stranded with nothing in flight
+                    }
+                }
+                if (wedged) {
+                    auto kick = cmd::kick_pending_tools(m);
+                    return {std::move(m), std::move(kick)};
+                }
+            }
+
             // Sample tok/s into the sparkline ring every ~500 ms while
             // the stream is actively producing bytes.
             if (auto* a = active_ctx(m.s.phase);
