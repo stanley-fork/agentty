@@ -153,6 +153,7 @@ enum class Kind : std::uint8_t {
     Forget,
     Wipe,
     Task,
+    Skill,
 };
 
 inline constexpr std::array kCatalog = {
@@ -190,6 +191,11 @@ inline constexpr std::array kCatalog = {
     // overlay watchdog is 0. HeadTail: the subagent's final summary
     // carries signal at both ends.
     ToolSpec{"task",            Kind::Task,           {Effect::Exec},                       false,   detail::sec{0},    40000,  ToolSpec::TruncStrategy::HeadTail},
+    // Skill loader — reads one on-demand SKILL.md body from disk
+    // (.agentty/skills/<slug>/ or ~/.agentty/skills/<slug>/). ReadFs;
+    // bodies are capped at 64 KiB by the skills module, so the 64000
+    // char budget is generous headroom. Head: a skill doc reads top-down.
+    ToolSpec{"skill",           Kind::Skill,          {Effect::ReadFs},                     false,   detail::sec{10},   64000,  ToolSpec::TruncStrategy::Head},
 };
 
 // Wire-string → Kind. `std::nullopt` for names not in the catalog so the
@@ -271,6 +277,7 @@ consteval bool kinds_bijective() {
         Kind::Remember, Kind::Forget,
         Kind::Wipe,
         Kind::Task,
+        Kind::Skill,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
     for (auto k : kAll) {

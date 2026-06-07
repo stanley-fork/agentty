@@ -115,6 +115,7 @@ std::vector<ToolDef> build_registry() {
     // direct working tools. The system-prompt + tool description steer
     // when delegation is appropriate.
     r.push_back(tool_task());
+    r.push_back(tool_skill());
     return r;
 }
 

@@ -176,6 +176,10 @@ std::string_view missing_required_field(std::string_view tool_name,
             // task requires a `prompt`/`description` for the subagent.
             if (!is_nonempty_string("prompt")) return "prompt";
             return {};
+        case K::Skill:
+            // skill requires the `name` of the skill to load.
+            if (!is_nonempty_string("name")) return "name";
+            return {};
         // `path` is nice-to-have but not strictly required for these
         // (list_dir/glob default to cwd; read without path is already
         // a tool error — surfacing it from the tool itself preserves

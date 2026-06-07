@@ -1,6 +1,7 @@
 #include "agentty/provider/anthropic/transport.hpp"
 
 #include "agentty/tool/memory_store.hpp"
+#include "agentty/tool/skills.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1499,6 +1500,10 @@ std::string default_system_prompt() {
     // Lives at the END of the prompt so the always-on rules above
     // anchor first; user-authored memory then layers on top.
     oss << collect_memory_blocks();
+    // On-demand skills catalog (names + descriptions only). The full
+    // bodies load lazily via the `skill` tool — progressive disclosure
+    // keeps the per-request cost to one cheap line per skill.
+    oss << tools::skills::catalog_block();
     return oss.str();
 }
 

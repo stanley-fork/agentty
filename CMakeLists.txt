@@ -399,7 +399,9 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/tools/forget.cpp
     src/tool/tools/wipe.cpp
     src/tool/tools/task.cpp
+    src/tool/tools/skill.cpp
     src/tool/subagent.cpp
+    src/tool/skills.cpp
     src/tool/memory_store.cpp
 )
 
