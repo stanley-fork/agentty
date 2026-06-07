@@ -1074,6 +1074,45 @@ if(AGENTTY_BUILD_TESTS)
     endif()
     add_test(NAME visual_hash_coverage_test COMMAND visual_hash_coverage_test)
 
+    # tool_result_budget_test — wire-only byte-budget cap on tool
+    # results. Drives the real messages_json_string serializer and
+    # asserts oversized outputs are bounded (head+tail kept, marker
+    # spliced, UTF-8 boundary respected) while small outputs ship
+    # verbatim. No maya / no runtime — links the provider + tool TUs.
+    add_executable(tool_result_budget_test EXCLUDE_FROM_ALL
+        tests/tool_result_budget_test.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(tool_result_budget_test PRIVATE include)
+    target_compile_definitions(tool_result_budget_test PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(tool_result_budget_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(tool_result_budget_test PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(tool_result_budget_test PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME tool_result_budget_test COMMAND tool_result_budget_test)
+
     # Aggregate target so CI can build every ctest-registered binary in one
     # shot. The individual test targets are EXCLUDE_FROM_ALL (kept out of the
     # default `cmake --build` so a plain build stays lean), which means
@@ -1087,5 +1126,6 @@ if(AGENTTY_BUILD_TESTS)
         midrun_seam_test
         midrun_wire_test
         table_render_test
-        visual_hash_coverage_test)
+        visual_hash_coverage_test
+        tool_result_budget_test)
 endif()

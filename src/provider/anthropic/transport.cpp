@@ -108,6 +108,66 @@ std::string scrub_utf8(std::string_view in) {
     return out;
 }
 
+// Back up an index to the start of the UTF-8 code point it lands in.
+// `i` is a prospective cut point; if it falls inside a multi-byte
+// sequence we walk left until a lead byte (or 0). Bounded at 3
+// continuation bytes (max UTF-8 sequence is 4 bytes).
+[[nodiscard]] inline std::size_t utf8_floor(std::string_view s, std::size_t i) noexcept {
+    if (i >= s.size()) return s.size();
+    std::size_t steps = 0;
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80 && steps < 3) {
+        --i; ++steps;
+    }
+    return i;
+}
+
+// Advance an index forward to the next UTF-8 code-point boundary.
+[[nodiscard]] inline std::size_t utf8_ceil(std::string_view s, std::size_t i) noexcept {
+    std::size_t steps = 0;
+    while (i < s.size() && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80 && steps < 3) {
+        ++i; ++steps;
+    }
+    return i;
+}
+
+// Wire-only byte-budget cap for a single tool result. A 500 KiB grep or
+// a `read` of a giant file otherwise bloats EVERY subsequent request
+// (the result replays on each turn) until auto-compaction eventually
+// kicks in. Mirrors Zed's take_text_within_byte_budget (thread.rs):
+// cap at a byte budget, cut on a UTF-8 boundary, splice a marker so the
+// model knows bytes were elided. We keep head + tail (not just head)
+// because tool output often carries the operative summary or error at
+// the END (compiler tally, "N matches", exit status). Transcript is
+// untouched -- the user still sees the full output; only the wire copy
+// is trimmed.
+[[nodiscard]] std::string cap_tool_result(std::string_view in, std::size_t budget) {
+    if (in.size() <= budget) return std::string{in};
+
+    const std::size_t elided = in.size() - budget;
+    std::string marker = "\n\n...[" + std::to_string(elided)
+                       + " bytes elided to fit wire budget; full output is "
+                         "in the transcript]...\n\n";
+
+    // Pathologically small budget: hard-truncate the head on a boundary.
+    if (marker.size() + 16 >= budget) {
+        return std::string{in.substr(0, utf8_floor(in, budget))};
+    }
+
+    const std::size_t body_budget = budget - marker.size();
+    const std::size_t head_len    = (body_budget * 7) / 10;
+    const std::size_t tail_len    = body_budget - head_len;
+
+    const std::size_t head_cut  = utf8_floor(in, head_len);
+    const std::size_t tail_from = utf8_ceil(in, in.size() - tail_len);
+
+    std::string out;
+    out.reserve(head_cut + marker.size() + (in.size() - tail_from));
+    out.append(in.substr(0, head_cut));
+    out.append(marker);
+    out.append(in.substr(tail_from));
+    return out;
+}
+
 // Env-var-gated request/SSE dump. Set AGENTTY_DEBUG_API=1 to write to
 // $AGENTTY_DEBUG_FILE (or ./agentty-api.log). Appends, never truncates.
 FILE* debug_log() {
@@ -982,7 +1042,14 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
     } else if (raw_output.empty()) {
         json_write_field(out, "content", "(no output)", first);
     } else {
-        scrubbed = scrub_utf8(raw_output);
+        // Per-result wire cap. 64 KiB comfortably holds a full 2000-line
+        // read or a large grep page while preventing one pathological
+        // result (500 KiB grep, dump of a binary) from replaying on every
+        // subsequent turn. Independent of compaction -- this fires per
+        // request, immediately, with no transcript mutation.
+        constexpr std::size_t kToolResultWireBudget = 64u * 1024u;
+        std::string capped = cap_tool_result(raw_output, kToolResultWireBudget);
+        scrubbed = scrub_utf8(capped);
         json_write_field(out, "content", scrubbed, first);
     }
     const bool is_error = non_terminal || tc.is_failed() || tc.is_rejected();

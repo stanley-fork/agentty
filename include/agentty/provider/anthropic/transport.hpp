@@ -67,6 +67,11 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
 // Build the Anthropic-shaped messages array from our Thread.
 [[nodiscard]] nlohmann::json build_messages(const Thread& t);
 
+// Same as build_messages but emits the raw JSON string directly (hot
+// path; avoids the json tree round-trip). Applies the per-result wire
+// byte-budget cap on tool outputs. Exposed for tests.
+[[nodiscard]] std::string messages_json_string(const Thread& t);
+
 // Standard system prompt with env info.
 [[nodiscard]] std::string default_system_prompt();
 
