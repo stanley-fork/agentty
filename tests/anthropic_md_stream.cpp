@@ -275,14 +275,23 @@ int do_replay(const std::string& in_path,
                 if (c != ' ' && c != '\n' && c != '\r' && c != '\t')
                     ++visible;
             }
+            // Rendered height in rows = newline count + 1. This is the
+            // signal that drives chrome position; oscillation here IS
+            // the flicker.
+            std::size_t rows = 1;
+            for (char c : rendered) if (c == '\n') ++rows;
+            static std::size_t last_rows = 0;
+            const long long row_delta = static_cast<long long>(rows)
+                                      - static_cast<long long>(last_rows);
             const auto t_ms = duration_cast<milliseconds>(
                 steady_clock::now() - start).count();
             const long long delta = static_cast<long long>(visible)
                                   - static_cast<long long>(last_visible);
             std::println(stderr,
-                "[{:>6} ms] frame={:>4} visible={:>5} Δ={:+4} rendered_bytes={}",
-                t_ms, frame, visible, delta, rendered.size());
+                "[{:>6} ms] frame={:>4} rows={:>4} Δrows={:+3} visible={:>5} Δ={:+4}",
+                t_ms, frame, rows, row_delta, visible, delta);
             last_visible = visible;
+            last_rows = rows;
             ++frame;
             std::this_thread::sleep_for(33ms);
         }

@@ -12,6 +12,10 @@
 #include <maya/widget/agent_timeline.hpp>
 #include <maya/widget/markdown.hpp>
 #include <maya/render/cache_id.hpp>
+#include <maya/render/renderer.hpp> // build_layout_tree / layout::compute
+#include <maya/layout/yoga.hpp>     // maya::layout::compute / LayoutNode
+#include <maya/platform/io.hpp>
+#include <maya/style/theme.hpp>
 #include <maya/app/app.hpp>
 
 #include "agentty/domain/catalog.hpp"
@@ -344,6 +348,14 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         }
     }
 
+    // Live markdown body returned UNPADDED. Composer anti-bounce — the
+    // stream-start indicator→first-content seam, the typewriter crossing
+    // a block boundary, a tool card collapsing as it settles — is handled
+    // autonomously in maya (Runtime::render): it tracks the live
+    // transcript's running-max height and pads up to it across a
+    // transient dip, decaying once the shrink proves real so idle carries
+    // no dead space. maya owns that mechanism end-to-end; this body
+    // element just renders the revealed extent honestly.
     return built;
 }
 
