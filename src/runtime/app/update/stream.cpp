@@ -57,6 +57,46 @@ constexpr int kMaxTruncationRetries = 2;
 // lines — far more than the widget shows — and bounds per-tick work.
 constexpr std::size_t kStreamingPreviewCap = 4 * 1024;
 
+// Pre-settle an assistant message's StreamingMarkdown to the EXACT state
+// cached_markdown_for's settled fast-path expects, so the freeze build
+// (freeze_range → cached_markdown_for) returns a byte-identical element
+// tree and maya blits instead of re-emitting the whole turn.
+//
+// The redraw-after-stream-end symptom: the old pre-settle did a raw
+// set_content + finish() that (a) abruptly flipped live_ off while the
+// reveal cursor was mid-glide — collapsing the pre-finish overlay tree
+// (prefix ComponentElement + tail in vstack.gap(1)) to the flat
+// post-finish tree, a ±N-row height step — and (b) DIDN'T fold long code
+// blocks or stamp last_settled_size/revealed_size, so the subsequent
+// cached_markdown_for call missed its fast-path, re-folded, and produced
+// a DIFFERENT height than the last live frame. Either delta makes maya
+// diff a shorter settled frame against the taller live one and re-emit
+// the turn from the top.
+//
+// Doing the full settle sequence here — set_content(final) → finish() →
+// auto_fold_long_blocks(same threshold/kinds) → stamp the cache sizes —
+// means: the live frame already folded the block (turn.cpp's per-frame
+// fold), this locks the SAME folded+finished tree, and cached_markdown_for
+// hits its settled fast-path returning that identical tree. No height
+// step, no re-emit. Mirrors agent_session's single coherent
+// finish()+push-to-frozen at MessageStop.
+void settle_message_md(Model& m, const Message& msg) {
+    auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
+    if (!cache.streaming)
+        cache.streaming = std::make_shared<maya::StreamingMarkdown>();
+    cache.streaming->set_content(msg.text);
+    cache.streaming->finish();
+    // Same fold preset cached_markdown_for applies (40-line code blocks).
+    constexpr std::uint16_t kFoldLineThreshold = 40;
+    constexpr std::uint32_t kFoldKinds =
+        (1u << static_cast<unsigned>(maya::StreamingMarkdown::BlockKind::CodeBlock));
+    cache.streaming->auto_fold_long_blocks(kFoldLineThreshold, kFoldKinds);
+    // Stamp so cached_markdown_for's settled fast-path engages and returns
+    // the cached build() unchanged on the freeze pass and every frame after.
+    cache.last_settled_size = msg.text.size();
+    cache.revealed_size     = msg.text.size();
+}
+
 std::optional<std::string> sniff_any(const std::string& raw,
                                      std::span<const std::string_view> keys,
                                      bool partial) {
@@ -766,12 +806,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // Settling here matches agent_session's `m.md.finish() + push to
         // frozen` discipline: one coherent transition per update step.
         if (last.role == Role::Assistant && !last.text.empty()) {
-            auto& cache = m.ui.view_cache.message_md(
-                m.d.current.id, last.id);
-            if (!cache.streaming)
-                cache.streaming = std::make_shared<maya::StreamingMarkdown>();
-            cache.streaming->set_content(last.text);
-            cache.streaming->finish();
+            settle_message_md(m, last);
         }
         // Flush any tool_calls whose StreamToolUseEnd never fired — Anthropic
         // normally sends content_block_stop per tool block, but proxies /
@@ -996,12 +1031,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
              i < m.d.current.messages.size(); ++i) {
             auto& mm = m.d.current.messages[i];
             if (mm.role != Role::Assistant || mm.text.empty()) continue;
-            auto& cache = m.ui.view_cache.message_md(
-                m.d.current.id, mm.id);
-            if (!cache.streaming)
-                cache.streaming = std::make_shared<maya::StreamingMarkdown>();
-            cache.streaming->set_content(mm.text);
-            cache.streaming->finish();
+            settle_message_md(m, mm);
         }
         freeze_through(m, m.d.current.messages.size());
         // Trim frozen at idle, mirroring agent_session's MessageStop
