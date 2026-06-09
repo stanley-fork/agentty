@@ -21,9 +21,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to publish (e.g. v0.1.0)'
-        required: true
-        default: v0.1.0
+        description: 'Release tag (blank → v<CMake project version>)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -55,7 +55,10 @@ jobs:
           V=$(grep -m1 'project(agentty' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')
           echo "version=$V" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            # Blank input → derive the tag from the CMake project version.
+            TAG="${{ inputs.tag }}"
+            [ -n "$TAG" ] || TAG="v$V"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           else
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
