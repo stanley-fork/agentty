@@ -284,10 +284,20 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // finish() (which forces live_=false) until that ramp completes,
         // so the reveal animation isn't cut short and dump its backlog
         // in one frame.
-        if (settled) {
-            cache.streaming->request_finalize(200);
-        } else {
-            cache.streaming->set_live(true);
+        //
+        // Skip on a sizes-unchanged frame. set_live(true) goes through
+        // the Tracked<> wrapper which auto-bumps build_dirty_ on EVERY
+        // assignment (even same-value): a wasted rebuild per frame at 60
+        // fps. request_finalize is idempotent (early-out on existing
+        // deadline) but cheap to skip. With this gate, no-grow frames
+        // leave build_dirty_ alone and build() returns cached_build_
+        // directly.
+        if (!sizes_unchanged) {
+            if (settled) {
+                cache.streaming->request_finalize(200);
+            } else {
+                cache.streaming->set_live(true);
+            }
         }
 
         // Auto-fold code blocks longer than ~40 lines so a wall of code
@@ -312,10 +322,19 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // frozen.cpp's prose_rows mirrors this fold so the row estimate
         // agrees across the freeze. Respects an explicit user unfold
         // (entry stored as `false`) and won't re-fold.
-        constexpr std::uint16_t kFoldLineThreshold = 40;
-        constexpr std::uint32_t kFoldKinds =
-            (1u << static_cast<unsigned>(maya::StreamingMarkdown::BlockKind::CodeBlock));
-        cache.streaming->auto_fold_long_blocks(kFoldLineThreshold, kFoldKinds);
+        //
+        // Skipped on a sizes-unchanged frame: no new bytes → no new
+        // committed block can have appeared → nothing to fold. The
+        // function would walk prefix_->metas (O(committed blocks),
+        // dozens to hundreds on a long body) and hit the
+        // `folds_.contains(source_offset)` early-out on every entry.
+        // Cheap absolutely, but pure waste on the dominant no-grow frame.
+        if (!sizes_unchanged) {
+            constexpr std::uint16_t kFoldLineThreshold = 40;
+            constexpr std::uint32_t kFoldKinds =
+                (1u << static_cast<unsigned>(maya::StreamingMarkdown::BlockKind::CodeBlock));
+            cache.streaming->auto_fold_long_blocks(kFoldLineThreshold, kFoldKinds);
+        }
 
         if (settled
             && cache.revealed_size == source.size()
