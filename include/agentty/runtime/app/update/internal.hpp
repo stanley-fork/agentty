@@ -87,45 +87,15 @@ void           persist_settings(const Model& m);
 // is about to be pushed).
 void freeze_through(Model& m, std::size_t live_start);
 
-// freeze_settled_subturns: mid-run incremental freeze. During an ACTIVE
-// auto-pilot run the trailing Assistant run can't be frozen by
-// freeze_through (its tail is still streaming / has a running tool), so
-// the WHOLE run — every completed edit/write sub-turn included — stays
-// in the live tail and is re-laid-out + re-painted every frame. As edits
-// accumulate the live canvas grows without bound and per-frame cost
-// (canvas clear + layout + compose, all O(rows)) climbs with tool count.
-//
-// This freezes the COMPLETED leading sub-turns of the active run up to
-// (but not including) the first non-terminal sub-turn, committing them
-// into m.ui.frozen as a continuation entry. frozen_turn is NOT advanced
-// (the run isn't finished); frozen_midrun is set so the live tail draws
-// the remainder as a continuation (rail only, no repeated header/gap).
-// The live frame then holds only the active sub-turn — flat per-frame
-// cost regardless of how many tools the turn has run. No content is
-// hidden: the frozen sub-turns render in full via the zero-copy frozen
-// list, exactly as a settled turn would. No-op when the active run has
-// no freezable completed prefix.
-void freeze_settled_subturns(Model& m);
-
-// freeze_streaming_text_prefix: mid-stream bound for a long PURE-TEXT
-// sub-turn (a prose answer with no tool calls). freeze_settled_subturns
-// can't touch it — there's no terminal tool to mark the sub-turn done,
-// so the whole growing markdown body stays in the live tail and is
-// re-laid-out + re-painted every frame. Render cost climbs with body
-// size (~13 ms/frame at 5k lines, vs 0.26 ms flat for a tail-windowed
-// tool card).
-//
-// This splits the active text-only message at the last SAFE markdown
-// block boundary (a blank line outside an open code fence), keeping a
-// trailing window live so the actively-revealing edge still animates.
-// The committed prefix is moved into its own settled Assistant Message
-// inserted just before the active one, producing a [settled-text]
-// [growing-text] run — the exact shape a post-tool continuation makes,
-// which freeze_settled_subturns then freezes with no new render logic.
-// The active (tail) message stays messages.back() so the StreamTextDelta
-// / StreamToolUseStart append-to-back invariant holds. No-op until the
-// committed prefix exceeds a row budget.
-void freeze_streaming_text_prefix(Model& m);
+// NOTE: the mid-stream carve API that used to be declared here
+// (freeze_settled_subturns, freeze_streaming_text_prefix,
+// trim_frozen_above_viewport) is DELETED. agent_session — the
+// reference implementation with zero scrollback corruption — freezes
+// exactly once per turn (MessageStop); the only production analog is
+// finalize_turn → pending_settle_freeze → freeze_through. Mid-stream
+// carves stamped frozen Turns whose hashes maya's cache had never
+// seen, forcing cache-miss re-emits over committed scrollback. Do
+// not reintroduce them.
 
 // rehydrate_frozen: rebuild m.ui.frozen from scratch from the current
 // thread's messages + compaction records. Used on thread switch /
@@ -163,33 +133,6 @@ void ensure_frozen_width(Model& m, int term_cols);
 // the cells that have provably overflowed the viewport. No-op if
 // frozen is under the cap.
 maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
-
-// trim_frozen_above_viewport: mid-run-SAFE variant of the trim. Drops
-// front entries ONLY while at least `term_h` rows of the most recent
-// frozen content remain on the canvas, so every dropped entry has
-// provably overflowed into native terminal scrollback already (its
-// rows are committed there, identical to what we'd re-emit). This is
-// the missing bound during a single long auto-pilot run: a turn with
-// many big tool panels grows frozen_row_total past the budget, and
-// without trimming, render_tree + canvas.clear() + the shadow verify
-// all walk the whole oversized canvas every frame (the progressive
-// slowdown). Unlike trim_frozen_if_oversized this NEVER drops an
-// on-screen entry, so it can't trigger the mid-run duplication bug.
-// Returns commit_scrollback(removed_rows) — EXACTLY the rows it
-// dropped — when it drops anything; no-op otherwise.
-//
-// NOTE: wired into the live mid-run path — tool.cpp (after each tool
-// settles) and meta.cpp's Tick (after the per-tick freeze). It keeps
-// ~3x term_h rows on the canvas (a margin chosen to absorb the byte-
-// based wrap over-count in estimate_msg_rows, so real-kept >= term_h
-// even for all-multibyte prose) and only fires once frozen_row_total
-// exceeds ~4x term_h, so it trims infrequently. Its commit is row-exact
-// (commit_scrollback(removed), not commit_scrollback_overflow) AND maya
-// clamps that count to (prev_rows - term_h) in commit_inline_prefix —
-// two independent nets, so an on-screen row can never be committed and
-// no duplicate is ever stranded. Also exercised by o1_probe + seam
-// tests.
-maya::Cmd<Msg> trim_frozen_above_viewport(Model& m);
 
 // Set a transient status toast that auto-clears after `ttl`. Returns a
 // Cmd that schedules the ClearStatus sentinel (stamp-matched so a newer

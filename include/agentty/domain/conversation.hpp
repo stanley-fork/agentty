@@ -134,9 +134,9 @@ struct ToolUse {
     [[nodiscard]] bool is_terminal() const noexcept { return is_done() || is_failed() || is_rejected(); }
 
     // Exhaustiveness pin for is_terminal(). The freeze gate
-    // (run_is_freezable), the mid-run prefix cut (freezable_prefix_cut),
-    // and the live-tail cache-key gate all decide "is this run safe to
-    // freeze into immutable scrollback?" by calling is_terminal(). That
+    // (run_is_freezable) and the live-tail cache-key gate decide "is
+    // this run safe to freeze into immutable scrollback?" by calling
+    // is_terminal(). That
     // predicate enumerates the three settled states (Done/Failed/Rejected)
     // by exclusion of the three in-flight ones (Pending/Approved/Running).
     // A 7th Status variant added without classifying it here would default

@@ -240,12 +240,11 @@ static void test_write_freeze_no_rewrite() {
     close(rfd);
 }
 
-// MID-RUN active freeze: the write settles while the run is STILL active
-// (a continuation placeholder follows it). freeze_settled_subturns fires
-// on the ToolExecOutput cadence, freezing the write batch while the
-// stream keeps going. This is the screenshot scenario — turn N's write
-// frozen mid-run, then the run continues. Same wire invariant: the
-// freeze must not rewrite a committed scrollback row.
+// SETTLE freeze with a continuation: the write settled, a placeholder
+// text sub-turn streamed after it, then the turn finishes and the single
+// settle-time freeze takes the WHOLE run at once (agent_session's
+// MessageStop analog). Same wire invariant: the freeze must not rewrite
+// a committed scrollback row.
 static void test_write_midrun_active_freeze_no_rewrite() {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
@@ -288,9 +287,16 @@ static void test_write_midrun_active_freeze_no_rewrite() {
     CHECK(committed_a > 0,
           "midrun setup: live write must overflow the viewport");
 
-    // Mid-run freeze (ToolExecOutput cadence). The write batch graduates
-    // into the frozen prefix; the active placeholder stays live.
-    agentty::app::detail::freeze_settled_subturns(m);
+    // Mid-run nothing freezes (agent_session discipline). The turn
+    // settles: placeholder text commits, phase goes idle, and the single
+    // settle-time freeze takes the whole run.
+    {
+        auto& back = m.d.current.messages.back();
+        back.text = std::move(back.streaming_text);
+        back.streaming_text.clear();
+    }
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
 
     // frame B: frozen prefix + live placeholder, against the same state.
     Canvas cb = paint(build_root(m), kWidth, pool);
@@ -364,18 +370,18 @@ static void test_write_streaming_settle_freeze() {
 
     // Lead-in frozen turns so the write card's top is pushed above the
     // viewport top BEFORE it settles (so it genuinely commits rows).
+    // Complete user+write exchanges frozen at their settle boundaries —
+    // the only way content reaches m.ui.frozen now.
     for (int e = 0; e < 6; ++e) {
+        Message lu; lu.role = Role::User;
+        lu.text = "write lead file " + std::to_string(e);
+        m.d.current.messages.push_back(std::move(lu));
         Message la; la.role = Role::Assistant;
         la.tool_calls.push_back(settled_write("lead" + std::to_string(e), 4));
         m.d.current.messages.push_back(std::move(la));
     }
-    {
-        Message ph0; ph0.role = Role::Assistant; ph0.streaming_text = "x";
-        m.d.current.messages.push_back(std::move(ph0));
-        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
-        agentty::app::detail::freeze_settled_subturns(m);
-        m.d.current.messages.pop_back();
-    }
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
 
     std::string content;
     for (int i = 0; i < 120; ++i)
@@ -464,10 +470,16 @@ static void test_write_streaming_settle_freeze() {
     }
     check_prefix("life Running->Done rewrote a committed row", prev_a, cb, rows_a);
 
-    // ── frame C: mid-run freeze.
+    // ── frame C: the turn settles — the single settle-time freeze.
     auto prev_b = rows_of(cb);
     const int rows_b = s.rows();
-    agentty::app::detail::freeze_settled_subturns(m);
+    {
+        auto& back = m.d.current.messages.back();
+        back.text = std::move(back.streaming_text);
+        back.streaming_text.clear();
+    }
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
     Canvas cc = paint(build_root(m), kWidth, pool);
     {
         auto wit = s.verify();
@@ -958,24 +970,25 @@ static void test_midrun_trim_output_heavy_no_rewrite() {
 
     Model m;
     m.d.current.id = agentty::ThreadId{"wiretrim"};
-    Message u; u.role = Role::User; u.text = "do a lot of noisy work";
-    m.d.current.messages.push_back(std::move(u));
-    // Many assistant sub-turns, each a bash card with a HUGE output that
-    // elides to ~4 rows. Pre-fix these over-counted ~120 rows each, so a
-    // handful tripped the keep-loop's drop-an-on-screen-entry path.
+    // Many COMPLETE turns (user + noisy bash), each frozen at its settle
+    // boundary, then an active streaming tail. Each bash card has a HUGE
+    // output that elides to ~4 rows. Pre-fix the row estimate over-counted
+    // ~120 rows each, so a handful tripped the keep-loop's
+    // drop-an-on-screen-entry path.
     for (int e = 0; e < 16; ++e) {
+        Message u; u.role = Role::User;
+        u.text = "noisy work " + std::to_string(e);
+        m.d.current.messages.push_back(std::move(u));
         Message a; a.role = Role::Assistant;
         a.tool_calls.push_back(
             settled_bash("t" + std::to_string(e), 120));
         m.d.current.messages.push_back(std::move(a));
     }
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
     Message ph; ph.role = Role::Assistant; ph.streaming_text = "continuing";
     m.d.current.messages.push_back(std::move(ph));
     m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
-
-    agentty::app::detail::clear_frozen(m);
-    agentty::app::detail::freeze_through(m, 1);
-    agentty::app::detail::freeze_settled_subturns(m);
 
     StylePool pool;
     auto [writer, rfd] = make_pipe_writer();
@@ -999,8 +1012,9 @@ static void test_midrun_trim_output_heavy_no_rewrite() {
     CHECK(committed_a > 0,
           "trim setup: prefix must overflow the viewport");
 
-    // ── The trim. Drops the off-screen front, emits commit_scrollback(N).
-    auto cmd = agentty::app::detail::trim_frozen_above_viewport(m);
+    // ── The trim (the ONE production trim, fired at turn boundaries).
+    //    Drops the off-budget front, emits commit_scrollback(N).
+    auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
     using Cmd = maya::Cmd<agentty::Msg>;
     const auto* exact = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
     CHECK(exact != nullptr,
@@ -1117,7 +1131,6 @@ static void test_midrun_trim_full_body_writes_no_rewrite() {
 
     agentty::app::detail::clear_frozen(m);
     agentty::app::detail::freeze_through(m, m.d.current.messages.size() - 1);
-    agentty::app::detail::freeze_settled_subturns(m);
 
     StylePool pool;
     auto [writer, rfd] = make_pipe_writer();
@@ -1140,7 +1153,7 @@ static void test_midrun_trim_full_body_writes_no_rewrite() {
     CHECK(committed_a > 0,
           "full-body trim setup: prefix must overflow the viewport");
 
-    auto cmd = agentty::app::detail::trim_frozen_above_viewport(m);
+    auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
     using Cmd = maya::Cmd<agentty::Msg>;
     const auto* exact = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
     CHECK(exact != nullptr,

@@ -515,24 +515,24 @@ struct RenderStats { Stats cold; Stats warm; };
 
 // Mid-run per-frame steady state — the cost the user actually feels
 // DURING a long auto-pilot turn. Production bounds the canvas with
-// trim_frozen_above_viewport (frozen kept to ~3 viewports) and only the
-// live tail is rebuilt each frame; the frozen prefix blits. This phase
-// reproduces that: rehydrate, run the mid-run trim until it's a no-op
-// (frozen at its bounded steady size), build the element tree ONCE, then
-// time a WARM render (same canvas/pool) which is the real per-tick cost.
-// If this stays flat across the D/E/G/H shapes (200t, 3000-line writes)
-// the per-frame path is genuinely bounded; if it scales with thread size
-// the trim isn't engaging on that shape.
+// trim_frozen_if_oversized at turn boundaries (frozen kept to the
+// frozen_row_budget) and only the live tail is rebuilt each frame; the
+// frozen prefix blits. This phase reproduces that: rehydrate, run the
+// trim until it's a no-op (frozen at its bounded steady size), build the
+// element tree ONCE, then time a WARM render (same canvas/pool) which is
+// the real per-tick cost. If this stays flat across the D/E/G/H shapes
+// (200t, 3000-line writes) the per-frame path is genuinely bounded; if
+// it scales with thread size the trim isn't engaging on that shape.
 struct MidrunStats { Stats frame; std::size_t frozen_rows_after = 0;
                      std::size_t frozen_entries_after = 0; };
 
 [[nodiscard]] MidrunStats midrun_frame(const Shape& sh) {
     auto m = build_model(sh);
     agentty::app::detail::rehydrate_frozen(m);
-    // Drive the mid-run trim to its fixed point so frozen is at the
-    // bounded steady size production holds during a long run.
+    // Drive the trim to its fixed point so frozen is at the bounded
+    // steady size production holds.
     for (int guard = 0; guard < 64; ++guard) {
-        auto c = agentty::app::detail::trim_frozen_above_viewport(m);
+        auto c = agentty::app::detail::trim_frozen_if_oversized(m);
         if (c.is_none()) break;
     }
 

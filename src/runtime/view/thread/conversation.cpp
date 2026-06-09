@@ -86,32 +86,17 @@ void build_live_tail(const Model& m, int& running_turn,
     while (i < total) {
         std::size_t run_end = turn_run_end(m.d.current.messages, i);
 
-        // No mid-stream prefix-split. The whole live run renders as ONE
-        // Turn (matching agent_session, where the entire in-flight
-        // assistant body lives in m.assistant_body and only commits to
-        // frozen at MessageStop). The prior "seam-stable settled-prefix
-        // split" stamped a hash-keyed prefix Turn during streaming so the
-        // mid-stream freeze could hand off cells via a cache hit — but
-        // the mid-stream freezes themselves are gone now (finalize_turn
-        // is the only freeze site), so the split's only purpose
-        // disappeared with them. Keeping the split would re-introduce
-        // exactly the seam redraw it was meant to mask: the prefix's
-        // hash_id changes every time a new sub-turn lands (cut widens),
-        // which is precisely the cache miss / from-top re-emit the user
-        // reported.
-
-        // The remainder of a run whose completed prefix was frozen
-        // mid-run is a CONTINUATION (frozen_midrun set). Only the FIRST
-        // live run starting at frozen_through can be one. Routed through
-        // the shared ui::is_midrun_continuation so this and the freeze
-        // path (freeze_settled_subturns / freeze_range) can never compute
-        // opposite values for the same run — a desync there is the
-        // duplication ghost.
-        const bool midrun_continuation =
-            first_in_tail && ui::is_midrun_continuation(m, i);
+        // No mid-stream prefix-split and no mid-run continuation. The
+        // whole live run renders as ONE Turn (matching agent_session,
+        // where the entire in-flight assistant body lives in
+        // m.assistant_body and only commits to frozen at MessageStop).
+        // The carve machinery that needed a "continuation" remainder
+        // (freeze_settled_subturns / freeze_streaming_text_prefix) has
+        // been deleted — finalize_turn is the only freeze site, so the
+        // live tail always starts at a whole-turn boundary.
 
         const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
-        if (!first_overall && !midrun_continuation) {
+        if (!first_overall) {
             out.push_back(gap_row());
         }
         first_in_tail = false;
@@ -129,7 +114,7 @@ void build_live_tail(const Model& m, int& running_turn,
             //    assistant Turn body until the first text/tool/etc.
             //    slot lands, then content replaces it.
             auto cfg = turn_config_for_assistant_run(
-                i, run_end, turn_num, m, /*continuation=*/midrun_continuation);
+                i, run_end, turn_num, m);
             // Reserve an indicator-height slot for the WHOLE active
             // phase. When the tail is an empty placeholder we paint
             // the breathing "thinking…" widget; once real content
@@ -240,8 +225,7 @@ void build_live_tail(const Model& m, int& running_turn,
                 return true;
             }();
             if (run_terminal && !reserve_slot) {
-                cfg.hash_id = assistant_run_hash_id(
-                    m, i, run_end, /*continuation=*/midrun_continuation);
+                cfg.hash_id = assistant_run_hash_id(m, i, run_end);
             }
             // NOTE: the in-flight (streaming) run is deliberately NOT
             // cached. Its Turn carries animated chrome — the tool

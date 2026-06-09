@@ -93,8 +93,9 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // makes the wall-clock reveal cursor the SINGLE display pacer over
     // all arrived bytes, so visible output advances continuously at
     // kRevealCharsPerSec independent of the tick cadence. (meta.cpp's
-    // drip still runs — it gates freeze_streaming_text_prefix and bounds
-    // the live tail — but it no longer controls what the user SEES.)
+    // drip still runs — it moves bytes into streaming_text where the
+    // settle path commits them — but it no longer controls what the
+    // user SEES.)
     //
     //   • settled: msg.text holds the final body, streaming_text +
     //     pending_stream empty.
@@ -715,7 +716,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 
 maya::Turn::Config turn_config_for_assistant_run(
     std::size_t run_first, std::size_t run_end,
-    int turn_num, const Model& m, bool continuation)
+    int turn_num, const Model& m)
 {
     const auto& msgs = m.d.current.messages;
     // Pre-conditions defended at the only two call sites (build_live_tail
@@ -732,13 +733,7 @@ maya::Turn::Config turn_config_for_assistant_run(
     cfg.glyph        = style.glyph;
     cfg.label        = style.label;
     cfg.rail_color   = style.color;
-    // A self-contained run is one logical Turn; a continuation run is the
-    // live remainder of a turn whose prefix was frozen mid-run — its
-    // header is suppressed (maya draws the rail only) so the two pieces
-    // read as one turn with no repeated glyph/label/meta.
-    cfg.continuation = continuation;
-    cfg.meta         = continuation ? std::string{}
-                     : format_turn_meta(head, turn_num,
+    cfg.meta         = format_turn_meta(head, turn_num,
                           head.role == Role::Assistant
                               ? assistant_elapsed(head, m)
                               : std::nullopt);
@@ -805,100 +800,18 @@ std::size_t turn_run_end(const std::vector<Message>& messages,
     return end;
 }
 
-std::size_t freezable_prefix_cut(const Model& m, std::size_t run_start,
-                                 std::size_t run_end)
-{
-    const auto& msgs  = m.d.current.messages;
-    const std::size_t total = msgs.size();
-    if (run_start >= run_end || run_end > total) return run_start;
-
-    // Walk the contiguous leading sub-turns that are byte-stable:
-    //  - a settled terminal-TOOL batch (every tool_call terminal), or
-    //  - a settled TEXT-ONLY block (no tools, committed text, nothing
-    //    still streaming). The first sub-turn that fails both stops the
-    //    walk; everything after it stays live.
-    std::size_t cut = run_start;
-    for (std::size_t i = run_start; i < run_end; ++i) {
-        const Message& mm = msgs[i];
-        bool terminal_tools = !mm.tool_calls.empty();
-        for (const auto& tc : mm.tool_calls)
-            if (!tc.is_terminal()) { terminal_tools = false; break; }
-        const bool settled_text_only =
-            mm.tool_calls.empty()
-            && !mm.text.empty()
-            && mm.streaming_text.empty()
-            && mm.pending_stream.empty();
-        if (!terminal_tools && !settled_text_only) break;
-        cut = i + 1;
-    }
-
-    // The last sub-turn of the run is normally kept LIVE so the active
-    // edge keeps animating and frozen_through never lands on a still-
-    // mutable message. Two exceptions where the terminal-TOOL batch at
-    // the tail is byte-stable and CAN be included in the prefix:
-    //
-    //  (a) A continuation message already follows it (run_end < total)
-    //      — the model has moved on, no further bytes will land on it.
-    //
-    //  (b) The phase is ExecutingTool or AwaitingPermission. In both,
-    //      StreamFinished has already fired (deltas done, tools
-    //      dispatched / paused on permission), so no StreamTextDelta
-    //      can append text to msgs.back() before the next placeholder
-    //      push. Including it in the prefix on the LIVE-TAIL render
-    //      makes the hash stamped here MATCH the hash freeze_settled_
-    //      subturns will stamp on the very next tick (after
-    //      kick_pending_tools widens total): cache HIT, no re-emit.
-    //      Without this, every tool round of an auto-pilot run shows
-    //      a brief from-top redraw at the tool→continuation seam —
-    //      the user-visible "renders when nothing should" bug.
-    //
-    // A settled-text-only last sub-turn always stays live (it may be the
-    // active prose tail freeze_streaming_text_prefix just carved, whose
-    // successor bytes are still streaming).
-    const bool tail_is_terminal_tools =
-        cut == run_end
-        && run_end > run_start
-        && !msgs[run_end - 1].tool_calls.empty();
-    const bool deltas_quiescent =
-        m.s.is_executing_tool() || m.s.is_awaiting_permission();
-    const bool last_is_settled_tool_batch_not_back =
-        tail_is_terminal_tools
-        && m.s.active()
-        && (run_end < total || deltas_quiescent);
-    if (cut >= run_end && !last_is_settled_tool_batch_not_back)
-        cut = (run_end > run_start) ? run_end - 1 : run_start;
-    return cut;
-}
-
 maya::CacheId assistant_run_hash_id(
-    const Model& m, std::size_t run_start, std::size_t run_end,
-    bool continuation)
+    const Model& m, std::size_t run_start, std::size_t run_end)
 {
     const auto& msgs = m.d.current.messages;
     maya::CacheIdBuilder kb;
     kb.add(std::string_view{"agentty.turn.assistant_run"})
-      .add(continuation ? std::string_view{"cont"} : std::string_view{"head"})
       .add(static_cast<std::uint64_t>(run_end - run_start));
     for (std::size_t j = run_start; j < run_end && j < msgs.size(); ++j) {
         kb.add(std::string_view{msgs[j].id.value});
         kb.add(msgs[j].compute_render_key());
     }
     return kb.build();
-}
-
-bool is_midrun_continuation(const Model& m, std::size_t i)
-{
-    // A run is a continuation only when a mid-run freeze already
-    // committed this turn's header to m.ui.frozen, the run we're about
-    // to build starts exactly at the live-tail boundary, and that
-    // message is an Assistant head. Any of the three failing means a
-    // self-contained run (header drawn). Both the live-tail builder and
-    // the freeze path call THIS so they can never compute opposite
-    // values for the same run.
-    return m.ui.frozen_midrun
-        && i == m.ui.frozen_through
-        && i < m.d.current.messages.size()
-        && m.d.current.messages[i].role == Role::Assistant;
 }
 
 

@@ -305,14 +305,11 @@ static double streaming_write_ms(int streamed_lines) {
 
 // Measures the STREAMING-TEXT render cost: a single assistant message
 // with NO tool calls whose markdown body grows token-by-token (the
-// model writing a long prose answer). This is the gap the existing
-// freeze machinery does NOT cover: freeze_settled_subturns can only
-// freeze a sub-turn whose tools are all terminal, so a pure-text
-// sub-turn stays fully live until the stream finishes. The whole
-// growing body is re-laid-out + re-painted every frame; if this grows
-// with body size, that's the progressive mid-stream lag the user
-// feels on long answers (and the source of the end-of-turn full
-// repaint when it finally freezes in one jump).
+// model writing a long prose answer). Under the agent_session
+// discipline the WHOLE growing body stays live until settle — there is
+// no mid-stream carve. Per-frame cost must stay flat anyway: maya's
+// hash-keyed component cache + the StreamingMarkdown's committed-prefix
+// reuse bound the per-frame work, which is exactly what this probes.
 static double streaming_text_ms(int body_lines, double& view_out) {
     Model m;
     m.d.current.id = agentty::ThreadId{"probe"};
@@ -335,11 +332,8 @@ static double streaming_text_ms(int body_lines, double& view_out) {
     agentty::app::detail::clear_frozen(m);
     agentty::app::detail::freeze_through(m, 1);   // freeze the User
     // Replay the REAL per-tick cadence: the body doesn't appear all at
-    // once — it grows ~1 KB/tick and the Tick handler runs the bound
-    // each time. Simulate by revealing the body in chunks, running the
-    // freeze+trim after each, exactly like meta.cpp's Tick arm. This is
-    // what produces MULTIPLE frozen entries (so the trim can drop old
-    // ones) instead of one giant un-trimmable block.
+    // once — it grows ~1 KB/tick. No mid-stream freeze/trim (production
+    // has none); the whole body accumulates live.
     {
         std::string full = std::move(m.d.current.messages.back().streaming_text);
         m.d.current.messages.back().streaming_text.clear();
@@ -349,9 +343,6 @@ static double streaming_text_ms(int body_lines, double& view_out) {
             const std::size_t n = std::min(kChunk, full.size() - fed);
             m.d.current.messages.back().streaming_text.append(full, fed, n);
             fed += n;
-            agentty::app::detail::freeze_streaming_text_prefix(m);
-            agentty::app::detail::freeze_settled_subturns(m);
-            (void)agentty::app::detail::trim_frozen_above_viewport(m);
         }
     }
 
@@ -440,9 +431,7 @@ static WireCost streaming_text_wire_bytes(int body_lines) {
         const std::size_t n = std::min(kChunk, full.size() - fed);
         m.d.current.messages.back().streaming_text.append(full, fed, n);
         fed += n;
-        agentty::app::detail::freeze_streaming_text_prefix(m);
-        agentty::app::detail::freeze_settled_subturns(m);
-        (void)agentty::app::detail::trim_frozen_above_viewport(m);
+        // No mid-stream freeze/trim — production discipline.
         const bool freeze_happened = m.ui.frozen.size() != prev_frozen;
         prev_frozen = m.ui.frozen.size();
 
@@ -535,12 +524,11 @@ static void scaling_breakdown() {
         agentty::app::detail::clear_frozen(m);
         agentty::app::detail::freeze_through(m, 1);   // freeze the User
 
-        // Real auto-pilot cadence: each settled sub-turn is appended,
-        // then freeze_settled_subturns + trim_frozen_if_oversized fire
-        // on its ToolExecOutput (matching tool.cpp). Replaying this
-        // per-edit is what lets the trim bound the frozen prefix — a
-        // single end-of-run freeze merges every edit into ONE entry
-        // that trim can't split, masking the unbounded growth.
+        // Production cadence: every settled sub-turn stays LIVE until
+        // the turn finishes (agent_session discipline — no mid-run
+        // freeze). This probe therefore measures the real live-tail
+        // cost as the run accumulates edits; flat = win (maya's
+        // per-event hash_id keeps settled tool cards cache-hits).
         static int c = 0;
         for (int e = 0; e < n; ++e) {
             Message a; a.role = Role::Assistant;
@@ -555,27 +543,16 @@ static void scaling_breakdown() {
             t.status = ToolUse::Done{now - milliseconds{5}, now, "edited"};
             a.tool_calls.push_back(std::move(t));
             m.d.current.messages.push_back(std::move(a));
-            // A streaming successor placeholder keeps the just-appended
-            // sub-turn freezable while leaving an active tail (the real
-            // post-tool continuation in cmd_factory pushes one).
-            Message ph; ph.role = Role::Assistant; ph.streaming_text = "";
-            m.d.current.messages.push_back(std::move(ph));
-            agentty::app::detail::freeze_settled_subturns(m);
-            (void)agentty::app::detail::trim_frozen_if_oversized(m);
-            // Drop the placeholder before the next real sub-turn lands
-            // (the live tail is rebuilt each cycle).
-            m.d.current.messages.pop_back();
         }
         Message tail; tail.role = Role::Assistant;
         tail.streaming_text = "more";
         m.d.current.messages.push_back(std::move(tail));
         m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
-        agentty::app::detail::freeze_settled_subturns(m);
-        (void)agentty::app::detail::trim_frozen_if_oversized(m);
 
-        // Count how many message-indices remain live (un-frozen). The
-        // whole point of the mid-run freeze: this stays ~constant (1-2)
-        // no matter how many edits accumulated.
+        // Count how many message-indices remain live (un-frozen). Under
+        // the single-freeze discipline the whole active run is live, so
+        // this GROWS with n — the probe verifies per-frame cost stays
+        // flat anyway (hash_id cache hits on settled cards).
         const std::size_t live_msgs =
             m.d.current.messages.size() - m.ui.frozen_through;
 

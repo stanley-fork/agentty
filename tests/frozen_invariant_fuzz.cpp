@@ -310,28 +310,20 @@ static void run_walk(std::uint64_t seed, int width) {
             break;
         }
         case 1:
-            agentty::app::detail::freeze_settled_subturns(m);
-            g_oplog.push_back("freeze_settled_subturns");
-            break;
         case 2:
-            agentty::app::detail::freeze_streaming_text_prefix(m);
-            g_oplog.push_back("freeze_streaming_text_prefix");
+            // (retired ops) the mid-stream carves — freeze_settled_subturns
+            // and freeze_streaming_text_prefix — are deleted; production
+            // has exactly one freeze site (settle → freeze_through). Keep
+            // the case numbers so seeds stay comparable across versions.
+            g_oplog.push_back("(carve op retired — no-op)");
             break;
-        case 3: {
+        case 3:
+        case 4: {
             std::size_t before = m.ui.frozen_row_total;
             trim_cmd = agentty::app::detail::trim_frozen_if_oversized(m);
             dropped_rows = before - m.ui.frozen_row_total;
             trim_ptr = &trim_cmd;
             g_oplog.push_back("trim_frozen_if_oversized (dropped "
-                              + std::to_string(dropped_rows) + " rows)");
-            break;
-        }
-        case 4: {
-            std::size_t before = m.ui.frozen_row_total;
-            trim_cmd = agentty::app::detail::trim_frozen_above_viewport(m);
-            dropped_rows = before - m.ui.frozen_row_total;
-            trim_ptr = &trim_cmd;
-            g_oplog.push_back("trim_frozen_above_viewport (dropped "
                               + std::to_string(dropped_rows) + " rows)");
             break;
         }

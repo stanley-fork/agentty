@@ -323,15 +323,15 @@ std::size_t estimate_msg_rows(const Message& mm, int cols) {
         // 200-line bash dump renders ~4 rows. Counting the full output
         // for those over-counts — capped below.
         //
-        // This count must NOT OVER-estimate. It feeds two trims, and the
-        // mid-run one (trim_frozen_above_viewport) walks the NEWEST
-        // entries summing rows until it has "kept a viewport", then drops
-        // the rest as off-screen. If a kept entry over-counts, the keep
-        // sum reaches the viewport margin before the real rows do, so the
-        // proof drops an entry whose real rows are STILL on screen —
-        // re-emitting committed scrollback rows = the duplication ghost.
-        // An UNDER-count only keeps more (a taller canvas, never a
-        // dropped on-screen entry), so under/exact is the safe side.
+        // This count must NOT OVER-estimate. It feeds the trim's
+        // keep-loop, which walks the NEWEST entries summing rows until
+        // it has "kept the budget", then drops the rest. If a kept
+        // entry over-counts, the keep sum reaches the margin before the
+        // real rows do, so the trim drops an entry whose real rows are
+        // STILL on screen — re-emitting committed scrollback rows = the
+        // duplication ghost. An UNDER-count only keeps more (a taller
+        // canvas, never a dropped on-screen entry), so under/exact is
+        // the safe side.
         //
         // The body shows up in exactly one source per tool state:
         //   • settled  → parsed `args` (write content / edit hunks) or
@@ -602,13 +602,9 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         }
 
         // Leading gap: one blank row before every turn except the
-        // very first frozen row (avoid a top-of-thread gap). Suppressed
-        // when this run is the completion of a mid-run freeze — its
-        // header (and the gap above it) were already pushed by
-        // freeze_settled_subturns; this entry is a continuation.
+        // very first frozen row (avoid a top-of-thread gap).
         const bool first_overall = m.ui.frozen.empty();
-        const bool completing_midrun = ui::is_midrun_continuation(m, i);
-        if (!first_overall && !completing_midrun) {
+        if (!first_overall) {
             push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
         }
 
@@ -617,22 +613,18 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         if (head.role == Role::Assistant) {
             int turn_num = m.ui.frozen_turn + 1;
             auto cfg = ui::turn_config_for_assistant_run(
-                i, run_end, turn_num, m, /*continuation=*/completing_midrun);
+                i, run_end, turn_num, m);
 
             // Hash key: settled assistant run — built through the shared
-            // ui::assistant_run_hash_id so the live-tail prefix split and
-            // the mid-run freeze stamp a byte-identical key (cache HIT,
-            // zero row shift at the freeze seam). Once frozen, none of the
-            // underlying bytes change — the key is stable for the lifetime
-            // of this entry.
-            cfg.hash_id = ui::assistant_run_hash_id(
-                m, i, run_end, /*continuation=*/completing_midrun);
+            // ui::assistant_run_hash_id so the live tail and the freeze
+            // stamp a byte-identical key (cache HIT, zero row shift at
+            // the freeze seam). Once frozen, none of the underlying
+            // bytes change — the key is stable for the lifetime of this
+            // entry.
+            cfg.hash_id = ui::assistant_run_hash_id(m, i, run_end);
             push_frozen(m, maya::Turn{std::move(cfg)}.build(),
                         estimate_run_rows(m, i, run_end));
             ++m.ui.frozen_turn;
-            // Run is now wholly frozen — the mid-run split (if any) is
-            // resolved; the next run starts fresh with a header.
-            m.ui.frozen_midrun = false;
         } else {
             // User / compaction-summary single-message Turn.
             int turn_num = m.ui.frozen_turn;
@@ -662,326 +654,19 @@ void freeze_through(Model& m, std::size_t live_start) {
     freeze_range(m, m.ui.frozen_through, live_start);
 }
 
-void freeze_settled_subturns(Model& m) {
-    const auto& msgs = m.d.current.messages;
-    const std::size_t total = msgs.size();
-    if (m.ui.frozen_through >= total) return;
-
-    // Only act on a live tail that begins with an Assistant run (the
-    // auto-pilot case). A User head means a fresh turn boundary that
-    // freeze_through handles on submit.
-    const std::size_t run_start = m.ui.frozen_through;
-    if (msgs[run_start].role != Role::Assistant) return;
-
-    const std::size_t run_end = ui::turn_run_end(msgs, run_start);
-
-    // Shared cut: the boundary the live tail ALSO uses to render the
-    // settled prefix as its own keyed Turn. Keeping the two in lockstep
-    // is what makes the freeze handoff a pure cache hit (zero row shift).
-    const std::size_t cut =
-        ui::freezable_prefix_cut(m, run_start, run_end);
-    if (cut <= run_start) return;   // nothing freezable yet
-
-    // The frozen entry is a CONTINUATION iff this run's header was
-    // already committed to frozen by an earlier mid-run freeze this
-    // turn. The FIRST mid-run freeze of a run carries the header; every
-    // subsequent one continues it. Either way the live remainder is a
-    // continuation (header already frozen), so frozen_midrun is set.
-    const bool entry_continuation = m.ui.frozen_midrun;
-
-    // Leading gap: same discipline as freeze_range — a gap before the
-    // entry unless it's the very first frozen row OR it's a continuation
-    // (continuations have no inter-turn seam; the header turn owns the
-    // gap above it).
-    if (!m.ui.frozen.empty() && !entry_continuation) {
-        push_frozen(m, gap_row(), kGapRows);
-    }
-
-    // Turn number mirrors what the live tail showed for this run
-    // (frozen_turn + 1) so a continuation freeze that splits later does
-    // not renumber. We do NOT ++frozen_turn: the run is unfinished.
-    int turn_num = m.ui.frozen_turn + 1;
-    ui::FrozenBuildScope frozen_scope;   // full body in the frozen snapshot
-    auto cfg = ui::turn_config_for_assistant_run(
-        run_start, cut, turn_num, m, entry_continuation);
-
-    // Hash key identical in shape to freeze_range's so the freeze
-    // handoff from the live tail is a cache HIT (same key the live tail
-    // stamped while the prefix waited). Built through the shared helper
-    // so a future key-shape edit can't desync the three sites.
-    cfg.hash_id = ui::assistant_run_hash_id(
-        m, run_start, cut, /*continuation=*/entry_continuation);
-    push_frozen(m, maya::Turn{std::move(cfg)}.build(),
-                estimate_run_rows(m, run_start, cut));
-
-    m.ui.frozen_through = cut;
-    m.ui.frozen_midrun  = true;   // remainder of this run is a continuation
-}
-
-namespace {
-
-// Find the last markdown block boundary (a blank line, "\n\n") in
-// `s[0..limit)` that is NOT inside an open ``` code fence. Returns the
-// byte offset just past the boundary (start of the next block), or 0 if
-// no safe split point exists. Scanning fence state from the start is
-// O(limit); `limit` is bounded by the committed prefix we're about to
-// move out of the live tail (it happens at most once per ~budget rows of
-// growth), so this is not a per-frame O(body) tax.
-//
-// Out-params describe the state at the returned boundary so the caller
-// can handle the inside-a-fence fallback (see freeze_streaming_text_prefix):
-//   • `fence_open`   — true iff `s[0..limit)` ends INSIDE an open fence
-//                      with no clean boundary found (best stayed 0).
-//   • `fence_marker` — the exact opening-fence line (e.g. "```python" or
-//                      "~~~") so a fallback split can close + reopen the
-//                      same fence kind / info string. Empty when not in a
-//                      fence.
-//   • `last_line_nl` — byte offset just past the last newline at or before
-//                      `limit` (a fence-internal split point). 0 if none.
-std::size_t last_safe_block_split(const std::string& s, std::size_t limit,
-                                  bool& fence_open,
-                                  std::string& fence_marker,
-                                  std::size_t& last_line_nl) {
-    if (limit == 0 || limit > s.size()) limit = s.size();
-    bool in_fence = false;
-    std::string open_marker;       // info line of the currently-open fence
-    std::size_t best = 0;          // start-of-next-block offset, fence-closed
-    std::size_t line_start = 0;
-    std::size_t last_nl = 0;
-    for (std::size_t i = 0; i < limit; ) {
-        std::size_t eol = s.find('\n', i);
-        const bool last_line = (eol == std::string::npos || eol >= limit);
-        const std::size_t line_end = last_line ? limit : eol;
-        // A line opening/closing a fence: starts with ``` or ~~~ after
-        // optional leading spaces. Toggling on either bound is enough
-        // for split safety (we only need to know we're between blocks).
-        std::size_t p = line_start;
-        while (p < line_end && (s[p] == ' ' || s[p] == '\t')) ++p;
-        if (line_end - p >= 3
-            && ((s[p] == '`' && s[p+1] == '`' && s[p+2] == '`')
-             || (s[p] == '~' && s[p+1] == '~' && s[p+2] == '~'))) {
-            if (!in_fence) {
-                // Opening fence: remember the whole line (marker + info
-                // string) so a fallback close/reopen reproduces it.
-                open_marker.assign(s, line_start, line_end - line_start);
-            }
-            in_fence = !in_fence;
-            if (!in_fence) open_marker.clear();
-        }
-        // Blank line = block boundary. Only a candidate split when the
-        // fence is closed at this point (splitting mid-fence would
-        // render two broken code blocks).
-        if (p == line_end && !in_fence) {
-            // The boundary is the byte just past this blank line's
-            // newline, i.e. the start of the next block's first line.
-            best = last_line ? line_end : (eol + 1);
-        }
-        if (!last_line) last_nl = eol + 1;
-        if (last_line) break;
-        i = eol + 1;
-        line_start = i;
-    }
-    fence_open   = in_fence && best == 0;
-    fence_marker = in_fence ? open_marker : std::string{};
-    last_line_nl = last_nl;
-    return best;
-}
-
-} // namespace
-
-void freeze_streaming_text_prefix(Model& m) {
-    auto& msgs = m.d.current.messages;
-    if (msgs.empty()) return;
-
-    // The active sub-turn is the back message. Only split a PURE-TEXT
-    // assistant tail: no tool_calls (those are handled by
-    // freeze_settled_subturns), and the growing body lives in
-    // streaming_text. A message that already has settled `text` is a
-    // mid-run continuation whose prior prefix is settled but not yet
-    // frozen as its own message — we still only split the streaming
-    // portion so the freeze stays append-only.
-    Message& active = msgs.back();
-    if (active.role != Role::Assistant) return;
-    if (!active.tool_calls.empty()) return;
-    if (active.streaming_text.empty()) return;
-
-    // Keep a trailing window LIVE so the actively-revealing edge keeps
-    // animating and we never split inside the block the model is still
-    // writing. This window must stay SMALL: if the live (unfrozen)
-    // portion grows past one viewport it overflows into committed
-    // scrollback, and the markdown widget's per-block reveal can shift a
-    // blank line by ±1 row as a `\n\n` boundary commits — rewriting a
-    // row already emitted to native scrollback (a duplication ghost).
-    // Splitting early keeps the oscillating region on-screen (mutable),
-    // so the seam stays clean.
-    //
-    // Width-aware: "well under a viewport of prose" is a ROW budget, not
-    // a fixed byte count — 1 KB of prose is ~13 rows at 80 cols but ~25+
-    // rows at 40 cols. Size the live tail off the real wrap width so a
-    // narrow terminal doesn't let the live region silently exceed a
-    // viewport. ~half a screen of rows, floored at 1 KB.
-    const int cols = estimate_wrap_cols();
-    const std::size_t kLiveTailBytes = std::max<std::size_t>(
-        1024,
-        static_cast<std::size_t>(cols) *
-            std::max<std::size_t>(8, frozen_row_budget() / 4));
-    if (active.streaming_text.size() <= kLiveTailBytes) return;
-    const std::size_t scan_limit = active.streaming_text.size() - kLiveTailBytes;
-
-    // Split as soon as there's a committed block beyond the live window.
-    // The freeze handoff is a cache hit (same hash key the live tail
-    // stamped), so frequent small splits are cheap; the cost we're
-    // avoiding is a tall live re-layout every frame. A modest floor
-    // avoids churning on tiny prefixes.
-    constexpr std::size_t kMinSplitBytes = 512;
-    if (scan_limit < kMinSplitBytes) return;
-
-    // No-split scan throttle. A single giant unbreakable block (one huge
-    // fence with no internal newline yet, or a no-blank-line table)
-    // makes last_safe_block_split return 0 — and re-scanning the whole
-    // growing streaming_text from byte 0 every Tick is O(n) per tick =
-    // O(n²) over the block. If the LAST scan found no split, skip the
-    // re-scan until the buffer has grown by at least kMinSplitBytes more
-    // (enough that a new line/boundary could plausibly have arrived). A
-    // shrink (prefix carved, or message rolled over) resets the memo.
-    if (active.streaming_text.size() < m.ui.split_scan_nosplit_size)
-        m.ui.split_scan_nosplit_size = 0;
-    if (m.ui.split_scan_nosplit_size != 0
-        && active.streaming_text.size()
-               < m.ui.split_scan_nosplit_size + kMinSplitBytes)
-        return;
-
-    bool        fence_open = false;
-    std::string fence_marker;
-    std::size_t last_line_nl = 0;
-    std::size_t split = last_safe_block_split(active.streaming_text, scan_limit,
-                                              fence_open, fence_marker,
-                                              last_line_nl);
-
-    // Fence fallback. A single giant code block ("write the whole file")
-    // has NO blank-line boundary outside an open fence, so the clean
-    // split above returns 0 and the entire block stays live — re-laid-out
-    // every frame, the exact unbounded cost this function exists to bound
-    // and the content shape most likely to be huge. When we're stuck
-    // inside one fence and the scan window is well past a viewport, split
-    // at the last fence-internal newline and CLOSE + REOPEN the fence:
-    // the frozen prefix gets a synthetic closing marker so it renders as
-    // a complete code block, and the live tail is re-seeded with the same
-    // opening marker so its remaining lines keep rendering as that same
-    // language. Content the user sees is identical; only an internal
-    // fence boundary is synthesized at a line break.
-    std::string reopen_prefix;   // prepended to the live tail's text
-    bool fence_fallback = false;
-    if (split == 0 && fence_open && !fence_marker.empty()
-        && last_line_nl >= kMinSplitBytes) {
-        // Synthesize a CLOSING fence that the CommonMark engine will
-        // actually accept. Per cm_block.cpp append_to_leaf, a line closes
-        // a fence iff its leading fence-char run length is >= the OPENING
-        // fence's length and the rest of the line is blank. So the close
-        // must echo the opening run length, not a fixed 3 — a model that
-        // opened with ````` ```` ````` (4+ backticks, used when the code
-        // itself contains a triple-backtick) would NOT be closed by
-        // ``` and the stray marker would render as code content.
-        const char fc = (fence_marker.find('~') != std::string::npos) ? '~' : '`';
-        std::size_t run = 0;
-        while (run < fence_marker.size() && fence_marker[run] == fc) ++run;
-        if (run < 3) run = 3;
-        std::string close_marker(run, fc);
-        split          = last_line_nl;
-        reopen_prefix  = fence_marker + "\n";
-        fence_fallback = true;
-        // The committed prefix needs the closing marker appended below.
-        fence_marker   = std::move(close_marker);
-    }
-
-    // Last-resort line split for an UNBREAKABLE non-fence block. A long
-    // table (or any single block with no internal blank-line boundary)
-    // has no clean split point, so the clean scan above returns 0 and
-    // the whole block stays LIVE. Once that live block grows past one
-    // viewport it overflows into committed native scrollback, and the
-    // markdown widget's per-row reveal shifts a row by ±1 as each new
-    // line lands — rewriting a row already emitted to scrollback. That
-    // is the duplication ghost (e.g. a streaming table whose header
-    // re-appears one screen up, overlapping the prior turn). agent_session
-    // never hits this because it never carves a mid-stream prefix; we
-    // must, to bound per-frame relayout cost on huge replies. So when
-    // we're NOT in a fence, have no clean boundary, and the live region
-    // is well past a viewport, split at the last newline before the scan
-    // limit. The frozen prefix holds whole lines (a shorter but valid
-    // block); the live remainder keeps the trailing lines. Briefly a
-    // table's continuation rows render un-tabled in the small live tail
-    // until settle re-renders the whole message from msg.text — a far
-    // milder artifact than rewriting committed scrollback.
-    if (split == 0 && !fence_open && last_line_nl >= kMinSplitBytes) {
-        split = last_line_nl;
-    }
-
-    if (split == 0) {
-        // No safe boundary yet (still one short/unbreakable block).
-        // Memo the size so the next Tick skips re-scanning until the
-        // buffer grows by another kMinSplitBytes.
-        m.ui.split_scan_nosplit_size = active.streaming_text.size();
-        return;
-    }
-
-    // A split landed — clear the throttle so the next block scans freely.
-    m.ui.split_scan_nosplit_size = 0;
-
-    // Carve the committed prefix out of the active tail. If this is the
-    // FIRST split of this sub-turn, `active.text` is empty and the
-    // prefix is purely streamed bytes. On a later split `active.text`
-    // may hold an earlier settled sub-turn's body (text→tool→text run);
-    // that body belongs to a DIFFERENT logical message already, so we
-    // never fold it here — we only move streaming_text bytes.
-    std::string prefix_body = active.streaming_text.substr(0, split);
-    active.streaming_text.erase(0, split);
-    if (fence_fallback) {
-        // Close the fence in the frozen half so it parses as a complete
-        // code block, and reopen it in the live half so the remaining
-        // lines keep rendering as that same language.
-        prefix_body += fence_marker;   // synthetic closing ``` / ~~~
-        prefix_body += '\n';
-        active.streaming_text.insert(0, reopen_prefix);
-    }
-
-    // The new settled message carries the committed prefix as `text`
-    // (settled). CRITICAL for scrollback safety: the settled prefix
-    // INHERITS the active message's ORIGINAL MessageId, and the live
-    // remainder gets a FRESH MessageId. This mirrors agent_session
-    // exactly: there, TextBlockStop collapses the live StreamingMarkdown
-    // into a static Element and resets `m.md = StreamingMarkdown{}` so
-    // the remainder streams from byte 0 in a brand-new widget — never a
-    // divergent reparse.
-    //
-    // Why the prefix keeps the id (and the suffix is fresh), not the
-    // other way around: the md widget is keyed by (ThreadId, MessageId).
-    // The active widget has ALREADY rendered the prefix's rows, and once
-    // the live tail overflowed a viewport those rows are committed to
-    // immutable native scrollback. If the SUFFIX kept the id, that same
-    // widget would be fed the shortened "ABCDEF"->"DEF" source — a
-    // divergent reparse that re-blits cells at shifted positions over
-    // the committed rows (the duplication ghost). By giving the prefix
-    // the original id, its widget keeps exactly the bytes it already
-    // rendered (now settled, frozen to a byte-identical static Element —
-    // no divergence), and the suffix's FRESH id gets a brand-new widget
-    // that streams "DEF" from byte 0, monotonically, never rewriting a
-    // committed row. Inserted just before the active tail so the run
-    // reads [settled-text][growing-text].
-    Message settled;
-    settled.role      = Role::Assistant;
-    settled.id        = active.id;          // prefix keeps the rendered widget
-    settled.text      = std::move(prefix_body);
-    settled.timestamp = active.timestamp;
-    active.id         = new_message_id();   // suffix streams fresh from byte 0
-    // Insert before back(): msgs.end() - 1.
-    msgs.insert(msgs.end() - 1, std::move(settled));
-
-    // The settled prefix is now its own terminal (no tools, has text)
-    // sub-turn in the live tail. freeze_settled_subturns will freeze it
-    // on this same tick (called right after this in the Tick handler),
-    // collapsing it into the zero-copy hash-keyed frozen prefix and
-    // leaving only the small live tail to re-paint each frame.
-}
+// NOTE: the mid-stream carve machinery that used to live here
+// (freeze_settled_subturns, last_safe_block_split,
+// freeze_streaming_text_prefix) has been DELETED, not just unwired.
+// agent_session — the reference implementation with provably zero
+// scrollback corruption — has exactly ONE freeze instant per turn
+// (MessageStop). Every mid-stream carve stamped a frozen Turn whose
+// hash maya's component cache had not seen on the previous live
+// frame, forcing a cache-miss re-emit over committed scrollback —
+// the corruption these functions repeatedly reintroduced each time
+// someone re-wired them "for performance". Per-frame cost is bounded
+// by maya's hash-keyed component cache on a STABLE live-tail hash
+// (verified flat in o1_probe / long_session_bench), so there is
+// nothing left for a carve to buy. Do not bring them back.
 
 void ensure_frozen_width(Model& m, int term_cols) {
     if (term_cols < 1) return;                 // degenerate ioctl — keep stamps
@@ -1010,8 +695,6 @@ void clear_frozen(Model& m) {
     m.ui.frozen_cols    = 0;   // unstamped — next push re-stamps at live width
     m.ui.frozen_through = 0;
     m.ui.frozen_turn    = 0;
-    m.ui.frozen_midrun  = false;
-    m.ui.split_scan_nosplit_size = 0;
     m.ui.pending_settle_freeze   = false;
 }
 
@@ -1246,127 +929,6 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     // dropped rows all overflowed (we retain >= term_h on screen), so
     // commit_inline_prefix's clamp to (prev_rows - term_h) never bites
     // and the committed boundary lands exactly at the new tree's top.
-    return maya::Cmd<Msg>::commit_scrollback(
-        static_cast<int>(removed_rows));
-}
-
-maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
-    // Mid-run-safe trim. The standard trim_frozen_if_oversized can drop
-    // an entry that is still ON SCREEN (its rows haven't overflowed the
-    // viewport yet) — mid-run that re-emits already-committed scrollback
-    // rows at a shifted position and the turn appears twice (the
-    // duplication bug documented in tool.cpp). This variant is the
-    // conservative version that runs DURING an active run: it only drops
-    // entries that are provably above the viewport.
-    //
-    // Safety margin: keep at least kViewportKeepRows of the MOST RECENT
-    // frozen content on the canvas, plus the live tail maya renders on
-    // top of frozen. For a dropped entry to be off-screen, the kept
-    // frozen rows + live tail must exceed term_h; keeping >= term_h of
-    // frozen alone already guarantees the oldest KEPT entry's top sits
-    // at-or-above the viewport top, so everything dropped is provably in
-    // native scrollback. We keep ~2x viewport (a cushion over the 1x
-    // floor) so the canvas stays near a single screen during a long run
-    // — per-frame cost (clear + verify + blit) stays flat and minimal —
-    // while never racing the visible region.
-    //
-    // PROOF DEPENDS ON: frozen_rows[k] never OVER-counting an entry's
-    // real rendered height AT THE CURRENT WIDTH. The keep-loop stops
-    // once the stored sum of kept entries reaches kViewportKeepRows; if
-    // a stored count were high, the loop would stop early and the kept
-    // entries' REAL rows could fall short of a viewport, leaving a
-    // dropped entry on screen (the duplication ghost). The row estimate
-    // is now DISPLAY-COLUMN accurate (maya::string_width, one-sided
-    // under), so a fresh entry never over-counts. The one residual
-    // drift is a wide→narrow→... resize: frozen_rows[] was stamped at
-    // the width when the entry froze, and a narrow resize makes the real
-    // rows GROW beyond the stored count (stored now UNDER-counts — the
-    // safe direction, keeps more). A widen makes stored OVER-count; the
-    // margin below carries a 2x cushion to absorb that until the entry
-    // is evicted and the next freeze re-estimates at the live width.
-    //
-    // Capture ONE term_dims() snapshot and derive both the keep-margin
-    // (rows) and — implicitly, via the stamped frozen_rows — the row
-    // counts from it, so a resize landing mid-function can't desync the
-    // "provably above the viewport" proof.
-    const TermDims dims = term_dims();
-    const int term_h = dims.rows;
-    // Re-measure the prefix to the live width if a resize moved it since the
-    // counts were stamped, using the SAME dims snapshot the keep-margin math
-    // below derives from. The "provably above the viewport" proof depends on
-    // frozen_rows[k] matching the wire; a stale post-widen stamp would let
-    // the keep-loop stop early (dropping an on-screen entry) and the commit
-    // over-count — both strand a duplicate. Healing the width first makes the
-    // proof hold by construction.
-    ensure_frozen_width(m, dims.cols);
-    // Keep ~2 viewports on the canvas. With the byte-based multibyte
-    // over-count eliminated (the estimate now wraps on display columns),
-    // the old 3x cushion that absorbed a worst-case ~2x byte inflation is
-    // no longer needed; 2x covers the residual wide→narrow resize drift
-    // (stored frozen_rows under a now-narrower width) while bounding the
-    // canvas tighter — per-frame clear+layout+blit stays flat.
-    const std::size_t kViewportKeepRows =
-        static_cast<std::size_t>(std::max(96, term_h * 2));
-
-    // Only worth doing once the canvas is meaningfully over the keep
-    // margin — trimming churns maya's inline diff (commit_scrollback_
-    // overflow + a shorter frozen tree), so we don't want to fire it on
-    // every settled sub-turn. Require the prefix to exceed the keep
-    // margin by at least one viewport before acting.
-    if (m.ui.frozen_row_total <= kViewportKeepRows + static_cast<std::size_t>(term_h))
-        return maya::Cmd<Msg>::none();
-
-    // Walk back from the newest entry, summing rows. The first entry
-    // whose inclusion pushes the running total past kViewportKeepRows is
-    // the OLDEST entry we must keep — everything before it is above the
-    // viewport and safe to drop. Always keep at least the 2 most recent
-    // entries (the active run's header + current sub-turn).
-    std::size_t kept_rows = 0;
-    std::size_t keep_from = m.ui.frozen.size();   // index of oldest kept entry
-    for (std::size_t k = m.ui.frozen.size(); k-- > 0; ) {
-        kept_rows += static_cast<std::size_t>(m.ui.frozen_rows[k]);
-        keep_from = k;
-        if (kept_rows >= kViewportKeepRows) break;
-    }
-
-    // Belt-and-suspenders: keep ONE extra entry below the row-margin
-    // cut. frozen_rows[k] is now maya's REAL measured height (push_frozen
-    // measures the built Element), so the keep-loop margin already matches
-    // the wire exactly — the keystone fix. This extra entry is pure
-    // defense-in-depth against the one residual: a wide→narrow resize
-    // between freeze and trim re-wraps an entry taller than its stamped
-    // height (stamped UNDER-counts — safe, keeps more; this keeps one more
-    // still). Cheap: one extra blitted entry, evicted next trim once it
-    // has truly scrolled off.
-    if (keep_from > 0) --keep_from;
-
-    // Never drop the last 2 entries no matter what.
-    if (m.ui.frozen.size() >= 2 && keep_from > m.ui.frozen.size() - 2)
-        keep_from = m.ui.frozen.size() - 2;
-
-    const std::size_t drop = keep_from;
-    if (drop == 0) return maya::Cmd<Msg>::none();
-
-    // Drop the front in lockstep, then strip any leading separator the
-    // drop exposed (a turn's leading gap is its own entry pushed before
-    // it). Those rows were already above the viewport, so stripping them
-    // keeps the "provably off-screen" proof intact. Both removals feed
-    // the exact commit count below.
-    std::size_t removed_rows = pop_front_frozen(m, drop);
-    removed_rows += pop_front_frozen_leading_separators(m);
-
-    // Commit EXACTLY the rows this trim dropped — same discipline as
-    // trim_frozen_if_oversized — NOT commit_scrollback_overflow(), which
-    // releases down to one viewport (prev_rows - term_h) regardless of
-    // how much this trim actually removed. Production callers: tool.cpp
-    // (after each tool settles, on the ToolExecOutput cadence) and
-    // meta.cpp (Tick, after the per-tick freeze) — both mid-run paths.
-    // The exact row-counted commit makes it SAFE BY CONSTRUCTION on
-    // those paths: commit_inline_prefix clamps the count to (prev_rows -
-    // term_h), so a row still in the viewport can never be committed and
-    // no duplicate can be stranded. The keep margin already guarantees
-    // >= term_h rows stay on screen, so every dropped row overflowed and
-    // the clamp never bites.
     return maya::Cmd<Msg>::commit_scrollback(
         static_cast<int>(removed_rows));
 }

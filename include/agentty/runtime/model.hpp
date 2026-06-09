@@ -246,19 +246,6 @@ struct Model {
         // for its display numbers.
         int                 frozen_turn = 0;
 
-        // True when frozen_through landed in the MIDDLE of an Assistant
-        // run — i.e. the freezer committed the completed leading sub-
-        // turns of a still-active run (freeze_settled_subturns) while
-        // its tail keeps streaming. The live tail must then render the
-        // remaining sub-turns as a CONTINUATION (rail only, no repeated
-        // header / turn number / inter-turn gap) so the frozen prefix
-        // and the live remainder read as one turn. frozen_turn is NOT
-        // advanced for a mid-run freeze (the run isn't finished), so
-        // the live remainder still computes the same turn number.
-        // Reset to false whenever a freeze completes a whole run or the
-        // run finishes (freeze_through at idle).
-        bool                frozen_midrun = false;
-
         // Deferred settle-freeze. The post-stream settle (finish() on the
         // StreamingMarkdown) flips the md widget's build shape + prefix
         // generation, so the post-finish element tree's inner
@@ -274,17 +261,6 @@ struct Model {
         // freezes the byte-and-hash-identical tree (cache HIT, no
         // re-emit), and clears the flag.
         bool                pending_settle_freeze = false;
-
-        // Split-scan throttle for freeze_streaming_text_prefix. When a
-        // scan finds NO safe block boundary (a single giant fence /
-        // unbreakable block still accumulating), re-scanning the whole
-        // growing streaming_text from byte 0 every Tick is O(n) per tick
-        // = O(n²) over the block. Record the streaming_text size at the
-        // last no-split scan; the next attempt skips the scan until the
-        // buffer has grown by a meaningful step. Reset to 0 whenever a
-        // split lands or the live tail resets (a smaller streaming_text
-        // than the memo means a prefix was carved or the message rolled).
-        std::size_t         split_scan_nosplit_size = 0;
 
         // One-shot hint to maya's run loop: "the next view() result
         // contains a heavy frozen scrollback that hasn't been painted

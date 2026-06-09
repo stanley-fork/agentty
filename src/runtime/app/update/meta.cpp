@@ -127,10 +127,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // No host-side pacing: agentty does NOT animate the stream.
             // The view feeds text + streaming_text + pending_stream in
             // full to the StreamingMarkdown widget, and maya's reveal_fx
-            // owns the live-edge animation. This move exists only so the
-            // bytes accumulate in streaming_text, where the freeze /
-            // trim pipeline (freeze_streaming_text_prefix et al.) can see
-            // a committed prefix to settle. It is a plain append; the
+            // owns the live-edge animation. It is a plain append; the
             // old rate / backlog / burst-flush / wire-quiet smoother was
             // a second pacing clock that beat against the widget's and
             // produced the "stuck then burst" stutter — removed.

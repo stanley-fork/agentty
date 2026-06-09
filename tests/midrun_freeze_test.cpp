@@ -1,9 +1,8 @@
-// midrun_freeze_test — correctness for freeze_settled_subturns.
-//
-// The mid-run freeze splits an active auto-pilot run: completed leading
-// sub-turns move into m.ui.frozen (zero-copy, cached) while the active
-// tail stays live. This must be VISUALLY SEAMLESS — the frozen prefix
-// and the live remainder read as ONE turn:
+// midrun_freeze_test — correctness for the single-freeze discipline
+// (agent_session-style): the whole active run stays LIVE; it freezes
+// into m.ui.frozen exactly once, at settle (finalize_turn). The frozen
+// transcript and the live render must be VISUALLY SEAMLESS — one turn
+// reads as ONE turn:
 //
 //   • exactly ONE speaker header for the whole turn (the frozen prefix
 //     carries it; the live remainder is a continuation, header
@@ -122,8 +121,9 @@ static ToolUse settled_edit(const std::string& tag) {
 }
 
 // Build an active auto-pilot run: User, then N assistant sub-turns each
-// with one settled edit, plus a streaming tail. Freeze the User and run
-// the mid-run freeze (as ToolExecOutput would).
+// with one settled edit, plus a streaming tail. Only the User is frozen
+// (submit-time freeze_through); the WHOLE active run stays live — the
+// agent_session discipline. The run freezes once, at settle.
 static Model active_run(int n) {
     Model m;
     m.d.current.id = agentty::ThreadId{"midrun"};
@@ -141,20 +141,21 @@ static Model active_run(int n) {
 
     agentty::app::detail::clear_frozen(m);
     agentty::app::detail::freeze_through(m, 1);          // User
-    agentty::app::detail::freeze_settled_subturns(m);    // settled prefix
     return m;
 }
 
-// 1. Only the active tail stays live; the rest is frozen.
+// 1. During an active run NOTHING beyond the User is frozen (the whole
+//    run is live, agent_session-style); at settle the run freezes whole.
 static void test_live_bounded() {
     Model m = active_run(40);
-    const std::size_t live = m.d.current.messages.size() - m.ui.frozen_through;
-    CHECK(live <= 2,
-          "more than the active sub-turn stayed live after mid-run freeze");
-    CHECK(m.ui.frozen_midrun,
-          "frozen_midrun not set after a mid-run freeze");
-    CHECK(m.ui.frozen_through > 1,
-          "frozen_through didn't advance past the settled prefix");
+    CHECK(m.ui.frozen_through == 1,
+          "mid-run freeze fired during an active run — the single freeze "
+          "site is settle (finalize_turn)");
+    // Settle: stream finished, the deferred settle-freeze fires.
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+    CHECK(m.ui.frozen_through == m.d.current.messages.size(),
+          "settle freeze didn't freeze the whole run");
 }
 
 // 2. Every completed sub-turn renders in full (nothing hidden).
@@ -185,13 +186,16 @@ static void test_single_turn_header() {
           "turn number appears != once \u2014 continuation seam duplicated header");
 }
 
-// 4. Compare against a NON-split render of the same logical turn: build
-//    the same messages but DON'T mid-run freeze (whole run live). The
-//    set of content lines must match \u2014 the split changes WHERE rows
-//    render (frozen vs live), never WHICH rows.
+// 4. Compare a SETTLED+frozen render of the run against the same
+//    messages rendered fully live: the freeze changes WHERE rows render
+//    (frozen vs live), never WHICH rows.
 static void test_split_preserves_content() {
     constexpr int N = 15;
     Model split = active_run(N);
+    // Settle + freeze whole (production path).
+    split.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(split,
+        split.d.current.messages.size());
 
     Model whole;
     whole.d.current.id = agentty::ThreadId{"whole"};
@@ -221,66 +225,42 @@ static void test_split_preserves_content() {
     CHECK(both == N, "split and whole renders disagree on content presence");
 }
 
-// 5. agent_session roll-up parity, corrected. A settled tool batch is
-//    frozen mid-run so its big write/edit card doesn't linger live
-//    re-rendering its full body. BUT it must NOT be frozen while it is
-//    still the mutable back message (a trailing "Done — …" text block
-//    can still append to the SAME message, and freezing then snapshots
-//    a stale card + advances frozen_through onto a message freeze_range
-//    can roll back, re-pushing the card as a fresh head — the duplicated
-//    write/edit the user sees). It freezes the instant cmd_factory has
-//    pushed the continuation placeholder after it (no longer the back).
+// 5. The freeze gate never freezes a non-terminal run: with a Running
+//    tool in the tail, freeze_through stops at the run start; once the
+//    run is fully terminal it freezes whole. (run_is_freezable — the
+//    only mid-run safety the single-freeze discipline still needs.)
 static void test_trailing_tool_batch_freezes() {
     Model m;
     m.d.current.id = agentty::ThreadId{"trailing"};
     Message u; u.role = Role::User; u.text = "write a file";
     m.d.current.messages.push_back(std::move(u));
-    // ONE assistant sub-turn with a settled tool, still the live back
-    // (exactly the state at ToolExecOutput, BEFORE the continuation
-    // placeholder is pushed). It must stay LIVE — freezing the mutable
-    // back is the duplicated-card bug.
     Message a; a.role = Role::Assistant;
-    a.tool_calls.push_back(settled_edit("only"));
+    ToolUse running = settled_edit("only");
+    running.status = ToolUse::Running{steady_clock::now(), ""};
+    a.tool_calls.push_back(std::move(running));
     m.d.current.messages.push_back(std::move(a));
     m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
 
     agentty::app::detail::clear_frozen(m);
-    agentty::app::detail::freeze_through(m, 1);          // User frozen
-    agentty::app::detail::freeze_settled_subturns(m);    // back is mutable: no-op
-
+    // Even an (erroneous) whole-thread freeze attempt must stop at the
+    // non-terminal run — run_is_freezable is the gate.
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
     CHECK(m.ui.frozen_through == 1,
-          "froze the mutable back tool message — the duplicated-card bug");
+          "froze a run with a Running tool — spinner pinned in scrollback");
 
-    // Now cmd_factory's continuation placeholder lands after it. The
-    // settled tool message is no longer the back, so it freezes.
-    Message cont; cont.role = Role::Assistant;
-    m.d.current.messages.push_back(std::move(cont));
-    agentty::app::detail::freeze_settled_subturns(m);
-
-    CHECK(m.ui.frozen_through == 2,
-          "settled tool batch did NOT freeze once a continuation followed it");
-    CHECK(m.ui.frozen_midrun,
-          "frozen_midrun not set — the continuation would repaint a header");
-    // The body must still be present (frozen, not dropped).
+    // The tool settles; the turn finishes; the settle freeze takes all.
+    agentty::app::detail::with_live_tool(
+        m, ToolCallId{"edit_only"}, [](ToolUse& t) {
+            auto now = steady_clock::now();
+            t.status = ToolUse::Done{now - milliseconds{5}, now, "edited"};
+        });
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+    CHECK(m.ui.frozen_through == m.d.current.messages.size(),
+          "settled run did not freeze at the settle boundary");
     auto txt = render_dump(m);
     CHECK(txt.find("src/only.cpp") != std::string::npos,
           "frozen tool batch body vanished from the render");
-
-    // When the stream is NOT active, the clamp must still hold (no
-    // continuation is coming, so freeze_through owns the final freeze).
-    Model idle;
-    idle.d.current.id = agentty::ThreadId{"idle"};
-    Message u2; u2.role = Role::User; u2.text = "write a file";
-    idle.d.current.messages.push_back(std::move(u2));
-    Message a2; a2.role = Role::Assistant;
-    a2.tool_calls.push_back(settled_edit("only"));
-    idle.d.current.messages.push_back(std::move(a2));
-    idle.s.phase = agentty::phase::Idle{};
-    agentty::app::detail::clear_frozen(idle);
-    agentty::app::detail::freeze_through(idle, 1);
-    agentty::app::detail::freeze_settled_subturns(idle);
-    CHECK(idle.ui.frozen_through == 1,
-          "idle run froze the last sub-turn via the active-only path");
 }
 
 // Return the first NON-BLANK rendered row, or "" if every row is blank.
@@ -470,69 +450,10 @@ static void test_trim_commits_exact_dropped_rows() {
     }
 }
 
-// 9. trim_frozen_above_viewport (mid-run-safe variant) must ALSO commit
-//    exactly the rows it dropped — NOT commit_scrollback_overflow. Wired
-//    into the mid-run paths (tool.cpp after each tool settles, meta.cpp on
-//    Tick), where a row-exact commit is safe by construction: commit_
-//    inline_prefix clamps the count to (prev_rows - term_h), so a still-
-//    visible row can never be committed and no duplicate can strand.
-static void test_trim_above_viewport_commits_exact() {
-    Model m;
-    m.d.current.id = agentty::ThreadId{"trimabove"};
-    // Many tall write turns so frozen_row_total blows well past the
-    // ~1.5-viewport keep margin and the above-viewport trim fires.
-    for (int t = 0; t < 8; ++t) {
-        Message u; u.role = Role::User;
-        u.text = "write a file (" + std::to_string(t) + ")";
-        m.d.current.messages.push_back(std::move(u));
-        Message a; a.role = Role::Assistant;
-        agentty::ToolUse tw;
-        tw.id   = agentty::ToolCallId{"a" + std::to_string(t)};
-        tw.name = agentty::ToolName{"write"};
-        std::string content;
-        for (int i = 0; i < 80; ++i)
-            content += "line " + std::to_string(i) + ": file body content\n";
-        tw.args = {{"file_path", "/tmp/a" + std::to_string(t) + ".txt"},
-                   {"content", content}};
-        auto now = std::chrono::steady_clock::now();
-        tw.status = agentty::ToolUse::Done{
-            now - std::chrono::milliseconds{5}, now, "Created"};
-        a.tool_calls.push_back(std::move(tw));
-        m.d.current.messages.push_back(std::move(a));
-    }
-    // Leave an active streaming tail so it models a mid-run state (the
-    // only context this trim was ever meant to run in).
-    Message tail; tail.role = Role::Assistant; tail.streaming_text = "...";
-    m.d.current.messages.push_back(std::move(tail));
-    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
-    agentty::app::detail::clear_frozen(m);
-    agentty::app::detail::freeze_through(m, m.d.current.messages.size() - 1);
-
-    const std::size_t rows_before    = m.ui.frozen_row_total;
-    const std::size_t entries_before = m.ui.frozen.size();
-
-    auto cmd = agentty::app::detail::trim_frozen_above_viewport(m);
-
-    const std::size_t dropped_rows = rows_before - m.ui.frozen_row_total;
-    CHECK(entries_before > m.ui.frozen.size(),
-          "above-viewport trim dropped nothing despite a tall prefix");
-    CHECK(dropped_rows > 0, "above-viewport trim dropped entries but no rows");
-
-    using Cmd = maya::Cmd<agentty::Msg>;
-    const auto* exact = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
-    const auto* overflow =
-        std::get_if<Cmd::CommitScrollbackOverflow>(&cmd.inner);
-    CHECK(overflow == nullptr,
-          "above-viewport trim used commit_scrollback_overflow() — must use "
-          "row-exact commit_scrollback(removed) to stay scrollback-safe");
-    CHECK(exact != nullptr,
-          "above-viewport trim did not return a row-counted commit_scrollback");
-    if (exact) {
-        CHECK(static_cast<std::size_t>(exact->rows) == dropped_rows,
-              "above-viewport trim committed a row count != the rows it "
-              "dropped");
-    }
-}
+// 9. (deleted) trim_frozen_above_viewport was the mid-run-safe trim for
+//    the mid-run carve cadence. Both are gone: the single freeze site is
+//    settle (finalize_turn), so the only trim is trim_frozen_if_oversized
+//    — covered by test 8.
 
 // 10. Output-elided tools (bash, read, grep, …) render a fixed head/tail
 //     budget, NOT their full output. The frozen_rows estimate must track
@@ -592,7 +513,6 @@ int main() {
     test_rehydrate_top_is_header();
     test_trim_no_leading_gap();
     test_trim_commits_exact_dropped_rows();
-    test_trim_above_viewport_commits_exact();
     test_output_elided_tool_row_estimate_matches_render();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) { std::printf("FAILED\n"); return 1; }

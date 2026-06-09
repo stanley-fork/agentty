@@ -165,9 +165,6 @@ const std::vector<Axis>& visual_axes() {
         {"frozen_turn advances", [](Model& m) {
             m.ui.frozen_turn = 7;
         }},
-        {"frozen_midrun toggle", [](Model& m) {
-            m.ui.frozen_midrun = true;
-        }},
         {"model_picker opens", [](Model& m) {
             m.ui.model_picker = agentty::ui::pick::OpenAt{0};
         }},
