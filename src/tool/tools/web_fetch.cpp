@@ -9,6 +9,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <expected>
 #include <sstream>
 #include <string>
@@ -36,6 +37,7 @@ struct WebFetchArgs {
     HttpMethod method;
     std::vector<std::pair<std::string, std::string>> headers;
     std::string display_description;
+    bool allow_jina = true;   // false => skip r.jina.ai SPA fallback for this call
 };
 
 std::expected<WebFetchArgs, ToolError> parse_web_fetch_args(const json& j) {
@@ -44,19 +46,24 @@ std::expected<WebFetchArgs, ToolError> parse_web_fetch_args(const json& j) {
     if (!url_opt)
         return std::unexpected(ToolError::invalid_args("url required"));
     std::string url = *std::move(url_opt);
-    // TLS-only by contract (the tool description says "https only" and
-    // the transport below assumes 443/TLS). Reject anything else here so
-    // the error surfaces at the arg layer with one clear message instead
-    // of passing http:// through to parse_url which rejects it with a
-    // different string.
     if (!url.starts_with("https://"))
         return std::unexpected(ToolError::invalid_args(
             "url must start with https:// (web_fetch is TLS-only)"));
     std::vector<std::pair<std::string, std::string>> hdrs;
+    bool allow_jina = true;
     if (const json* h = ar.raw("headers"); h && h->is_object()) {
         for (auto& [k, v] : h->items()) {
-            if (v.is_string()) hdrs.emplace_back(k, v.get<std::string>());
-            else               hdrs.emplace_back(k, v.dump());
+            std::string lower; lower.reserve(k.size());
+            for (char c : k) lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            std::string val = v.is_string() ? v.get<std::string>() : v.dump();
+            // Sentinel header: caller can disable the SPA fallback for one
+            // request without losing the rest of the args UX. NOT sent on
+            // the wire — stripped here.
+            if (lower == "x-no-jina" || lower == "x-agentty-no-jina") {
+                allow_jina = !(val == "1" || val == "true" || val == "yes");
+                continue;
+            }
+            hdrs.emplace_back(std::move(lower), std::move(val));
         }
     }
     return WebFetchArgs{
@@ -64,6 +71,7 @@ std::expected<WebFetchArgs, ToolError> parse_web_fetch_args(const json& j) {
         parse_method(ar.str("method", "GET")),
         std::move(hdrs),
         ar.str("display_description", ""),
+        allow_jina,
     };
 }
 
@@ -95,6 +103,7 @@ struct ParsedUrl {
     std::string host;
     uint16_t port = 443;
     std::string path = "/";
+    std::string fragment;   // without the leading '#'
 };
 
 std::expected<ParsedUrl, std::string> parse_url(std::string_view url) {
@@ -104,7 +113,15 @@ std::expected<ParsedUrl, std::string> parse_url(std::string_view url) {
     auto slash = url.find('/');
     auto authority = url.substr(0, slash);
     ParsedUrl out;
-    out.path = (slash == std::string_view::npos) ? "/" : std::string{url.substr(slash)};
+    std::string path_and_frag = (slash == std::string_view::npos) ? "/" : std::string{url.substr(slash)};
+    // Split off #fragment (kept off-the-wire — servers ignore it anyway,
+    // and we use it to clip the cleaned output to the right section).
+    if (auto hash = path_and_frag.find('#'); hash != std::string::npos) {
+        out.fragment = path_and_frag.substr(hash + 1);
+        path_and_frag.resize(hash);
+        if (path_and_frag.empty()) path_and_frag = "/";
+    }
+    out.path = std::move(path_and_frag);
     if (auto colon = authority.find(':'); colon != std::string_view::npos) {
         out.host.assign(authority.substr(0, colon));
         try {
@@ -931,7 +948,266 @@ fetch_one(const std::string& url,
     return out;
 }
 
+// ── Drop ToC link-rail runs. ─────────────────────────────────────────
+// A line is a "link-rail" line if it is dominated by a single markdown
+// link and has ≤1 word of connective prose outside it. Three or more
+// such lines in a row are almost always a table-of-contents block: drop
+// them. Single-line links are preserved (they're usually inline
+// references in real prose). Heading lines (#) always preserved.
+std::string drop_link_rail_runs(std::string body) {
+    // Split into lines.
+    std::vector<std::string_view> lines;
+    lines.reserve(body.size() / 40 + 16);
+    size_t i = 0;
+    while (i <= body.size()) {
+        size_t e = body.find('\n', i);
+        if (e == std::string::npos) e = body.size();
+        lines.emplace_back(body.data() + i, e - i);
+        if (e == body.size()) break;
+        i = e + 1;
+    }
+
+    auto is_link_rail = [](std::string_view line) {
+        // Trim.
+        while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
+            line.remove_prefix(1);
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t'))
+            line.remove_suffix(1);
+        if (line.empty() || line.front() == '#') return false;
+        // Must contain `](` AND non-link bytes outside that fragment must
+        // be < 12 chars (counting all chars not in the link text/URL).
+        size_t link_open = line.find('[');
+        if (link_open == std::string_view::npos) return false;
+        size_t link_close = line.find("](", link_open);
+        if (link_close == std::string_view::npos) return false;
+        size_t url_close = line.find(')', link_close + 2);
+        if (url_close == std::string_view::npos) return false;
+        // Bytes outside any `[...](...)` should be <= 8 chars of prose
+        // (separators/bullets like •, -, |, *, digits, whitespace ok).
+        std::string outside;
+        size_t k = 0;
+        bool in_text = false, in_url = false;
+        while (k < line.size()) {
+            char c = line[k];
+            if (!in_text && !in_url && c == '[') { in_text = true; ++k; continue; }
+            if (in_text && c == ']' && k + 1 < line.size() && line[k+1] == '(') {
+                in_text = false; in_url = true; k += 2; continue;
+            }
+            if (in_url && c == ')') { in_url = false; ++k; continue; }
+            if (!in_text && !in_url) outside.push_back(c);
+            ++k;
+        }
+        // Strip separators from outside.
+        int prose_chars = 0;
+        for (char c : outside) {
+            if (c == ' ' || c == '\t' || c == '|' || c == '\xe2'
+                || c == '\xa0' || c == '*' || c == '-' || c == '\xc2')
+                continue;
+            ++prose_chars;
+        }
+        return prose_chars <= 8;
+    };
+
+    // Mark each line as rail/non-rail, then drop runs of ≥3 consecutive
+    // rail lines. Shorter runs (1-2) are kept — inline links in prose.
+    std::vector<bool> rail(lines.size(), false);
+    for (size_t k = 0; k < lines.size(); ++k) rail[k] = is_link_rail(lines[k]);
+
+    std::string out;
+    out.reserve(body.size());
+    for (size_t k = 0; k < lines.size(); ) {
+        if (!rail[k]) {
+            out.append(lines[k].data(), lines[k].size());
+            out.push_back('\n');
+            ++k;
+            continue;
+        }
+        // Measure run length (including blank lines, which often
+        // intersperse the rail without breaking it).
+        size_t run_end = k;
+        while (run_end < lines.size()) {
+            bool empty = true;
+            for (char c : lines[run_end])
+                if (c != ' ' && c != '\t') { empty = false; break; }
+            if (!rail[run_end] && !empty) break;
+            ++run_end;
+        }
+        size_t rail_count = 0;
+        for (size_t j = k; j < run_end; ++j) if (rail[j]) ++rail_count;
+        if (rail_count >= 3) {
+            // Drop the whole run; emit a single ··· marker so the model
+            // sees that content was elided (not silently swallowed).
+            out.append("\n[\xe2\x80\xa6 ");
+            out.append(std::to_string(rail_count));
+            out.append(" link-rail lines elided]\n\n");
+            k = run_end;
+        } else {
+            for (size_t j = k; j < run_end; ++j) {
+                out.append(lines[j].data(), lines[j].size());
+                out.push_back('\n');
+            }
+            k = run_end;
+        }
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == ' '))
+        out.pop_back();
+    return out;
+}
+
+// ── Fragment clipping. ───────────────────────────────────────────────
+// If the URL had `#anchor`, find the heading whose slug matches and
+// keep only that heading + content until the next heading of equal or
+// higher level. Anchor-matching is fuzzy: GitHub/MDN/Wikipedia slugs
+// are heading-text-lowercased with non-alnum collapsed to '-'. We
+// canonicalise both sides the same way.
+std::string slugify(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    bool last_dash = false;
+    for (char c : s) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (uc >= 'A' && uc <= 'Z') uc = uc + 32;
+        bool alnum = (uc >= 'a' && uc <= 'z') || (uc >= '0' && uc <= '9');
+        if (alnum) { out.push_back(static_cast<char>(uc)); last_dash = false; }
+        else if (!last_dash && !out.empty()) { out.push_back('-'); last_dash = true; }
+    }
+    while (!out.empty() && out.back() == '-') out.pop_back();
+    return out;
+}
+
+std::string clip_to_fragment(std::string body, std::string_view fragment) {
+    if (fragment.empty()) return body;
+    std::string want = slugify(fragment);
+    if (want.empty()) return body;
+
+    // Walk lines; find a `# Heading` whose slug == want (or contains it).
+    size_t pos = 0;
+    size_t found = std::string::npos;
+    int found_level = 0;
+    while (pos < body.size()) {
+        size_t eol = body.find('\n', pos);
+        if (eol == std::string::npos) eol = body.size();
+        std::string_view line{body.data() + pos, eol - pos};
+        if (!line.empty() && line.front() == '#') {
+            int level = 0;
+            size_t k = 0;
+            while (k < line.size() && line[k] == '#' && level < 6) { ++level; ++k; }
+            while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+            std::string_view text = line.substr(k);
+            std::string slug = slugify(text);
+            if (slug == want || (slug.find(want) != std::string::npos
+                                 && want.size() >= 4)) {
+                found = pos;
+                found_level = level;
+                break;
+            }
+        }
+        if (eol == body.size()) break;
+        pos = eol + 1;
+    }
+    if (found == std::string::npos) return body;
+
+    // Find the next heading of level <= found_level.
+    size_t scan = body.find('\n', found);
+    if (scan == std::string::npos) return body.substr(found);
+    ++scan;
+    size_t end = body.size();
+    while (scan < body.size()) {
+        size_t eol = body.find('\n', scan);
+        if (eol == std::string::npos) eol = body.size();
+        std::string_view line{body.data() + scan, eol - scan};
+        if (!line.empty() && line.front() == '#') {
+            int level = 0;
+            size_t k = 0;
+            while (k < line.size() && line[k] == '#' && level < 6) { ++level; ++k; }
+            if (level > 0 && level <= found_level) {
+                end = scan;
+                break;
+            }
+        }
+        if (eol == body.size()) break;
+        scan = eol + 1;
+    }
+    return body.substr(found, end - found);
+}
+
+// ── SPA-shell detection. ─────────────────────────────────────────────
+// When the cleaned text is dominated by "Loading…" placeholders, or is
+// suspiciously tiny relative to a heavy <script> count, the page is
+// almost certainly client-rendered and what we have is the empty shell.
+// Heuristic flags:
+//   • cleaned size < 600 chars AND raw size > 50 KB
+//   • ≥3 occurrences of "Loading…" / "Loading..." in the cleaned text
+//   • cleaned size < 2 KB AND raw has >= 8 `<script` opens
+[[nodiscard]] bool looks_like_spa_shell(std::string_view cleaned,
+                                         std::string_view raw)
+{
+    auto count_occurrences = [](std::string_view hay, std::string_view needle) {
+        size_t n = 0, p = 0;
+        while ((p = hay.find(needle, p)) != std::string_view::npos) {
+            ++n; p += needle.size();
+        }
+        return n;
+    };
+    if (cleaned.size() < 600 && raw.size() > 50'000) return true;
+    if (count_occurrences(cleaned, "Loading…") >= 3) return true;
+    if (count_occurrences(cleaned, "Loading...") >= 3) return true;
+    if (cleaned.size() < 2000 && count_occurrences(raw, "<script") >= 8)
+        return true;
+    return false;
+}
+
+// ── SPA fallback via r.jina.ai. ──────────────────────────────────────
+// jina.ai's reader endpoint (https://r.jina.ai/<url>) renders the JS
+// SPA server-side and returns clean markdown. Free, no key required
+// (rate-limited; sufficient for occasional fallback). Used ONLY when
+// the primary fetch yielded a shell AND the user hasn't opted out via
+// the x-no-jina sentinel header OR AGENTTY_NO_JINA=1 env var.
+std::expected<FetchOnce, ToolError>
+fetch_via_jina(const std::string& url)
+{
+    http::Request req;
+    req.method = http::HttpMethod::Get;
+    req.host = "r.jina.ai";
+    req.port = 443;
+    req.path = "/" + url;   // jina accepts the bare URL appended to /
+    req.max_body_bytes = kMaxRawBytes;
+    req.headers.push_back({"user-agent",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"});
+    req.headers.push_back({"accept", "text/plain, text/markdown, */*"});
+    // Ask jina for the plain extracted reader view (not the full HTML);
+    // X-Return-Format: text is jina's documented switch.
+    req.headers.push_back({"x-return-format", "markdown"});
+
+    http::Timeouts tos{
+        .connect = std::chrono::milliseconds(10'000),
+        .total   = std::chrono::milliseconds(25'000),
+    };
+    auto r = http::default_client().send(req, tos);
+    if (!r)
+        return std::unexpected(ToolError::network(
+            "jina fallback failed: " + r.error().render()));
+    FetchOnce out;
+    out.status = r->status;
+    for (const auto& h : r->headers)
+        if (h.name == "content-type") out.content_type = h.value;
+    out.body = std::move(r->body);
+    return out;
+}
+
+[[nodiscard]] bool jina_enabled_globally() {
+    const char* env = std::getenv("AGENTTY_NO_JINA");
+    return !(env && env[0] != '\0' && env[0] != '0');
+}
+
 ExecResult run_web_fetch(const WebFetchArgs& a) {
+    // Pull the #fragment off once — it's not sent on the wire (servers
+    // ignore it anyway) but we use it below to clip the cleaned output
+    // to just the requested section.
+    std::string fragment;
+    if (auto pu = parse_url(a.url); pu) fragment = pu->fragment;
+
     std::string url = a.url;
     std::vector<std::string> visited;
     FetchOnce resp;
@@ -965,12 +1241,49 @@ ExecResult run_web_fetch(const WebFetchArgs& a) {
     }
     if (!got_response) return std::unexpected(ToolError::network("no response"));
 
-    std::string body = std::move(resp.body);
-    bool html_in = looks_like_html(resp.content_type, body);
-    size_t raw_size = body.size();
+    std::string raw_body = std::move(resp.body);
+    bool html_in = looks_like_html(resp.content_type, raw_body);
+    size_t raw_size = raw_body.size();
 
+    std::string body;
     if (html_in) {
-        body = html_to_text(std::move(body));
+        body = html_to_text(raw_body);
+        body = drop_link_rail_runs(std::move(body));
+    } else {
+        body = raw_body;
+    }
+
+    // SPA-shell fallback: if the primary fetch produced a tiny/loading
+    // shell, ask r.jina.ai to render the page server-side. One-shot, no
+    // retry: failures fall back to the original (useless) body so the
+    // model can still see the error/status. Gated by env var and the
+    // per-request x-no-jina sentinel.
+    bool used_jina = false;
+    if (html_in && a.allow_jina && jina_enabled_globally()
+        && looks_like_spa_shell(body, raw_body)
+        && a.method == HttpMethod::Get)
+    {
+        auto jr = fetch_via_jina(url);
+        if (jr && jr->status >= 200 && jr->status < 300 && !jr->body.empty()) {
+            // jina returns markdown; pass through the link-rail filter
+            // (jina's reader emits ToCs too). No HTML cleanup needed.
+            std::string jbody = drop_link_rail_runs(std::move(jr->body));
+            if (jbody.size() > body.size() + 200) {
+                body = std::move(jbody);
+                used_jina = true;
+            }
+        }
+    }
+
+    // Fragment clip — done AFTER content has settled (primary or jina).
+    if (!fragment.empty()) {
+        std::string clipped = clip_to_fragment(body, fragment);
+        // Only keep the clip if it's a meaningful slice (≥200 chars and
+        // < 90% of the full body). Otherwise the anchor probably matched
+        // a trivial heading; return the full body so the model still
+        // sees context.
+        if (clipped.size() >= 200 && clipped.size() < body.size() * 9 / 10)
+            body = std::move(clipped);
     }
 
     bool truncated = false;
@@ -984,8 +1297,10 @@ ExecResult run_web_fetch(const WebFetchArgs& a) {
     out << "HTTP " << resp.status;
     if (!resp.content_type.empty()) out << " (" << resp.content_type << ")";
     if (url != a.url) out << " [final: " << url << "]";
+    if (used_jina) out << " [via r.jina.ai: SPA fallback]";
+    if (!fragment.empty()) out << " [#" << fragment << "]";
     out << "\n\n" << body;
-    if (html_in) {
+    if (html_in && !used_jina) {
         out << "\n[extracted text from " << raw_size << " bytes of HTML";
         if (truncated) out << ", truncated at 64KB";
         out << "]";
@@ -1006,7 +1321,11 @@ ToolDef tool_web_fetch() {
     t.name = ToolName{std::string{kSpec.name}};
     t.description = "Fetch a URL (HTTPS, follows redirects). For HTML pages, returns "
                     "extracted plain text with links preserved as [text](url) — not raw "
-                    "HTML. Up to 64KB of cleaned content. Use for docs, articles, APIs.";
+                    "HTML. Up to 64KB of cleaned content. Use for docs, articles, APIs. "
+                    "Supports #fragment to clip the output to that section. "
+                    "JS/SPA pages are auto-rendered via r.jina.ai when the primary "
+                    "fetch returns a near-empty shell (disable per-request by sending "
+                    "a `x-no-jina: 1` header, or globally by setting AGENTTY_NO_JINA=1).";
     t.input_schema = json{
         {"type","object"},
         {"required", {"url"}},

@@ -483,6 +483,60 @@ ExecResult run_web_search(const WebSearchArgs& a) {
         break;
     }
 
+    // Dedupe by canonicalised URL key (host + path; drop scheme, query,
+    // fragment, trailing slash). Many engines surface AMP / m. / archive
+    // mirrors of the same article — the model can only follow one URL at
+    // a time, so collapsing them frees slots for genuinely different
+    // results. Stable: keep the first occurrence (engines rank-order).
+    auto canon_key = [](std::string_view url) -> std::string {
+        // Strip scheme.
+        for (auto prefix : {"https://", "http://"}) {
+            std::string_view p{prefix};
+            if (url.size() >= p.size()
+                && std::equal(p.begin(), p.end(), url.begin(),
+                              [](char a, char b){
+                                  return std::tolower(a) == std::tolower(b);
+                              }))
+            { url.remove_prefix(p.size()); break; }
+        }
+        // Strip query + fragment.
+        if (auto q = url.find('?'); q != std::string_view::npos) url = url.substr(0, q);
+        if (auto h = url.find('#'); h != std::string_view::npos) url = url.substr(0, h);
+        // Lowercase host portion only.
+        std::string out;
+        out.reserve(url.size());
+        auto slash = url.find('/');
+        std::string_view host = url.substr(0, slash);
+        // Strip common host prefixes (www., m., amp.).
+        for (auto pfx : {"www.", "m.", "amp."}) {
+            std::string_view p{pfx};
+            if (host.size() > p.size()
+                && std::equal(p.begin(), p.end(), host.begin(),
+                              [](char a, char b){
+                                  return std::tolower(a) == std::tolower(b);
+                              }))
+            { host.remove_prefix(p.size()); break; }
+        }
+        for (char c : host) out.push_back(static_cast<char>(std::tolower(c)));
+        if (slash != std::string_view::npos) out.append(url.substr(slash));
+        // Strip trailing slash.
+        while (!out.empty() && out.back() == '/') out.pop_back();
+        return out;
+    };
+    {
+        std::vector<SearchHit> uniq;
+        uniq.reserve(hits.size());
+        std::vector<std::string> seen;
+        seen.reserve(hits.size());
+        for (auto& h : hits) {
+            std::string k = canon_key(h.url);
+            if (std::find(seen.begin(), seen.end(), k) != seen.end()) continue;
+            seen.push_back(std::move(k));
+            uniq.push_back(std::move(h));
+        }
+        hits = std::move(uniq);
+    }
+
     if (hits.empty()) {
         std::ostringstream err;
         err << "search returned no results for: " << a.query << "\n"
@@ -516,7 +570,9 @@ ToolDef tool_web_search() {
     t.description = "Search the web. Tries Brave → DuckDuckGo → Startpage until one "
                     "returns results. Output is `[via ENGINE]` followed by numbered "
                     "title / URL / snippet for each hit. Use web_fetch on a result URL "
-                    "to read the page.";
+                    "to read the page. Standard search operators work in the query: "
+                    "`site:docs.python.org`, `\"exact phrase\"`, `-exclude`. Duplicate "
+                    "URLs (AMP / mobile / archive mirrors) are auto-deduped.";
     t.input_schema = json{
         {"type","object"},
         {"required", {"query"}},
