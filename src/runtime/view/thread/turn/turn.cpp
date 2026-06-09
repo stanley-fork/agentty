@@ -105,6 +105,21 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     //     pending_stream grow.
     // The joined buffer is cached on MessageMdCache so the string_view
     // we hand to set_content_async stays valid across the call.
+    //
+    // Size-based no-op fast-path. Reveal_fx animates at 60 fps; bytes
+    // arrive at 10-30 / s, so >90% of frames produce no source-size
+    // change. Without this guard we re-concat msg.text + streaming_text
+    // + pending_stream (O(N) alloc+memcpy) AND set_content_async memcmps
+    // the result (O(N) memcmp) every frame for the in-flight turn. For
+    // a 50 KB sub-turn-2 body that's ~100 KB of memory bandwidth per
+    // frame just to discover nothing changed. Compare the three sizes
+    // instead: if none grew, the source bytes are byte-identical and we
+    // can skip straight to build().
+    const bool sizes_unchanged =
+        cache.last_text_size      == msg.text.size()
+     && cache.last_streaming_size == msg.streaming_text.size()
+     && cache.last_pending_size   == msg.pending_stream.size();
+
     const std::string* source_ptr = &msg.text;
     const bool has_live = !msg.streaming_text.empty()
                        || !msg.pending_stream.empty();
@@ -113,6 +128,10 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
             // Streaming-text only, nothing buffered — reference it
             // directly, no copy.
             source_ptr = &msg.streaming_text;
+        } else if (sizes_unchanged && !cache.combined_source.empty()) {
+            // Sizes match what we already concatenated last frame; the
+            // backing buffer is still valid. Reuse it; no copy.
+            source_ptr = &cache.combined_source;
         } else {
             cache.combined_source.clear();
             cache.combined_source.reserve(
@@ -125,6 +144,11 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         }
     }
     const std::string& source = *source_ptr;
+
+    // Remember the component sizes for next frame's no-op check.
+    cache.last_text_size      = msg.text.size();
+    cache.last_streaming_size = msg.streaming_text.size();
+    cache.last_pending_size   = msg.pending_stream.size();
 
     const bool settled = !msg.text.empty()
                        && msg.streaming_text.empty()
@@ -207,15 +231,30 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         : std::chrono::steady_clock::time_point{};
 
     if (!already_settled_into_cache) {
-        // Use the async variant: tiny appends stay on the sync
-        // incremental path inside StreamingMarkdown (cheap), but a
-        // diverging-prefix swap of >=16 KB (loading an old thread,
-        // recovering scrollback, pasting a long markdown body)
-        // gets offloaded to a worker so the render thread doesn't
-        // stall on the parse. While the worker is in flight the
-        // widget keeps returning its previous element tree, so
-        // there's no visible blank during the handoff.
-        cache.streaming->set_content_async(feed_source);
+        // Skip set_content_async entirely on a sizes-unchanged frame.
+        // The widget already saw these exact bytes last frame; its
+        // internal source_ matches feed_source by length and prefix.
+        // set_content_async's own no-op fast-path would memcmp
+        // O(N) bytes to discover this; the size check here is O(1).
+        // Still emit the call when sizes match but the widget is
+        // currently parsing async (it needs the poll to adopt the
+        // result) OR when this is the first feed (combined_source
+        // empty above means we took the direct ref path).
+        const bool skip_set_content =
+            sizes_unchanged
+            && cache.streaming->source().size() == feed_source.size()
+            && !cache.streaming->is_parsing();
+        if (!skip_set_content) {
+            // Use the async variant: tiny appends stay on the sync
+            // incremental path inside StreamingMarkdown (cheap), but a
+            // diverging-prefix swap of >=16 KB (loading an old thread,
+            // recovering scrollback, pasting a long markdown body)
+            // gets offloaded to a worker so the render thread doesn't
+            // stall on the parse. While the worker is in flight the
+            // widget keeps returning its previous element tree, so
+            // there's no visible blank during the handoff.
+            cache.streaming->set_content_async(feed_source);
+        }
 
         // Settled message → commit any trailing tail to the prefix's
         // block list. finish() flushes whatever is still in the

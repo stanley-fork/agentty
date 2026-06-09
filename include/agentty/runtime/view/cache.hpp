@@ -118,6 +118,22 @@ struct MessageMdCache {
     // stable backing for the string_view fed into
     // set_content_async. Cleared on settle.
     std::string                               combined_source;
+
+    // Sizes of the three components last folded into combined_source.
+    // Used by cached_markdown_for to short-circuit the per-frame
+    // concat + set_content_async round-trip when NONE of msg.text /
+    // streaming_text / pending_stream grew (the dominant case during
+    // reveal_fx animation: the widget renders 60 fps but bytes arrive
+    // 10-30 / s, so >90% of frames produce no source change).
+    //
+    // Without this guard the live tail rebuilds an N-byte string AND
+    // does an N-byte memcmp every frame for a long sub-turn-2 message
+    // (text holds prior sub-turn's settled body, streaming_text grows).
+    // O(turn-length) per frame on the in-flight run is what makes the
+    // perceived render speed degrade with turn size.
+    std::size_t last_text_size           = static_cast<std::size_t>(-1);
+    std::size_t last_streaming_size      = static_cast<std::size_t>(-1);
+    std::size_t last_pending_size        = static_cast<std::size_t>(-1);
 };
 
 struct TurnConfigCache {
