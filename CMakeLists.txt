@@ -1271,6 +1271,48 @@ if(AGENTTY_BUILD_TESTS)
     endif()
     add_test(NAME frozen_invariant_fuzz COMMAND frozen_invariant_fuzz)
 
+    # scrollback_wire_fuzz — randomized WIRE-LEVEL anti-corruption fuzz.
+    # Drives arbitrary interleavings of streaming / tool cards / settle
+    # freeze+trim / picker open-close through the REAL ui::view (overlays
+    # included) and maya's REAL inline compose, asserting after EVERY
+    # frame: prefix-match on shrink (W1), shadow verify (W2), stays
+    # Synced (W3), no committed wire row ever rewritten (W4), trim commit
+    # row-exact / never clamped (W5). A failure prints SEED + op trace.
+    add_executable(scrollback_wire_fuzz EXCLUDE_FROM_ALL
+        tests/scrollback_wire_fuzz.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(scrollback_wire_fuzz PRIVATE include)
+    target_compile_definitions(scrollback_wire_fuzz PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(scrollback_wire_fuzz PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(scrollback_wire_fuzz PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(scrollback_wire_fuzz PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME scrollback_wire_fuzz COMMAND scrollback_wire_fuzz)
+    set_tests_properties(scrollback_wire_fuzz PROPERTIES TIMEOUT 120)
+
     # anthropic_md_stream — dev tool, NOT a ctest entry. Captures a real
     # Anthropic SSE markdown stream to a .jsonl fixture (network +
     # credentials required), or replays a captured fixture through
@@ -1326,5 +1368,7 @@ if(AGENTTY_BUILD_TESTS)
         visual_hash_coverage_test
         tool_result_budget_test
         acp_integration_test
-        frozen_invariant_fuzz)
+        frozen_invariant_fuzz
+        scrollback_wire_fuzz)
 endif()
+

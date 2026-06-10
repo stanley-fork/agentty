@@ -1,5 +1,6 @@
 #include "agentty/runtime/view/thread/welcome_screen.hpp"
 
+#include <maya/core/render_context.hpp>
 #include <maya/widget/model_badge.hpp>
 
 #include "agentty/runtime/view/helpers.hpp"
@@ -42,6 +43,22 @@ maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
                           {"^C",    " quit",    danger}};        // red — destructive
     cfg.accent_color   = role_brand;
     cfg.text_color     = fg;
+    // Viewport clamp. The idle frame around the welcome is ~11 rows of
+    // chrome (AppLayout outer padding 2 + composer 6 + status bar 3);
+    // cap the welcome at term_rows - 11 so the WHOLE idle frame fits
+    // the terminal. maya tier-drops blank separators first, then
+    // collapses the pixel sigil to a one-row wordmark. An overflowing
+    // welcome commits its top rows to native scrollback at startup and
+    // the first welcome→conversation swap strands them there — the
+    // startup flavor of the wordmark-duplication corruption.
+    // available_height() reads the sized RenderContext ui::view installs
+    // for the whole build phase (real ioctl dims, or the harness's
+    // simulated dims) — do NOT ioctl here, it would override test
+    // harnesses that pin a simulated geometry.
+    constexpr int kIdleChromeRows = 11;
+    const int term_rows = maya::available_height();
+    if (term_rows > 0)
+        cfg.max_rows = std::max(4, term_rows - kIdleChromeRows);
     return cfg;
 }
 
