@@ -401,7 +401,19 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // FED the full arrived source above, so even if RAF lapsed for a beat
     // the text is on screen — only the live-edge FX animation pauses,
     // never the content.
-    constexpr std::int64_t kRevealActiveMs = 250;
+    //
+    // Window size: slow models (Opus, high-effort thinking) ship deltas
+    // at median ~470 ms / p90 ~540 ms gaps (measured on the captured
+    // tour fixture); occasional gaps run 1-3 s. At the old 250 ms the
+    // gate lapsed INSIDE every such gap — the pulsing caret froze solid
+    // mid-sentence until the next delta, reading as "the stream died"
+    // (fast models, gaps < 250 ms, never showed it). 3 s covers the
+    // inter-delta cadence of every observed model so the live edge keeps
+    // breathing through normal pauses, while a real extended-thinking
+    // stall (10-120 s, no deltas) still drops to Tick after 3 s. Cost is
+    // bounded: ≤3 s of extra 60 fps frames per stall, each a no-content
+    // caret repaint (~0.1-0.4 ms view, 1-2 cell diff on the wire).
+    constexpr std::int64_t kRevealActiveMs = 3000;
     const auto now3 = std::chrono::steady_clock::now();
     const std::int64_t since_grow_ms =
         cache.last_grow_tick.time_since_epoch().count() == 0
