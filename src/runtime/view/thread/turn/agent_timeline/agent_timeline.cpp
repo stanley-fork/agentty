@@ -96,17 +96,34 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
         // by every settled card in the run. Over ssh that turns into
         // visible lag as the turn grows.
         //
-        // Key: tool-call id + status + output size. Permanent cache hit
-        // once terminal; running/pending events stay un-keyed (their
-        // body still mutates each frame and would alias a stale blit).
+        // Body config FIRST — its grep-derived `highlight_lines` change
+        // the rendered HEIGHT (FileRead prepends a `▸ matches: …` summary
+        // row when non-empty) WITHOUT changing output().size(). A Read that
+        // settled before a same-path Grep landed is cached with no
+        // highlight; once the Grep's hits index the path, the body grows
+        // one row but the id+status+size key is unchanged — maya would
+        // blit the stale (shorter) cells into the taller reserved slot,
+        // shifting every row below and bleeding stale cells (the
+        // screenshot corruption). Fold the highlight signature into the
+        // key so the height change mints a fresh entry.
+        auto body = tool_body_preview_config(tc, &grep_hits);
+
+        // Key: tool-call id + status + output size + body-height inputs
+        // that aren't implied by output().size() (highlight_lines).
+        // Permanent cache hit once terminal AND its highlight set is
+        // stable; running/pending events stay un-keyed (their body still
+        // mutates each frame and would alias a stale blit).
         maya::CacheId event_hash_id;
         if (tc.is_terminal()) {
-            event_hash_id = maya::CacheIdBuilder{}
-                .add(std::string_view{"agentty.tool_event"})
-                .add(std::string_view{tc.id.value})
-                .add(static_cast<std::uint64_t>(tc.status.index()))
-                .add(static_cast<std::uint64_t>(tc.output().size()))
-                .build();
+            maya::CacheIdBuilder kb;
+            kb.add(std::string_view{"agentty.tool_event"})
+              .add(std::string_view{tc.id.value})
+              .add(static_cast<std::uint64_t>(tc.status.index()))
+              .add(static_cast<std::uint64_t>(tc.output().size()))
+              .add(static_cast<std::uint64_t>(body.highlight_lines.size()));
+            for (int hl : body.highlight_lines)
+                kb.add(static_cast<std::uint64_t>(hl));
+            event_hash_id = kb.build();
         }
 
         cfg.events.push_back({
@@ -121,7 +138,7 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
             .elapsed_seconds = tool_elapsed(tc),
             .category_color  = tool_category_color(tc.name.value),
             .status          = tool_event_status(tc),
-            .body            = tool_body_preview_config(tc, &grep_hits),
+            .body            = std::move(body),
             .hash_id         = event_hash_id,
         });
     }

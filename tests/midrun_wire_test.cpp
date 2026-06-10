@@ -126,6 +126,364 @@ static ToolUse settled_write(const std::string& tag, int n_lines) {
     return t;
 }
 
+// A settled `read` card with a tall file body (one row per source line,
+// elided to head/tail by ToolBodyPreview). Distinct id + per-line content
+// so two cards of the SAME byte size still render different bodies — the
+// per-event hash_id collision surface.
+static ToolUse settled_read(const std::string& tag, int n_lines,
+                            const std::string& path) {
+    ToolUse t;
+    t.id   = ToolCallId{"read_" + tag};
+    t.name = ToolName{"read"};
+    t.args = {{"path", path}};
+    std::string out;
+    for (int i = 0; i < n_lines; ++i)
+        out += std::to_string(i) + ": " + tag + " source line text here\n";
+    auto now = steady_clock::now();
+    t.status = ToolUse::Done{now - milliseconds{5}, now, std::move(out)};
+    return t;
+}
+
+// THE screenshot scenario at the wire: a SINGLE in-flight assistant run
+// that grows by one tall terminal tool card per sub-turn (the model reads
+// several files in a row). NOTHING freezes mid-run (agent_session
+// discipline) — the whole multi-card run is the LIVE tail and re-lays-out
+// every frame as each new card appends, scrolling earlier cards off the
+// viewport top.
+//
+// This is the exact shape in the corruption screenshot: many already-
+// terminal read/bash cards stacked in one live run, with stray cells from
+// one card's body bleeding into another card's footer. The per-event
+// hash_id blits each terminal card's cached cells; if a card above grows
+// and shifts a cached card to a new Y, maya's row diff + will_scroll_off
+// defense must keep prev_cells in lockstep with the wire or a committed
+// row gets a stale blit.
+//
+// Invariant per frame: the shadow stays valid (verify() succeeds), the
+// frame stays Synced (no recovery repaint), and no row that already
+// overflowed the viewport top on a PRIOR frame is rewritten.
+static void test_growing_live_run_no_committed_rewrite() {
+    constexpr int kWidth = 100;
+    constexpr int kTermH = 30;
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"wiregrow"};
+    Message u; u.role = Role::User; u.text = "investigate the renderer";
+    m.d.current.messages.push_back(std::move(u));
+    // The whole prior turn freezes at submit (SessionStart analog); the
+    // live tail is ONLY the in-flight assistant run below.
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    // The in-flight assistant run: one Message (sub-turn) per tool card,
+    // appended one at a time. Each sub-turn settles its tool before the
+    // next arrives — the realistic post-tool placeholder cadence.
+    StylePool pool;
+    auto [writer, rfd] = make_pipe_writer();
+
+    // Track the wire as a row grid: the bytes of each row at the moment it
+    // scrolled off the viewport top are immutable in native scrollback.
+    // We snapshot every committed prefix and require it never changes.
+    std::vector<std::string> committed_wire;   // rows already off-screen
+
+    auto rows_of = [&](const Canvas& c) {
+        std::vector<std::string> rows;
+        const int mr = c.max_content_row();
+        for (int y = 0; y <= mr; ++y) {
+            std::string line;
+            for (int x = 0; x < kWidth; ++x) {
+                char32_t ch = c.get(x, y).character;
+                line.push_back(ch && ch < 128 ? static_cast<char>(ch) : ' ');
+            }
+            while (!line.empty() && line.back() == ' ') line.pop_back();
+            rows.push_back(std::move(line));
+        }
+        return rows;
+    };
+
+    // Seed the first frame fresh, then carry Synced state across appends.
+    std::optional<InlineFrame<Synced>> synced;
+    const char* files[] = {
+        "maya/src/render/serialize.cpp", "maya/src/render/renderer.cpp",
+        "maya/include/maya/app/app.hpp", "src/runtime/app/update/frozen.cpp",
+        "src/runtime/app/update/stream.cpp", "maya/examples/agent_session.cpp",
+    };
+    constexpr int kCards = 6;
+    bool ok_all = true;
+
+    for (int card = 0; card < kCards && ok_all; ++card) {
+        // Append a new sub-turn with a tall terminal read card. Bodies of
+        // VARYING height so each append shifts the rows below by a
+        // different multi-row delta (exercises will_scroll_off's range).
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_read(
+            "c" + std::to_string(card), 30 + card * 17, files[card]));
+        m.d.current.messages.push_back(std::move(a));
+
+        Canvas c = paint(build_root(m), kWidth, pool);
+        auto cur_rows = rows_of(c);
+        const int total_rows = static_cast<int>(cur_rows.size());
+        const int new_committed = total_rows > kTermH ? total_rows - kTermH : 0;
+
+        if (!synced) {
+            auto outcome = InlineFrame<Empty>{}.seed().render(
+                c, content_rows(c), term_rows_for_test(kTermH), pool, writer,
+                false);
+            (void)drain(rfd);
+            synced = std::visit(
+                [](auto&& arm) -> std::optional<InlineFrame<Synced>> {
+                    using T = std::decay_t<decltype(arm)>;
+                    if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                        return std::move(arm);
+                    else return std::nullopt;
+                }, std::move(outcome));
+            CHECK(synced.has_value(), "grow: first frame did not reach Synced");
+            if (!synced) { ok_all = false; break; }
+        } else {
+            auto wit = synced->verify();
+            CHECK(wit.has_value(),
+                  "grow: shadow verify failed before append render "
+                  "(prev_cells already desynced from the wire)");
+            if (!wit) { ok_all = false; break; }
+            auto outcome = std::move(*synced).render(
+                c, content_rows(c), term_rows_for_test(kTermH), pool, writer,
+                std::move(*wit), false);
+            (void)drain(rfd);
+            synced = std::visit(
+                [](auto&& arm) -> std::optional<InlineFrame<Synced>> {
+                    using T = std::decay_t<decltype(arm)>;
+                    if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                        return std::move(arm);
+                    else return std::nullopt;
+                }, std::move(outcome));
+            CHECK(synced.has_value(),
+                  "grow: append frame demoted out of Synced — maya hit the "
+                  "overflow recovery repaint (the bleed/ghost symptom)");
+            if (!synced) { ok_all = false; break; }
+        }
+
+        // Every row that was committed on a PRIOR frame must still hold the
+        // SAME bytes now. A change here is a committed-scrollback rewrite —
+        // the stray-cell bleed from the screenshot.
+        const int check_n = std::min<int>(
+            static_cast<int>(committed_wire.size()), new_committed);
+        for (int y = 0; y < check_n; ++y) {
+            if (committed_wire[static_cast<std::size_t>(y)]
+                != cur_rows[static_cast<std::size_t>(y)]) {
+                std::fprintf(stderr,
+                    "  GROW committed-row rewrite at y=%d (card=%d):\n"
+                    "    was |%s|\n    now |%s|\n",
+                    y, card,
+                    committed_wire[static_cast<std::size_t>(y)].c_str(),
+                    cur_rows[static_cast<std::size_t>(y)].c_str());
+                CHECK(false,
+                      "a row that already overflowed the viewport top was "
+                      "rewritten on a later frame — committed-scrollback "
+                      "corruption (the screenshot bleed)");
+                ok_all = false;
+                break;
+            }
+        }
+        // Extend the committed snapshot to the new (deeper) boundary.
+        committed_wire.assign(cur_rows.begin(),
+                              cur_rows.begin() + new_committed);
+    }
+
+    std::fprintf(stderr, "  [grow] cards=%d committed_rows=%zu\n",
+                 kCards, committed_wire.size());
+    close(rfd);
+}
+
+// A grep card whose output references `path` at the given line numbers,
+// in agentty's grep markdown shape (collect_grep_hits parses
+// `## Matches in <path>` headers + `### L<n>` anchors).
+static ToolUse settled_grep(const std::string& tag, const std::string& path,
+                            const std::vector<int>& lines) {
+    ToolUse t;
+    t.id   = ToolCallId{"grep_" + tag};
+    t.name = ToolName{"grep"};
+    t.args = {{"pattern", "needle_" + tag}};
+    std::string out = "## Matches in " + path + "\n\n";
+    for (int ln : lines)
+        out += "### L" + std::to_string(ln) + "-" + std::to_string(ln)
+             + "\n```\n" + std::to_string(ln) + ": match here\n```\n\n";
+    auto now = steady_clock::now();
+    t.status = ToolUse::Done{now - milliseconds{5}, now, std::move(out)};
+    return t;
+}
+
+// REGRESSION: grep → read on the same path. The Read card settles and is
+// rendered/cached FIRST (no highlight). Then a same-path Grep lands later
+// in the run: collect_grep_hits now indexes the path, so the Read body
+// gains a leading `▸ matches: …` summary row — ONE row taller — while
+// tc.output().size() is UNCHANGED. The per-event hash_id must therefore
+// fold highlight_lines, or maya blits the cached (shorter) cells into the
+// now-taller reserved slot, shifting every row below by one and bleeding
+// stale cells (the screenshot corruption). We drive the REAL component
+// cache (paint() shares the thread-local cache across frames) so a stale
+// blit would actually surface.
+static void test_grep_read_highlight_no_stale_blit() {
+    constexpr int kWidth = 100;
+    constexpr int kTermH = 30;
+    const std::string path = "maya/src/render/serialize.cpp";
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"wirehl"};
+    Message u; u.role = Role::User; u.text = "find and read the diff path";
+    m.d.current.messages.push_back(std::move(u));
+    // Lead-in frozen turns push the live read card's top above the
+    // viewport so its rows genuinely commit to native scrollback and a
+    // one-row shift below a stale blit corrupts a COMMITTED row.
+    for (int e = 0; e < 8; ++e) {
+        Message lu; lu.role = Role::User;
+        lu.text = "context turn " + std::to_string(e);
+        m.d.current.messages.push_back(std::move(lu));
+        Message la; la.role = Role::Assistant;
+        la.tool_calls.push_back(settled_write("lead" + std::to_string(e), 6));
+        m.d.current.messages.push_back(std::move(la));
+    }
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    StylePool pool;
+    auto [writer, rfd] = make_pipe_writer();
+
+    auto rows_of = [&](const Canvas& c) {
+        std::vector<std::string> rows;
+        const int mr = c.max_content_row();
+        for (int y = 0; y <= mr; ++y) {
+            std::string line;
+            for (int x = 0; x < kWidth; ++x) {
+                char32_t ch = c.get(x, y).character;
+                line.push_back(ch && ch < 128 ? static_cast<char>(ch) : ' ');
+            }
+            while (!line.empty() && line.back() == ' ') line.pop_back();
+            rows.push_back(std::move(line));
+        }
+        return rows;
+    };
+
+    // Sub-turn 1: the Read card settles FIRST, alone, and gets cached
+    // (per-event hash_id keyed under no-highlight height). The grep that
+    // will highlight it lands in the SAME sub-turn message a beat later
+    // (the model emits read + grep in one tool batch; the read's tool_use
+    // arrives and settles before the grep's does).
+    {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_read("r", 60, path));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    Canvas ca = paint(build_root(m), kWidth, pool);
+    auto rows_a = rows_of(ca);
+    auto oa = InlineFrame<Empty>{}.seed().render(
+        ca, content_rows(ca), term_rows_for_test(kTermH), pool, writer, false);
+    (void)drain(rfd);
+    InlineFrame<Synced> sa = std::visit(
+        [](auto&& arm) -> InlineFrame<Synced> {
+            using T = std::decay_t<decltype(arm)>;
+            if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                return std::move(arm);
+            else { std::fprintf(stderr, "  hl frame A not Synced\n");
+                   std::abort(); }
+        }, std::move(oa));
+    const int rows_a_n   = sa.rows();
+    const int committed_a = rows_a_n > kTermH ? rows_a_n - kTermH : 0;
+
+    // The grep lands in the SAME message's tool batch. collect_grep_hits
+    // (per-panel, over that message's tool_calls) now indexes the path,
+    // so the Read above inherits highlight_lines → its body grows by the
+    // `▸ matches:` summary row.
+    m.d.current.messages.back().tool_calls.push_back(
+        settled_grep("g", path, {42, 61, 88}));
+    Canvas cb = paint(build_root(m), kWidth, pool);
+    auto rows_b = rows_of(cb);
+    auto wit = sa.verify();
+    CHECK(wit.has_value(),
+          "hl: shadow verify failed after frame A (already desynced)");
+    if (wit) {
+        auto ob = std::move(sa).render(
+            cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
+            std::move(*wit), false);
+        (void)drain(rfd);
+        bool synced_b = std::visit([](auto&& arm) {
+            using T = std::decay_t<decltype(arm)>;
+            return std::is_same_v<T, InlineFrame<Synced>>;
+        }, std::move(ob));
+        CHECK(synced_b,
+              "hl: grep-append frame demoted out of Synced — stale-blit "
+              "height mismatch tripped the recovery repaint");
+    }
+
+    // The committed prefix (rows that overflowed on frame A) must NOT have
+    // been rewritten by frame B. If the per-event key ignored
+    // highlight_lines, the read body's cells would blit one row short into
+    // a taller slot, shifting committed rows.
+    const int check_n = std::min<int>(committed_a,
+        std::min<int>(static_cast<int>(rows_a.size()),
+                      static_cast<int>(rows_b.size())));
+    int first_div = -1;
+    for (int y = 0; y < check_n; ++y) {
+        if (rows_a[static_cast<std::size_t>(y)]
+            != rows_b[static_cast<std::size_t>(y)]) { first_div = y; break; }
+    }
+    if (first_div >= 0) {
+        std::fprintf(stderr,
+            "  HL committed-row divergence at %d (committed=%d):\n"
+            "    A |%s|\n    B |%s|\n",
+            first_div, committed_a,
+            rows_a[static_cast<std::size_t>(first_div)].c_str(),
+            rows_b[static_cast<std::size_t>(first_div)].c_str());
+    }
+    CHECK(first_div < 0,
+          "a committed scrollback row changed when a same-path Grep added "
+          "the read's highlight summary row — stale-blit height mismatch "
+          "(per-event hash_id must fold highlight_lines)");
+
+    // DIRECT stale-blit check: re-PAINT frame B's tree into a fresh canvas
+    // that shares the SAME thread-local component cache the frame-A paint
+    // populated. If the read's per-event hash_id didn't fold
+    // highlight_lines, this paint takes the cache FAST PATH and blits the
+    // frame-A cells (no `▸ matches:` row, one row short) into the now-
+    // taller reserved slot — the canvas then shows the read body's last
+    // gutter line where its footer/`done` row should be (the screenshot's
+    // stray line-number + `DO2`/`DONE` overdraw). We assert the painted
+    // canvas contains the summary row that the body MUST now have; a stale
+    // blit omits it.
+    Canvas cc = paint(build_root(m), kWidth, pool);   // cache-hit paint
+    auto rows_c = rows_of(cc);
+    bool has_matches_row = false;
+    for (const auto& r : rows_c)
+        if (r.find("matches:") != std::string::npos) { has_matches_row = true; break; }
+    CHECK(has_matches_row,
+          "the read body's `▸ matches:` summary row is MISSING from the "
+          "cache-hit repaint — maya blitted the stale (pre-highlight) cells "
+          "because the per-event hash_id ignored highlight_lines (the "
+          "screenshot stale-blit / gutter-bleed corruption)");
+    // The two consecutive frame-B paints (cb built fresh, cc cache-hit)
+    // must be byte-identical: a stale blit makes cc shorter / shifted.
+    int cdiv = -1;
+    const int cmin = std::min<int>(static_cast<int>(rows_b.size()),
+                                   static_cast<int>(rows_c.size()));
+    for (int y = 0; y < cmin; ++y)
+        if (rows_b[static_cast<std::size_t>(y)]
+            != rows_c[static_cast<std::size_t>(y)]) { cdiv = y; break; }
+    if (cdiv >= 0)
+        std::fprintf(stderr,
+            "  HL cache-hit repaint diverged at %d:\n    fresh |%s|\n"
+            "    cached|%s|\n", cdiv,
+            rows_b[static_cast<std::size_t>(cdiv)].c_str(),
+            rows_c[static_cast<std::size_t>(cdiv)].c_str());
+    CHECK(cdiv < 0 && rows_b.size() == rows_c.size(),
+          "cache-hit repaint of the same tree diverged from the fresh "
+          "paint — a stale-height blit corrupted the canvas");
+
+    std::fprintf(stderr, "  [hl] committed=%d rows_a=%d rows_b=%zu rows_c=%zu\n",
+                 committed_a, rows_a_n, rows_b.size(), rows_c.size());
+    close(rfd);
+}
+
 // THE wire-level test. A user turn + a settled write that overflows the
 // viewport, frozen at the (idle) turn boundary. Drive maya's real inline
 // compose across the freeze and assert no committed scrollback row is
@@ -1218,6 +1576,8 @@ static void test_midrun_trim_full_body_writes_no_rewrite() {
 
 int main() {
     std::printf("midrun_wire_test\n");
+    test_growing_live_run_no_committed_rewrite();
+    test_grep_read_highlight_no_stale_blit();
     test_write_freeze_no_rewrite();
     test_write_midrun_active_freeze_no_rewrite();
     test_write_streaming_settle_freeze();
