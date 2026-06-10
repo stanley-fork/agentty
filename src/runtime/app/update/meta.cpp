@@ -11,6 +11,7 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
+#include <maya/app/app.hpp>   // maya::request_animation_frame
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -115,11 +116,47 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // hash. Freezing the byte-and-hash-identical tree HERE is a
             // cache hit (no re-emit). Trim in the same step, exactly as
             // the old inline path did.
+            // ── Deferred settle-freeze (post-stream redraw fix) ──────
+            // finalize_turn armed the reveal finalize ramp on the
+            // just-finished assistant message(s) and set
+            // pending_settle_freeze WITHOUT calling finish(). We hold the
+            // freeze until the reveal has FULLY drained
+            // (live_tail_reveal_settled): the typewriter cursor reached
+            // the live edge, the finalize ramp completed, the widget
+            // flipped live_ off ON ITS OWN, and the live tail has painted
+            // the settled (post-finish-shape) tree into maya's prev_cells
+            // at least once. Only THEN do we run settle_message_md (a
+            // now-shape-neutral finish() that just stamps the cache
+            // fast-path) and freeze. Because the snapshot equals the
+            // on-screen frame byte-for-byte, the live-tail→frozen handoff
+            // is a maya component-cache HIT — zero re-emit, zero
+            // scrollback duplication. This is the agent_session guarantee
+            // (live height == settled height at the freeze instant) with
+            // the reveal animation fully intact.
+            //
+            // While the reveal is still animating we keep the flag set
+            // and arm an animation frame so the typewriter keeps gliding
+            // and the gate is re-checked next frame — it never looks
+            // stuck and the freeze never fires early.
             maya::Cmd<Msg> settle_freeze_trim = maya::Cmd<Msg>::none();
             if (m.ui.pending_settle_freeze && m.s.is_idle()) {
-                m.ui.pending_settle_freeze = false;
-                freeze_through(m, m.d.current.messages.size());
-                settle_freeze_trim = trim_frozen_if_oversized(m);
+                if (live_tail_reveal_settled(m)) {
+                    m.ui.pending_settle_freeze = false;
+                    for (std::size_t i = m.ui.frozen_through;
+                         i < m.d.current.messages.size(); ++i) {
+                        auto& mm = m.d.current.messages[i];
+                        if (mm.role != Role::Assistant || mm.text.empty())
+                            continue;
+                        settle_message_md(m, mm);
+                    }
+                    freeze_through(m, m.d.current.messages.size());
+                    settle_freeze_trim = trim_frozen_if_oversized(m);
+                } else {
+                    // Reveal still draining — keep the frame armed so the
+                    // typewriter animates and we re-test the gate next
+                    // tick. Never freeze a still-animating turn.
+                    ::maya::request_animation_frame();
+                }
             }
 
             // ── pending_stream → streaming_text ──────────────────────

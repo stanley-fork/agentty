@@ -84,6 +84,23 @@ int estimate_wrap_cols(int term_cols) {
 }
 int estimate_wrap_cols() { return estimate_wrap_cols(term_dims().cols); }
 
+// EXACT content width a frozen Turn Element is laid out at by the real
+// render. The thread sits inside AppLayout's outer `.padding(1)` (one
+// column of pad on each side), so the Conversation — and every Turn /
+// list_ref(frozen) entry inside it — receives term_cols - 2 columns. The
+// Turn owns its own rail + inner padding in its FlexStyle, so the layout
+// engine subtracts that chrome itself when we hand it this width. This is
+// the width measure_element_rows MUST use: frozen_rows[] is the EXACT
+// wire height only when measured at the width maya actually wraps at. The
+// coarse one-sided estimate (estimate_wrap_cols, term_cols - 4) is for
+// estimate_msg_rows' budget-walk fallback, NOT for the real layout
+// measure — measuring the real Element at the estimate's narrower width
+// OVER-counts every entry (more wrapping), which over-commits at trim
+// time and strands a duplicate one screen up (per the trim commit proof).
+int measure_cols(int term_cols) {
+    return std::max(16, term_cols - 2);
+}
+
 // Live-canvas row budget = a small multiple of the terminal viewport,
 // derived from an explicit terminal-row count (see estimate_wrap_cols for
 // the one-snapshot rationale).
@@ -465,7 +482,7 @@ void push_frozen(Model& m, maya::Element e, std::size_t rows,
     // in between, the old stamps would otherwise stay at the prior width.)
     ensure_frozen_width(m, term_cols);
     const std::size_t measured =
-        measure_element_rows(e, estimate_wrap_cols(term_cols));
+        measure_element_rows(e, measure_cols(term_cols));
     if (measured > 0) rows = measured;
     if (rows < 1) rows = 1;
     const std::size_t clamped = std::min<std::size_t>(
@@ -688,7 +705,7 @@ void freeze_through(Model& m, std::size_t live_start) {
 void ensure_frozen_width(Model& m, int term_cols) {
     if (term_cols < 1) return;                 // degenerate ioctl — keep stamps
     if (m.ui.frozen_cols == term_cols) return; // already current (common case)
-    const int cols = estimate_wrap_cols(term_cols);
+    const int cols = measure_cols(term_cols);
     std::size_t total = 0;
     for (std::size_t k = 0; k < m.ui.frozen.size(); ++k) {
         std::size_t h = measure_element_rows(m.ui.frozen[k], cols);

@@ -230,6 +230,24 @@ Step submit_message(Model m) {
     // instead of being re-built every frame for the whole run, and the
     // settle-time freeze has one fewer seam to hand off.
     m.d.current.messages.push_back(std::move(user));
+    // Force the prior turn's reveal to settle BEFORE the freeze snapshot.
+    // Normally the deferred settle-freeze (meta.cpp) waits for the reveal
+    // to drain on its own, but a user can submit while it's still mid-
+    // glide (pending_settle_freeze true). Freezing a still-`live_` widget
+    // would snapshot a tree whose hash diverges from the on-screen live
+    // frame — the post-stream duplicate. settle_message_md runs the
+    // (now harmless) finish() so the widget is in its settled shape; the
+    // freeze below then captures exactly what the next live frame would
+    // paint. By submit time msg.text is final and streaming_text empty,
+    // so this is shape-neutral for an already-drained turn and a clean
+    // collapse for a still-animating one (the user moved on; cutting the
+    // last ~100 ms of typewriter is the right call when they hit Enter).
+    for (std::size_t i = m.ui.frozen_through;
+         i + 1 < m.d.current.messages.size(); ++i) {
+        auto& mm = m.d.current.messages[i];
+        if (mm.role != Role::Assistant || mm.text.empty()) continue;
+        settle_message_md(m, mm);
+    }
     freeze_through(m, m.d.current.messages.size());
     // A deferred settle-freeze may still be pending from the prior turn
     // (user submitted before the next idle Tick fired). The freeze above

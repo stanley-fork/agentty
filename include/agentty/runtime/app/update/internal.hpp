@@ -107,6 +107,26 @@ void rehydrate_frozen(Model& m);
 // For NewThread before a fresh-start submit.
 void clear_frozen(Model& m);
 
+// Settle one Assistant message's StreamingMarkdown widget: feed the
+// final bytes, finish() (flush tail → prefix, flip live_ off), apply the
+// same auto-fold preset cached_markdown_for uses, and stamp the cache
+// sizes so the per-frame settled fast-path engages. Defined in stream.cpp.
+void settle_message_md(Model& m, const Message& msg);
+
+// live_tail_reveal_settled: true iff EVERY Assistant message in the live
+// tail [frozen_through..end) has fully drained its reveal animation — the
+// typewriter cursor reached the live edge, the finalize ramp completed,
+// and no async parse is in flight. At that point the widget has already
+// flipped live_ off ON ITS OWN and the live tail painted the SETTLED tree
+// into maya's prev_cells, so a freeze taken now is byte-and-hash-identical
+// to what's on screen (cache HIT, zero re-emit). Used to GATE the deferred
+// settle-freeze: we never finalize+freeze a turn whose reveal is still
+// animating, which is the structural root cause of the post-stream
+// duplicate/ghost (freezing a post-finish shape that diverges from the
+// still-animating live frame in prev_cells). Returns true when the tail
+// has no Assistant md to drain (nothing to wait on).
+bool live_tail_reveal_settled(const Model& m);
+
 // ensure_frozen_width: re-measure every frozen entry's stored row count
 // (frozen_rows[]) at `term_cols` (the FULL terminal width) whenever it has
 // changed since the counts were stamped (m.ui.frozen_cols). No-op when the

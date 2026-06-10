@@ -214,12 +214,93 @@ static void test_caret_disarms_after_settle() {
     }
 }
 
+// ── (3) The deferred settle-freeze must NEVER fire while the reveal is
+//        mid-glide — the structural guarantee against post-stream
+//        scrollback duplication / ghosting. live_tail_reveal_settled()
+//        is the gate meta.cpp checks before freezing; it must return
+//        false while the typewriter is still animating (so the freeze
+//        waits) and true only after the widget flips live_ off on its
+//        own (so the snapshot equals the on-screen frame = maya cache
+//        HIT = zero re-emit). Reproduces the screenshot bug class: a
+//        freeze taken on a still-animating turn snapshots a shape that
+//        diverges from the live frame in maya's prev_cells, re-emitting
+//        the whole turn over committed scrollback. ────────────────────
+static void test_freeze_gated_on_reveal_drain() {
+    std::printf("test_freeze_gated_on_reveal_drain\n");
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"freezegate"};
+    Message u; u.role = Role::User; u.text = "write a longish reply";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
+
+    // Settled assistant turn (text final), but the reveal has NOT been
+    // fed/drained yet — mimics finalize_turn having just moved
+    // streaming_text → text and armed the finalize ramp. A long body so
+    // the reveal cursor needs many frames to reach the live edge.
+    std::string body;
+    for (int i = 0; i < 40; ++i)
+        body += "This is line " + std::to_string(i)
+              + " of a multi-paragraph assistant reply.\n\n";
+    Message a; a.role = Role::Assistant; a.text = body;
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Idle{};
+
+    // Render one frame so the widget exists and begins its reveal.
+    auto& cache = m.ui.view_cache.message_md(
+        m.d.current.id, m.d.current.messages.back().id);
+    if (!cache.streaming)
+        cache.streaming = std::make_shared<maya::StreamingMarkdown>();
+    cache.streaming->set_reveal_fx(true);
+    cache.streaming->set_reveal_pacing(30.0, 0.25);
+    cache.streaming->set_content(body);
+    cache.streaming->set_live(true);
+    cache.streaming->request_finalize(200);
+    (void)frame_requests_animation(m);  // advance the reveal cursor once
+
+    // While the reveal is mid-glide the gate MUST block the freeze.
+    CHECK(cache.streaming->reveal_in_progress()
+              || cache.streaming->is_finalizing(),
+          "reveal is animating (test precondition)");
+    CHECK(!agentty::app::detail::live_tail_reveal_settled(m),
+          "freeze BLOCKED while the reveal is still animating — freezing "
+          "a mid-glide turn is the post-stream duplication root cause");
+
+    // Drain the reveal to completion (build() advances the cursor; the
+    // finalize ramp flips live_ off once the cursor reaches the edge).
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < deadline
+           && (cache.streaming->reveal_in_progress()
+               || cache.streaming->is_finalizing()
+               || cache.streaming->is_parsing())) {
+        (void)frame_requests_animation(m);
+        std::this_thread::sleep_for(std::chrono::milliseconds{16});
+    }
+
+    // Now the widget has flipped live_ off on its own and the live tail
+    // has painted the settled shape — the gate must OPEN so the freeze
+    // can take a byte-identical snapshot.
+    CHECK(agentty::app::detail::live_tail_reveal_settled(m),
+          "freeze ALLOWED once the reveal fully drained (settled shape "
+          "is on screen — snapshot is a maya cache HIT)");
+
+    // And a turn that still has UNCOMMITTED wire bytes is never
+    // freezable regardless of reveal state — it isn't done arriving.
+    m.d.current.messages.back().streaming_text = "trailing";
+    CHECK(!agentty::app::detail::live_tail_reveal_settled(m),
+          "freeze BLOCKED while streaming_text still has unsettled bytes");
+    m.d.current.messages.back().streaming_text.clear();
+}
+
 int main() {
     std::printf("stream_liveness_test — the caret must never look "
                 "frozen while a response is in flight\n\n");
 
     test_caret_armed_across_delta_gap();
     test_caret_disarms_after_settle();
+    test_freeze_gated_on_reveal_drain();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -80,6 +80,12 @@ constexpr std::size_t kStreamingPreviewCap = 4 * 1024;
 // hits its settled fast-path returning that identical tree. No height
 // step, no re-emit. Mirrors agent_session's single coherent
 // finish()+push-to-frozen at MessageStop.
+//
+// Hoisted OUT of the anonymous namespace (declared in internal.hpp) so
+// meta.cpp's deferred settle-freeze can call it once the reveal has
+// drained.
+}  // namespace (close anon for the cross-TU helpers below)
+
 void settle_message_md(Model& m, const Message& msg) {
     auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
     if (!cache.streaming)
@@ -96,6 +102,38 @@ void settle_message_md(Model& m, const Message& msg) {
     cache.last_settled_size = msg.text.size();
     cache.revealed_size     = msg.text.size();
 }
+
+// True iff every Assistant message in the live tail has fully drained its
+// reveal animation. See internal.hpp for the full rationale. The check is
+// purely a READ of each message's StreamingMarkdown widget state; it never
+// mutates. A message whose widget doesn't exist yet (never rendered) or
+// whose text is empty is treated as settled (nothing to animate). The
+// gate is what guarantees the freeze handoff is byte-identical to the
+// on-screen frame: we only freeze AFTER the widget itself flipped live_
+// off, so the last LIVE frame maya cached already IS the settled tree.
+bool live_tail_reveal_settled(const Model& m) {
+    for (std::size_t i = m.ui.frozen_through;
+         i < m.d.current.messages.size(); ++i) {
+        const auto& mm = m.d.current.messages[i];
+        if (mm.role != Role::Assistant) continue;
+        // Still has uncommitted wire bytes — not done arriving, let it ride.
+        if (!mm.streaming_text.empty() || !mm.pending_stream.empty())
+            return false;
+        if (mm.text.empty()) continue;   // no prose body to reveal
+        const auto& cache = m.ui.view_cache.message_md(m.d.current.id, mm.id);
+        if (!cache.streaming) continue;  // never rendered — nothing animating
+        // Reveal still gliding to the live edge, finalize ramp running, or a
+        // background markdown parse pending — any of these means the live
+        // frame in maya's prev_cells is NOT yet the settled shape. Wait.
+        if (cache.streaming->reveal_in_progress()
+         || cache.streaming->is_finalizing()
+         || cache.streaming->is_parsing())
+            return false;
+    }
+    return true;
+}
+
+namespace {
 
 std::optional<std::string> sniff_any(const std::string& raw,
                                      std::span<const std::string_view> keys,
@@ -1015,36 +1053,39 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // of frozen via list_ref (zero-copy) and the live tail draws
     // nothing until the next submit pushes a fresh placeholder.
     if (m.s.is_idle()) {
-        // Pre-settle every Assistant message in the live tail before
-        // the Element snapshot is taken. Lazy finish() during view
-        // shifts an assistant's rendered height by ±N rows when the
-        // closing ``` of a code block commits the tail into a prefix
-        // block — if that happens AFTER the freeze, the snapshotted
-        // Element keeps the unsettled layout forever while the rows
-        // already in native scrollback show the unsettled one too,
-        // and the next live render disagrees with both at the
-        // scrollback↔viewport seam. Settling here is the same
-        // discipline as the per-`last` pre-settle above; the loop
-        // covers multi-sub-turn runs (text→tool→text) where every
-        // Assistant in the live tail is about to be frozen.
+        // Kick the reveal cursor toward the live edge for every
+        // Assistant message in the live tail, but DO NOT finish() yet.
+        // finish() flips the widget live_ off immediately, collapsing the
+        // pre-finish overlay tree (prefix ComponentElement + animated
+        // tail) to the flat post-finish tree in ONE frame — a shape +
+        // hash flip that diverges from the last LIVE frame still in maya's
+        // prev_cells, which is the structural root cause of the
+        // post-stream duplicate-card / ghost in scrollback.
+        //
+        // Instead, request_finalize() arms a short ramp: the reveal
+        // cursor glides to the edge over ~200 ms (or faster if the
+        // backlog is large) and the widget flips live_ off ON ITS OWN at
+        // the moment the cursor catches up. The live tail keeps animating
+        // the whole time (the typewriter never looks stuck), and the LAST
+        // live frame maya paints already IS the settled tree. The actual
+        // finalize+freeze is deferred to meta.cpp's Tick, GATED on
+        // live_tail_reveal_settled() so it never fires until that drained
+        // state is on screen — making the freeze a byte-and-hash-identical
+        // cache HIT (zero re-emit). This is the agent_session guarantee
+        // (live height == settled height at the freeze instant) achieved
+        // WITHOUT giving up the reveal animation.
         for (std::size_t i = m.ui.frozen_through;
              i < m.d.current.messages.size(); ++i) {
             auto& mm = m.d.current.messages[i];
             if (mm.role != Role::Assistant || mm.text.empty()) continue;
-            settle_message_md(m, mm);
+            auto& cache = m.ui.view_cache.message_md(m.d.current.id, mm.id);
+            if (cache.streaming)
+                cache.streaming->request_finalize(200);
         }
-        // DEFER the freeze by one paint. finish() (in settle_message_md
-        // above) changed the md widget's build shape + prefix generation,
-        // so the post-finish element tree's inner ComponentElement hash
-        // differs from the last LIVE (pre-finish) frame still in maya's
-        // prev_cells. Freezing NOW and swapping live-tail→frozen on the
-        // next paint would diff post-finish frozen against pre-finish
-        // prev_cells = cache miss = re-emit the whole turn from the top
-        // (the post-settle redraw). Instead we set a flag and let the
-        // live tail render the SETTLED (post-finish) message for one
-        // frame — prev_cells then holds the post-finish hash — and the
-        // next idle Tick (meta.cpp) freezes the byte-and-hash-identical
-        // tree as a cache HIT. The trim runs in that same deferred step.
+        // Defer the freeze. meta.cpp's Tick checks pending_settle_freeze
+        // AND live_tail_reveal_settled() before finalizing+freezing, so
+        // the snapshot is taken only after the reveal has fully drained
+        // and the settled shape is in prev_cells.
         m.ui.pending_settle_freeze = true;
     }
 
