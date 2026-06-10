@@ -18,6 +18,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/clipboard.hpp"
+#include "agentty/util/env.hpp"
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mention_palette.hpp"
@@ -312,7 +313,35 @@ Step smart_paste_from_clipboard(Model m) {
         return composer_update(std::move(m), ComposerPaste{std::move(*txt)});
     }
 
-    // Both failed. The image path produces the actionable reason
+    // Both failed. Before surfacing an error, try the terminal itself:
+    // OSC 52 asks the terminal emulator (which runs on the user's LOCAL
+    // machine even across SSH) to report its system clipboard back over
+    // the pty. maya decodes the reply into a PasteEvent, which re-enters
+    // the ComposerPaste arm below — its image magic-byte sniff ingests a
+    // PNG/JPEG, or the text path takes plain text. This is the portable
+    // clipboard read that needs no remote tool and no env var, so it's
+    // the right fallback on a headless / SSH host where wl-paste/xclip
+    // found nothing. It's also a valid fallback on a local terminal
+    // whose native tools are missing.
+    //
+    // Gate to avoid a pointless query when a native tool DID run and
+    // authoritatively reported empty: AGENTTY_CLIPBOARD_CMD being set
+    // means the user picked an explicit ferry, so honour its error
+    // instead of racing an OSC 52 reply. Otherwise always try OSC 52 —
+    // terminals that don't support it simply never reply, the toast
+    // below stays on screen, and nothing is stranded.
+    const bool explicit_ferry =
+        util::env::get_or_null<util::env::Var::ClipboardCmd>() != nullptr;
+    if (!explicit_ferry) {
+        auto toast = set_status_toast(
+            m, "reading clipboard from your terminal\xE2\x80\xA6",
+            std::chrono::seconds{3});
+        return {std::move(m),
+                maya::Cmd<Msg>::batch(maya::Cmd<Msg>::query_clipboard(),
+                                      std::move(toast))};
+    }
+
+    // The image path produces the actionable reason
     // ("no clipboard on this host (headless / SSH / airgap)…", "install
     // wl-clipboard", "could not open Windows clipboard"), whereas the
     // text path's "clipboard has no text" is generic noise. Prefer the

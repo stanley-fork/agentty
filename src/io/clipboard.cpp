@@ -249,10 +249,11 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
         const bool headless = (!disp || !*disp) && (!wl || !*wl);
         if (headless) {
             return fail(
-                "no clipboard on this host (headless / SSH). The image is "
-                "on your laptop, not the remote — set AGENTTY_CLIPBOARD_CMD "
-                "to a command that prints the laptop's clipboard image to "
-                "stdout, or attach the image by path");
+                "couldn't read the clipboard over this connection. agentty "
+                "asks your terminal for it via OSC 52 \xE2\x80\x94 enable "
+                "clipboard read in your terminal (kitty/iTerm2/WezTerm/foot/"
+                "Ghostty; tmux needs `set -g set-clipboard on`), or attach "
+                "the image by path / set AGENTTY_CLIPBOARD_CMD");
         }
         return fail(wayland
             ? "no clipboard tool — install wl-clipboard "
