@@ -95,6 +95,32 @@ constexpr std::size_t kStreamTailLines = 64;
     return std::string{s.substr(start)};
 }
 
+// Keep the FIRST keep_lines lines; if more follow, append a dim
+// "\xe2\x8b\xaf N more lines" marker so the body has a hard row ceiling. Used by
+// the subagent card — a long report would otherwise dominate the timeline;
+// the head is the outcome line + the most important details, and the full
+// report is always available verbatim in the wire/transcript.
+[[nodiscard]] std::string head_window(std::string_view s,
+                                      std::size_t keep_lines) {
+    if (s.empty()) return {};
+    std::size_t nl_seen = 0;
+    std::size_t end = s.size();
+    std::size_t total_lines = 1;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\n') {
+            ++total_lines;
+            if (nl_seen + 1 == keep_lines && end == s.size()) end = i;
+            ++nl_seen;
+        }
+    }
+    if (total_lines <= keep_lines) return std::string{s};
+    std::string out{s.substr(0, end)};
+    std::size_t more = total_lines - keep_lines;
+    out += "\n\xe2\x8b\xaf " + std::to_string(more)
+         + (more == 1 ? " more line" : " more lines");  // ⋯
+    return out;
+}
+
 // Body for a terminal line-oriented tool (FileRead, GitDiff, Json,
 // CodeBlock, Failure). These callsites all gate on tc.is_done(), so the
 // output is FINAL — it arrives whole when the tool completes, never
@@ -461,23 +487,41 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //    BashOutput gives the tail-oriented "watch it work" look while
     //    running; CodeBlock shows the full report once settled.
     if (n == "task") {
+        // Hard 5-row ceiling on the card body: a subagent report can be
+        // long, but the timeline card is a glance-able summary — the full
+        // report is always in the transcript. Both the live feed and the
+        // settled report are head-capped to kTaskBodyRows.
+        constexpr std::size_t kTaskBodyRows = 5;
         if (tc.is_running()) {
             if (!tc.progress_text().empty()) {
                 out.kind = Kind::BashOutput;
-                out.text = tc.progress_text();
+                // BashOutput is tail-oriented (newest activity at the
+                // bottom) — keep the last few feed lines so the running
+                // card shows the CURRENT step, not the stale header.
+                out.text = tail_window(tc.progress_text(), kTaskBodyRows);
                 out.text_color = text_tertiary;
                 out.is_streaming = true;
             }
             return out;
         }
         if (tc.is_terminal() && !tc.output().empty()) {
+            // Strip the redundant "Subagent report (type, N turns):"
+            // header + the blank line after it — the card detail already
+            // shows the type and turn count, so the body should lead with
+            // the actual outcome line.
+            std::string_view body = tc.output();
+            if (auto nl = body.find('\n'); nl != std::string_view::npos
+                && body.substr(0, nl).find("Subagent report") != std::string_view::npos) {
+                body.remove_prefix(nl + 1);
+                while (!body.empty() && (body.front() == '\n' || body.front() == ' '))
+                    body.remove_prefix(1);
+            }
             out.kind = Kind::CodeBlock;
-            out.text = tc.output();
+            // keep 4 content lines + 1 "⋯ N more" marker = 5 rows max.
+            out.text = head_window(body, kTaskBodyRows - 1);
             out.text_color = text_tertiary;
-            // The whole point of a subagent card is its report — show
-            // it in full once settled rather than a head+tail elision.
-            // (Failure is self-documenting: the report text itself starts
-            // with "[subagent failed: …]".)
+            // We pre-sliced to the ceiling; render it verbatim (no further
+            // head+tail elision that would fight our marker).
             out.show_all = true;
         }
         return out;
