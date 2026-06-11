@@ -454,6 +454,35 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         return out;
     }
 
+    // ── task (subagent): live activity feed while running, condensed
+    //    report when settled. The feed is streamed into progress_text()
+    //    via progress::emit (turns / tool calls / results / streamed
+    //    text); the terminal output is the harvested "Subagent report".
+    //    BashOutput gives the tail-oriented "watch it work" look while
+    //    running; CodeBlock shows the full report once settled.
+    if (n == "task") {
+        if (tc.is_running()) {
+            if (!tc.progress_text().empty()) {
+                out.kind = Kind::BashOutput;
+                out.text = tc.progress_text();
+                out.text_color = text_tertiary;
+                out.is_streaming = true;
+            }
+            return out;
+        }
+        if (tc.is_terminal() && !tc.output().empty()) {
+            out.kind = Kind::CodeBlock;
+            out.text = tc.output();
+            out.text_color = text_tertiary;
+            // The whole point of a subagent card is its report — show
+            // it in full once settled rather than a head+tail elision.
+            // (Failure is self-documenting: the report text itself starts
+            // with "[subagent failed: …]".)
+            out.show_all = true;
+        }
+        return out;
+    }
+
     // ── Failure fallback. Chrome flips to red so the body chrome
     //    matches the card's failure cue; body content stays dim.
     if (tc.is_failed() && !tc.output().empty()) {

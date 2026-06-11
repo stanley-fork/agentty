@@ -351,6 +351,23 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         }
         return "\xe2\x80\xa6";
     }
+    if (n == "task") {
+        // Header detail = the model's one-line display_description; once the
+        // subagent settles, append its turn count parsed from the report
+        // header ("Subagent report (N turns):") so the card doubles as a
+        // compact result log without expanding.
+        std::string detail = safe("display_description");
+        if (detail.empty()) detail = "subagent";
+        if (tc.is_terminal()) {
+            const auto& out = tc.output();
+            if (auto p = out.find("report ("); p != std::string::npos) {
+                if (auto end = out.find(')', p); end != std::string::npos)
+                    detail += "  \xc2\xb7  " + out.substr(p + 8, end - (p + 8));
+            }
+            if (tc.is_failed()) detail += "  \xc2\xb7  failed";
+        }
+        return detail;
+    }
     return safe_arg(tc.args, "display_description");
 }
 
