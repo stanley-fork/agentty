@@ -368,6 +368,8 @@ set(AGENTTY_AIRGAP_SOURCES
 
 set(AGENTTY_PROVIDER_SOURCES
     src/provider/anthropic/transport.cpp
+    src/provider/openai/transport.cpp
+    src/provider/selection.cpp
 )
 
 # ACP (Agent Client Protocol) — lets agentty run as a headless agent
@@ -1107,6 +1109,46 @@ if(AGENTTY_BUILD_TESTS)
     target_link_libraries(table_render_test PRIVATE maya::maya)
     add_test(NAME table_render_test COMMAND table_render_test)
 
+    # openai_transport_test — verifies the OpenAI-compatible provider's pure
+    # translation layer with NO network: build_tools / build_messages JSON
+    # shaping, and a scripted-SSE → agentty-Msg parse (text deltas, streamed
+    # tool-call assembly, finish_reason→StopReason, usage, error frames,
+    # endpoint presets). Links the provider + tool TUs (same set the
+    # tool_result_budget_test uses).
+    add_executable(openai_transport_test EXCLUDE_FROM_ALL
+        tests/openai_transport_test.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(openai_transport_test PRIVATE include)
+    target_compile_definitions(openai_transport_test PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(openai_transport_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(openai_transport_test PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(openai_transport_test PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME openai_transport_test COMMAND openai_transport_test)
+
     # visual_hash_coverage_test — proves the render gate
     # (Program::visual_hash) can't silently drop a visible change. Two
     # declarative tables: every view-affecting model axis must advance
@@ -1365,6 +1407,7 @@ if(AGENTTY_BUILD_TESTS)
         midrun_wire_test
         stream_liveness_test
         table_render_test
+        openai_transport_test
         visual_hash_coverage_test
         tool_result_budget_test
         acp_integration_test

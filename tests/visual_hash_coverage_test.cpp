@@ -171,6 +171,12 @@ const std::vector<Axis>& visual_axes() {
         {"model_picker cursor move", [](Model& m) {
             m.ui.model_picker = agentty::ui::pick::OpenAt{3};
         }},
+        {"provider_picker opens", [](Model& m) {
+            m.ui.provider_picker = agentty::ui::pick::OpenAt{0};
+        }},
+        {"provider_picker cursor move", [](Model& m) {
+            m.ui.provider_picker = agentty::ui::pick::OpenAt{2};
+        }},
         {"thread_list opens", [](Model& m) {
             m.ui.thread_list = agentty::ui::pick::OpenAt{0};
         }},
