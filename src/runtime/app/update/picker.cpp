@@ -23,6 +23,7 @@
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/tool/subagent.hpp"
 
 namespace agentty::app::detail {
 
@@ -90,6 +91,11 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 // % bar reflects the right denominator for the new model
                 // (1 M for `[1m]` variants, 200 K otherwise).
                 m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
+                // Keep subagents on the live model: the startup config
+                // captured whatever was saved at launch, which can be a
+                // stale/invalid id (every subagent request 400s and the
+                // tool returns no report). Track the picker selection.
+                tools::subagent::set_model(m.d.model_id.value);
                 persist_settings(m);
             }
             m.ui.model_picker = pick::Closed{};

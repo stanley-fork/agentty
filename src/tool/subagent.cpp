@@ -25,6 +25,13 @@ Config current() {
     return g_cfg;
 }
 
+void set_model(std::string model) {
+    if (model.empty()) return;
+    std::lock_guard lk(g_mu);
+    // Only meaningful once a config exists; leave `installed` untouched.
+    g_cfg.model = std::move(model);
+}
+
 int current_depth() noexcept { return g_depth; }
 void push_depth() noexcept { ++g_depth; }
 void pop_depth() noexcept { if (g_depth > 0) --g_depth; }

@@ -24,6 +24,12 @@ struct Config {
 // Install the subagent config (call once at startup, after auth resolves).
 void install(Config cfg);
 
+// Update just the model the subagent loop uses, without disturbing auth
+// or the installed flag. Called when the user switches models mid-session
+// (model picker) so subagents track the live model instead of the stale
+// startup default. No-op if the config was never installed.
+void set_model(std::string model);
+
 // Snapshot the installed config. `installed == false` until install() runs.
 [[nodiscard]] Config current();
 

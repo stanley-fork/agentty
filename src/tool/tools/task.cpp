@@ -21,7 +21,7 @@
 #include "agentty/tool/subagent.hpp"
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/tools.hpp"
-#include "agentty/tool/registry.hpp"
+#include "agentty/tool/registry.hpp"  // tools::progress::emit
 #include "agentty/tool/util/arg_reader.hpp"
 #include "agentty/tool/util/tool_args.hpp"
 
@@ -29,6 +29,8 @@
 #include "agentty/provider/provider.hpp"
 
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <variant>
@@ -77,10 +79,38 @@ std::string subagent_system_prompt() {
     return base;
 }
 
+// A short one-line summary of a tool call for the live progress log:
+// the tool name plus its most identifying argument (path / pattern /
+// command), so the parent card reads like a running activity feed.
+std::string summarize_call(const ToolUse& tc) {
+    std::string s = tc.name.value;
+    if (tc.args.is_object()) {
+        for (const char* key : {"path", "file_path", "pattern", "command",
+                                "url", "query", "symbol", "prompt"}) {
+            auto it = tc.args.find(key);
+            if (it != tc.args.end() && it->is_string()) {
+                std::string v = it->get<std::string>();
+                if (v.size() > 80) { v.resize(77); v += "..."; }
+                // collapse newlines so the feed stays one-line-per-call
+                for (auto& ch : v) if (ch == '\n' || ch == '\r') ch = ' ';
+                s += "  ";
+                s += v;
+                break;
+            }
+        }
+    }
+    return s;
+}
+
 // Drive ONE subagent completion synchronously. Appends the assistant
 // Message (text + tool_calls) to `thread`. Returns the stop reason.
-// Reassembles streamed Msg events into the assistant Message.
-StopReason run_one_completion(Thread& thread, const subagent::Config& cfg) {
+// Reassembles streamed Msg events into the assistant Message. `log`
+// accumulates a human-readable activity feed that is pushed to the
+// parent's tool card via progress::emit as the subagent works — so the
+// running card shows what the subagent is doing instead of sitting
+// blank until the final report lands.
+StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
+                              std::string& log, std::string& err_out) {
     namespace ap = provider::anthropic;
     ap::Request req;
     req.model         = cfg.model;
@@ -103,12 +133,36 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg) {
     StopReason stop = StopReason::Unspecified;
     std::string cur_tool_json;   // accumulates input_json_delta for the open tool
 
+    // Emit a snapshot of the activity log plus whatever the subagent has
+    // streamed so far this turn. Cheap (no-op if no parent sink), so we
+    // can call it on every text delta for a live typing effect.
+    auto pump = [&] {
+        std::string snap = log;
+        if (!asst.text.empty()) {
+            snap += "\n  \xe2\x96\xb8 ";  // ▸
+            snap += asst.text;
+        }
+        progress::emit(snap);
+    };
+
     ap::run_stream_sync(std::move(req),
         [&](Msg m) {
+            // Msg is a TWO-LEVEL variant: the top level is the domain
+            // (ComposerMsg / StreamMsg / ToolMsg / ...) and each domain is
+            // itself a variant of leaf events. The transport only ever
+            // emits StreamMsg leaves, so unwrap the domain first, then
+            // visit the inner StreamMsg to reach StreamTextDelta etc. The
+            // previous single std::visit matched T against StreamTextDelta
+            // directly — but T was msg::StreamMsg (the nested variant), so
+            // NO arm ever fired and every delta was silently dropped
+            // (subagent always "finished with no text report").
+            auto* sm = std::get_if<msg::StreamMsg>(&m);
+            if (!sm) return;  // non-stream domain can't arrive on this path
             std::visit([&](auto&& e) {
                 using T = std::decay_t<decltype(e)>;
                 if constexpr (std::same_as<T, StreamTextDelta>) {
                     asst.text += e.text;
+                    pump();
                 } else if constexpr (std::same_as<T, StreamToolUseStart>) {
                     ToolUse tc;
                     tc.id     = e.id;
@@ -127,11 +181,23 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg) {
                         }
                     }
                     cur_tool_json.clear();
+                    if (!asst.tool_calls.empty()) {
+                        log += "\n  \xe2\x9a\x99 ";  // ⚙
+                        log += summarize_call(asst.tool_calls.back());
+                        pump();
+                    }
                 } else if constexpr (std::same_as<T, StreamFinished>) {
                     stop = e.stop_reason;
+                } else if constexpr (std::same_as<T, StreamError>) {
+                    // Surface the failure instead of swallowing it — an
+                    // auth/400/rate-limit error inside the subagent thread
+                    // otherwise looks like "finished with no text report".
+                    err_out = e.message;
+                    log += "\n  \xe2\x9a\xa0 error: " + e.message;  // ⚠
+                    pump();
                 }
-                // StreamError / StreamStarted / StreamUsage / heartbeat: ignored.
-            }, m);
+                // StreamStarted / StreamUsage / heartbeat: ignored.
+            }, *sm);
         });
 
     thread.messages.push_back(std::move(asst));
@@ -165,9 +231,19 @@ ExecResult run_task(const TaskArgs& a) {
     }
 
     int turns = 0;
+    // Human-readable activity feed streamed to the parent's tool card and
+    // appended to the final report so even a no-text-report subagent shows
+    // what it actually did.
+    std::string log;
+    std::string last_error;  // last StreamError, if any
     while (turns < subagent::kMaxTurns) {
         ++turns;
-        StopReason stop = run_one_completion(thread, cfg);
+        log += (turns == 1 ? "" : "\n");
+        log += "\xe2\x80\xa2 turn " + std::to_string(turns);  // •
+        progress::emit(log);
+        std::string err;
+        StopReason stop = run_one_completion(thread, cfg, log, err);
+        if (!err.empty()) last_error = err;
 
         Message& asst = thread.messages.back();
 
@@ -180,15 +256,21 @@ ExecResult run_task(const TaskArgs& a) {
                 if (tc.args.is_null()) {
                     tc.status = ToolUse::Failed{now, now,
                         "subagent tool args failed to parse"};
+                    log += "\n    \xe2\x9c\x97 " + tc.name.value + ": bad args";
+                    progress::emit(log);
                     continue;
                 }
                 ran_a_tool = true;
                 auto res = tool::DynamicDispatch::execute(tc.name.value, tc.args);
                 if (res) {
                     tc.status = ToolUse::Done{now, now, std::move(res->text)};
+                    log += "\n    \xe2\x9c\x93 " + tc.name.value;  // ✓
                 } else {
                     tc.status = ToolUse::Failed{now, now, res.error().render()};
+                    log += "\n    \xe2\x9c\x97 " + tc.name.value + ": "  // ✗
+                         + res.error().render();
                 }
+                progress::emit(log);
             }
             // The transport synthesises the tool_result User turn from the
             // assistant's terminal tool_calls, so we don't push one here —
@@ -200,6 +282,8 @@ ExecResult run_task(const TaskArgs& a) {
         // Defensive: if the model claimed tool_use but emitted nothing we
         // could run, stop rather than spin.
         if (stop == StopReason::ToolUse && !ran_a_tool) break;
+        // A hard stream error (auth/400/etc.) won't fix itself by looping.
+        if (!err.empty() && !ran_a_tool) break;
     }
 
     // Harvest the final report: the last assistant message's text.
@@ -211,9 +295,18 @@ ExecResult run_task(const TaskArgs& a) {
         }
     }
     if (report.empty()) {
-        report = (turns >= subagent::kMaxTurns)
-            ? "[subagent hit its turn budget without producing a final report]"
-            : "[subagent finished without a text report]";
+        // No final text report. Surface the real reason: a stream error
+        // (auth/400/rate-limit) is the usual culprit and was previously
+        // swallowed, leaving a bare "finished without a text report".
+        // Fall back to the activity feed so the parent sees what happened.
+        std::string why;
+        if (!last_error.empty())
+            why = "[subagent failed: " + last_error + "]";
+        else if (turns >= subagent::kMaxTurns)
+            why = "[subagent hit its turn budget without producing a final report]";
+        else
+            why = "[subagent finished without a text report]";
+        report = log.empty() ? why : (why + "\n\nActivity:\n" + log);
     }
 
     std::ostringstream out;
