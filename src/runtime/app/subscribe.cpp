@@ -149,6 +149,24 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        auto sk = std::get<SpecialKey>(ev.key);
+        switch (sk) {
+            case SpecialKey::Escape:   return CloseProviderPicker{};
+            case SpecialKey::Enter:    return ProviderPickerSelect{};
+            case SpecialKey::Up:       return ProviderPickerMove{-1};
+            case SpecialKey::Down:     return ProviderPickerMove{+1};
+            case SpecialKey::Home:     return ProviderPickerJump{ProviderPickerJump::Where::Home};
+            case SpecialKey::End:      return ProviderPickerJump{ProviderPickerJump::Where::End};
+            case SpecialKey::PageUp:   return ProviderPickerJump{ProviderPickerJump::Where::PageUp};
+            case SpecialKey::PageDown: return ProviderPickerJump{ProviderPickerJump::Where::PageDown};
+            default: break;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<Msg> on_thread_list(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -306,6 +324,7 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
                 case U'/':           return OpenModelPicker{};
                 case U'j': case U'J': return OpenThreadList{};
                 case U'k': case U'K': return OpenCommandPalette{};
+                case U'p': case U'P': return OpenProviderPicker{};
                 case U'l': case U'L': return RedrawScreen{};
                 case U'r': case U'R': return OpenDiffReview{};
                 case U'n': case U'N': return NewThread{};
@@ -466,6 +485,7 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_mention = mention_is_open(m.ui.mention_palette);
     const bool in_symbol  = symbol_palette_is_open(m.ui.symbol_palette);
     const bool in_models  = pick::is_open(m.ui.model_picker);
+    const bool in_providers = pick::is_open(m.ui.provider_picker);
     const bool in_threads = pick::is_open(m.ui.thread_list);
     const bool in_diff    = pick::is_open(m.ui.diff_review);
     const bool in_todo    = pick::is_open(m.ui.todo.open);
@@ -494,6 +514,7 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_mention) return on_mention_palette(ev);
             if (in_symbol)  return on_symbol_palette(ev);
             if (in_models)  return on_model_picker(ev);
+            if (in_providers) return on_provider_picker(ev);
             if (in_threads) return on_thread_list(ev);
             if (in_diff)    return on_diff_review(ev);
             if (in_todo)    if (auto r = on_todo_modal(ev)) return r;

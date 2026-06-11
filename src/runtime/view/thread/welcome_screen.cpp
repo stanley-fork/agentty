@@ -39,6 +39,7 @@ maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
                           {"^T",    " todo",    warn},           // yellow — planning
                           {"S-Tab", " profile", role_brand},     // magenta — identity
                           {"^/",    " models",  role_brand_alt}, // bright magenta
+                          {"^P",    " provider",code_path},      // cyan — actions
                           {"^N",    " new",     success},        // green — create
                           {"^C",    " quit",    danger}};        // red — destructive
     cfg.accent_color   = role_brand;

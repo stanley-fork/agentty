@@ -159,6 +159,7 @@ struct Model {
     struct UI {
         ComposerState       composer;
         ui::pick::OneAxis   model_picker;     // Closed | OpenAt{index}
+        ui::pick::OneAxis   provider_picker;  // Closed | OpenAt{index}
         ui::pick::OneAxis   thread_list;      // Closed | OpenAt{index}
         CommandPaletteState command_palette;
         MentionPaletteState mention_palette;  // Closed | Open{query, index, files}
@@ -322,6 +323,7 @@ struct Model {
         // pure function of the selected index, so the raw-key dispatch
         // is interference, not input.
         mutable maya::ScrollState model_picker_scroll{.auto_dispatch = false};
+        mutable maya::ScrollState provider_picker_scroll{.auto_dispatch = false};
         mutable maya::ScrollState thread_list_scroll{.auto_dispatch = false};
         mutable maya::ScrollState command_palette_scroll{.auto_dispatch = false};
         mutable maya::ScrollState mention_palette_scroll{.auto_dispatch = false};

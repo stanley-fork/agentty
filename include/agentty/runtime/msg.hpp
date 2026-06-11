@@ -253,6 +253,16 @@ struct ModelPickerSelect {};
 struct ModelPickerToggleFavorite {};
 struct ModelsLoaded { std::vector<ModelInfo> models; };
 
+// ── Provider picker ──────────────────────────────────────────────────────
+// Mirrors the model picker. Selecting a provider live-switches the active
+// backend (provider::select + a deps() seam swap), persists the choice, and
+// kicks a fresh model fetch so the model list reflects the new backend.
+struct OpenProviderPicker {};
+struct CloseProviderPicker {};
+struct ProviderPickerMove { int delta; };
+struct ProviderPickerJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
+struct ProviderPickerSelect {};
+
 // ── Thread list ──────────────────────────────────────────────────────────
 struct OpenThreadList {};
 struct CloseThreadList {};
@@ -432,6 +442,10 @@ using ModelPickerMsg = std::variant<
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,
     ModelPickerSelect, ModelPickerToggleFavorite, ModelsLoaded>;
 
+using ProviderPickerMsg = std::variant<
+    OpenProviderPicker, CloseProviderPicker, ProviderPickerMove,
+    ProviderPickerJump, ProviderPickerSelect>;
+
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
     ThreadListSelect, NewThread, ThreadsLoaded, ThreadLoaded>;
@@ -485,6 +499,7 @@ using Msg = std::variant<
     msg::StreamMsg,
     msg::ToolMsg,
     msg::ModelPickerMsg,
+    msg::ProviderPickerMsg,
     msg::ThreadListMsg,
     msg::CommandPaletteMsg,
     msg::MentionPaletteMsg,
@@ -523,6 +538,7 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::StreamMsg>}
          + int{in_variant_v<L, msg::ToolMsg>}
          + int{in_variant_v<L, msg::ModelPickerMsg>}
+         + int{in_variant_v<L, msg::ProviderPickerMsg>}
          + int{in_variant_v<L, msg::ThreadListMsg>}
          + int{in_variant_v<L, msg::CommandPaletteMsg>}
          + int{in_variant_v<L, msg::MentionPaletteMsg>}
@@ -548,6 +564,8 @@ static_assert(leaf_domain_count<ToolExecOutput>()            == 1,
               "ToolExecOutput must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<OpenModelPicker>()           == 1,
               "OpenModelPicker must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenProviderPicker>()        == 1,
+              "OpenProviderPicker must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<NewThread>()                 == 1,
               "NewThread must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<CommandPaletteSelect>()      == 1,
@@ -569,7 +587,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 12,
+static_assert(std::variant_size_v<Msg> == 13,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

@@ -9,6 +9,8 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/provider/registry.hpp"
+#include "agentty/provider/selection.hpp"
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
 
@@ -134,6 +136,96 @@ Element model_picker(const Model& m) {
         text("PgUp/PgDn", fg_of(fg)), text(" page  ", fg_dim(muted)),
         text("Enter", fg_of(fg)), text(" select  ", fg_dim(muted)),
         text("F", fg_of(fg)), text(" favorite  ", fg_dim(muted)),
+        text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
+    ).build());
+
+    return Picker{std::move(cfg)}.build();
+}
+
+namespace {
+
+// Resolve the currently-active provider id so the picker can mark the
+// active row. Anthropic when kind==Anthropic, else the endpoint label.
+[[nodiscard]] std::string active_provider_id() {
+    const auto& sel = provider::active();
+    if (sel.kind == provider::Kind::OpenAI) return sel.openai_endpoint.label;
+    return std::string{provider::default_provider_id()};
+}
+
+// Per-row auth status: does this provider have credentials available?
+// Local backends need none; Anthropic is assumed authed (creds resolved at
+// startup / via login); OpenAI-family checks its env-var chain.
+
+} // namespace
+
+Element provider_picker(const Model& m) {
+    auto* picker = pick::opened(m.ui.provider_picker);
+    if (!picker) return nothing();
+
+    Picker::Config cfg;
+    cfg.title      = " Providers ";
+    cfg.accent     = highlight;
+    cfg.min_width  = 52;
+    cfg.viewport_h = picker_viewport_h();
+    cfg.scroll     = &m.ui.provider_picker_scroll;
+    cfg.selected   = picker->index;
+
+    const std::string active_id = active_provider_id();
+    const auto presets = provider::providers();
+
+    auto env_has = [](std::string_view name) -> bool {
+        if (name.empty()) return false;
+        const char* v = std::getenv(std::string{name}.c_str());
+        return v && *v;
+    };
+
+    cfg.rows.reserve(presets.size());
+    int i = 0;
+    for (const auto& p : presets) {
+        const bool active = (p.id == active_id);
+        const bool sel    = (i == picker->index);
+
+        // Auth status for the trailing column.
+        std::string note;
+        maya::Color note_color = muted;
+        if (p.is_local || p.auth == provider::AuthStyle::None) {
+            note = "● local";
+            note_color = info;
+        } else if (p.kind == provider::Kind::Anthropic) {
+            note = "✓ login";
+            note_color = success;
+        } else {
+            bool have = false;
+            std::string_view via;
+            for (auto env : p.auth_env) {
+                if (env_has(env)) { have = true; via = env; break; }
+            }
+            if (have) { note = "✓ " + std::string{via}; note_color = success; }
+            else {
+                // Name the first (provider-specific) env var the user should set.
+                std::string_view want = p.auth_env.front();
+                note = want.empty() ? "⚠ no key"
+                                    : "⚠ " + std::string{want};
+                note_color = warn;
+            }
+        }
+
+        Picker::Config::Row row;
+        row.leading        = std::string{p.label} + "  "
+                           + std::string{p.blurb};
+        row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+        row.trailing       = note;
+        row.trailing_style = fg_of(note_color);
+        row.selected = sel;
+        row.active   = active;
+        cfg.rows.push_back(std::move(row));
+        ++i;
+    }
+
+    cfg.footer.push_back(text(""));
+    cfg.footer.push_back(h(
+        text("↑↓", fg_of(fg)), text(" move  ", fg_dim(muted)),
+        text("Enter", fg_of(fg)), text(" switch  ", fg_dim(muted)),
         text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
     ).build());
 

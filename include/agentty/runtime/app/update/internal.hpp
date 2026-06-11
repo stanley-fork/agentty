@@ -213,6 +213,7 @@ Step composer_update      (Model m, msg::ComposerMsg       cm);
 Step stream_update        (Model m, msg::StreamMsg         sm);
 Step tool_update          (Model m, msg::ToolMsg           tm);
 Step model_picker_update  (Model m, msg::ModelPickerMsg    pm);
+Step provider_picker_update(Model m, msg::ProviderPickerMsg pm);
 Step thread_list_update   (Model m, msg::ThreadListMsg     tm);
 Step palette_update       (Model m, msg::CommandPaletteMsg pm);
 Step mention_update       (Model m, msg::MentionPaletteMsg mm);

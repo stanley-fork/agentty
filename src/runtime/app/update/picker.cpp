@@ -18,6 +18,8 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/provider/registry.hpp"
+#include "agentty/provider/selection.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/picker.hpp"
 #include "agentty/runtime/view/cache.hpp"
@@ -108,6 +110,86 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 mi.favorite = !mi.favorite;
             }
             return done(std::move(m));
+        },
+    }, pm);
+}
+
+// ── Provider picker ────────────────────────────────────────────────────────
+// Selecting a row live-switches the active backend: parse the preset id
+// into a Selection, install it (process-global), persist it, swap the
+// Deps auth to the new provider's resolved credentials, and kick a fresh
+// model fetch so the model list reflects the new backend. No restart.
+Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
+    const auto presets = provider::providers();
+    const int n = static_cast<int>(presets.size());
+    return std::visit(overload{
+        [&](OpenProviderPicker) -> Step {
+            // Open at the row matching the currently-active provider.
+            int idx = 0;
+            const auto& active_label = provider::active().kind
+                                       == provider::Kind::OpenAI
+                ? provider::active().openai_endpoint.label
+                : std::string{provider::default_provider_id()};
+            for (int i = 0; i < n; ++i)
+                if (presets[static_cast<std::size_t>(i)].id == active_label) idx = i;
+            m.ui.provider_picker = pick::OpenAt{idx};
+            return done(std::move(m));
+        },
+        [&](CloseProviderPicker) -> Step {
+            m.ui.provider_picker = pick::Closed{};
+            return done(std::move(m));
+        },
+        [&](ProviderPickerMove& e) -> Step {
+            auto* p = pick::opened(m.ui.provider_picker);
+            if (!p || n == 0) return done(std::move(m));
+            p->index = (p->index + e.delta + n) % n;
+            return done(std::move(m));
+        },
+        [&](ProviderPickerJump& e) -> Step {
+            auto* p = pick::opened(m.ui.provider_picker);
+            if (!p || n == 0) return done(std::move(m));
+            using W = ProviderPickerJump::Where;
+            constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
+            switch (e.where) {
+                case W::Home:     p->index = 0; break;
+                case W::End:      p->index = n - 1; break;
+                case W::PageUp:   p->index = std::max(0, p->index - kPage); break;
+                case W::PageDown: p->index = std::min(n - 1, p->index + kPage); break;
+            }
+            return done(std::move(m));
+        },
+        [&](ProviderPickerSelect) -> Step {
+            auto* p = pick::opened(m.ui.provider_picker);
+            m.ui.provider_picker = pick::Closed{};
+            if (!p || p->index < 0 || p->index >= n) return done(std::move(m));
+            const auto& preset = presets[static_cast<std::size_t>(p->index)];
+            const std::string spec{preset.id};
+
+            // Install + persist the new selection.
+            provider::select(provider::parse_selection(spec));
+            {
+                auto settings = deps().load_settings();
+                settings.provider = spec;
+                deps().save_settings(settings);
+            }
+
+            // Swap the Deps auth to the new backend's credentials. For
+            // Anthropic we keep the existing session creds (already in
+            // deps().auth); for OpenAI-family we resolve from the registry's
+            // env-var chain. The stream seam reads provider::active() at
+            // call time so the next request targets the new backend.
+            auth::AuthHeader new_auth =
+                provider::resolve_auth_for(spec, deps().auth);
+            app::switch_provider(new_auth);
+
+            // Models differ per backend — drop the stale list and refetch.
+            m.d.available_models.clear();
+
+            // Confirmation toast + refetch the new backend's model list.
+            auto toast = set_status_toast(
+                m, "provider → " + std::string{preset.label});
+            return {std::move(m),
+                    Cmd<Msg>::batch(std::move(toast), cmd::fetch_models())};
         },
     }, pm);
 }
