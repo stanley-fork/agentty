@@ -47,14 +47,16 @@ void select(Selection s);
 // Resolve the AuthHeader for a provider spec, registry-driven.
 //   • Anthropic   → derived from `anthropic_creds` (OAuth / x-api-key from
 //                   `agentty login`), passed in by the caller.
-//   • OpenAI-family → a bearer key: `cli_key` if non-empty, else the first
-//                   non-empty env var in the preset's auth_env list.
+//   • OpenAI-family → a bearer key, in precedence order: `cli_key` (--key)
+//                   > `saved_key` (pasted in-app, from Settings.provider_keys)
+//                   > the first non-empty env var in the preset's auth_env.
 //   • Local (Ollama) → an empty ApiKeyHeader (the local server needs no auth).
 // Used by main.cpp at startup AND by the provider-picker reducer for live
 // switches, so the two can never disagree about how a backend authenticates.
 [[nodiscard]] auth::AuthHeader resolve_auth_for(
     std::string_view spec,
     const auth::AuthHeader& anthropic_creds,
-    std::string_view cli_key = {});
+    std::string_view cli_key = {},
+    std::string_view saved_key = {});
 
 } // namespace agentty::provider

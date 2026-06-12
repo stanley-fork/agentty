@@ -40,7 +40,8 @@ Selection parse_selection(std::string_view spec) {
 
 auth::AuthHeader resolve_auth_for(std::string_view spec,
                                   const auth::AuthHeader& anthropic_creds,
-                                  std::string_view cli_key) {
+                                  std::string_view cli_key,
+                                  std::string_view saved_key) {
     const ProviderPreset* p = spec.empty() ? preset_for(default_provider_id())
                                             : preset_for(spec);
 
@@ -55,10 +56,10 @@ auth::AuthHeader resolve_auth_for(std::string_view spec,
     if (p && p->auth == AuthStyle::None)
         return auth::AuthHeader{auth::ApiKeyHeader{std::string{}}};
 
-    // OpenAI-family (preset or custom host): bearer key from --key, then the
-    // preset's env-var chain. Custom hosts (no preset) fall back to
-    // OPENAI_API_KEY, the de-facto default for OpenAI-compatible servers.
+    // OpenAI-family (preset or custom host): bearer key, precedence
+    //   --key  >  saved key (in-app paste)  >  env-var chain  >  OPENAI_API_KEY.
     std::string key{cli_key};
+    if (key.empty()) key = std::string{saved_key};
     if (key.empty() && p) {
         for (auto env : p->auth_env) {
             key = env_or_empty(env);

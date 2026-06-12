@@ -40,6 +40,13 @@ struct OAuthExchanging {};
 struct ApiKeyInput {
     std::string key_input;
     int         cursor = 0;
+    // Which backend this key is for. Empty = Anthropic (saved to
+    // credentials.json). A provider id ("openai", "groq", …) routes the
+    // submit to Settings.provider_keys + a live provider switch. Carries
+    // the human label for the panel header so the view needs no registry
+    // lookup.
+    std::string provider;        // canonical id; empty = Anthropic
+    std::string provider_label;  // display name for the panel title
 };
 
 struct Failed {

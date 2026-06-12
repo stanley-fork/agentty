@@ -313,8 +313,16 @@ int main(int argc, char** argv) {
     // -k; local backends (Ollama) accept an empty key. See
     // provider::resolve_auth_for — the single place that knows this mapping.
     auth::AuthHeader anthropic_creds = auth::make_auth_header(creds);
+    std::string saved_provider_key;
+    {
+        auto s = persistence::load_settings();
+        if (auto it = s.provider_keys.find(provider_spec);
+            it != s.provider_keys.end())
+            saved_provider_key = it->second;
+    }
     auth::AuthHeader provider_auth =
-        provider::resolve_auth_for(provider_spec, anthropic_creds, args.cli_key);
+        provider::resolve_auth_for(provider_spec, anthropic_creds,
+                                   args.cli_key, saved_provider_key);
 
     // ── Wire the Provider + Store seams ─────────────────────────────────
     // Both providers live on main's stack so whichever the install lambda

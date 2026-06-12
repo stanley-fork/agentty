@@ -4,6 +4,7 @@
 // stores, hypothetical cloud sync) live outside this header.
 
 #include <concepts>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -28,6 +29,12 @@ struct Settings {
     // the OpenAI-compatible transport. Set by `--provider`; consulted at
     // startup in main.cpp.
     std::string          provider;
+    // Per-provider API keys entered via the in-app login modal, keyed by
+    // the provider's canonical id ("openai", "groq", …). A saved key here
+    // takes precedence over the env-var chain so a user who pasted a key
+    // once doesn't have to re-export it every shell. Anthropic is NOT
+    // stored here — its creds live in credentials.json.
+    std::map<std::string, std::string> provider_keys;
 };
 
 template <class S>

@@ -18,6 +18,8 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/provider/registry.hpp"
+#include "agentty/provider/selection.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/view/helpers.hpp"
@@ -160,6 +162,8 @@ Step login_cursor_right(Model m) {
 Step login_submit(Model m) {
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login)) {
         std::string key = std::move(api->key_input);
+        const std::string provider = api->provider;
+        const std::string provider_label = api->provider_label;
         // Trim trailing whitespace — paste handlers may include a stray
         // newline depending on terminal pasting behaviour.
         while (!key.empty() && (key.back() == '\r' || key.back() == '\n'
@@ -169,6 +173,33 @@ Step login_submit(Model m) {
             m.ui.login = login::Failed{"no key entered"};
             return done(std::move(m));
         }
+
+        // OpenAI-family key: persist under Settings.provider_keys[id], then
+        // commit the live provider switch the picker deferred. The Anthropic
+        // path (empty provider) keeps using credentials.json below.
+        if (!provider.empty()) {
+            {
+                auto settings = deps().load_settings();
+                settings.provider_keys[provider] = key;
+                settings.provider = provider;
+                deps().save_settings(settings);
+            }
+            provider::select(provider::parse_selection(provider));
+            // Build the new backend's auth from the just-pasted key (it isn't
+            // in deps().load_settings()'s in-memory copy used elsewhere; pass
+            // it as the saved_key so the resolver picks it without a reload).
+            auth::AuthHeader new_auth = provider::resolve_auth_for(
+                provider, deps().auth, /*cli_key=*/{}, /*saved_key=*/key);
+            app::switch_provider(new_auth);
+            m.d.available_models.clear();
+            m.ui.login = login::Closed{};
+            auto toast = set_status_toast(
+                m, "provider → " + provider_label,
+                std::chrono::seconds{3});
+            return {std::move(m),
+                    Cmd<Msg>::batch(std::move(toast), cmd::fetch_models())};
+        }
+
         install_and_close(m, auth::Credentials{auth::cred::ApiKey{std::move(key)}});
         return done(std::move(m));
     }

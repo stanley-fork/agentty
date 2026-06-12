@@ -174,20 +174,22 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 provider::resolve_auth_for(spec, deps().auth);
 
             // A hosted (non-local) OpenAI-family provider with no resolvable
-            // key would 401 on every request. Don't switch into that — keep
-            // the current backend and tell the user exactly which env var to
-            // set (or to pass -k). Far better than a confusing stream error.
+            // key can't stream. Instead of a dead-end error, open the in-app
+            // key-entry modal targeted at THIS provider: the user pastes a
+            // key, it's saved to Settings.provider_keys, and login_submit
+            // commits the switch (see login.cpp). The selection isn't
+            // installed until the key lands.
             const bool needs_key =
                 preset.kind == provider::Kind::OpenAI && !preset.is_local
                 && preset.auth != provider::AuthStyle::None;
             if (needs_key && auth::is_empty(new_auth)) {
-                std::string want{preset.auth_env.front()};
-                std::string msg = "set " + (want.empty() ? std::string{"OPENAI_API_KEY"} : want)
-                                + " to use " + std::string{preset.label}
-                                + " (or pass -k)";
-                return {std::move(m),
-                        set_status_toast(m, std::move(msg),
-                                         std::chrono::seconds{6})};
+                m.ui.login = ui::login::ApiKeyInput{
+                    .key_input      = {},
+                    .cursor         = 0,
+                    .provider       = spec,
+                    .provider_label = std::string{preset.label},
+                };
+                return done(std::move(m));
             }
 
             // Install + persist the new selection.

@@ -187,7 +187,7 @@ Element panel_picking(bool failed, std::string_view fail_msg) {
     // Claude account at the provider picker so they're never stuck here.
     rows.push_back(body_text(
         "Using OpenAI, Groq, OpenRouter or a local model instead? "
-        "Press Esc, then Ctrl-P to pick that provider.",
+        "Press Esc, then Ctrl-P to pick it — you can paste its key right there.",
         fg_dim(muted)));
     rows.push_back(text(""));
     rows.push_back(key_hints({{"1/2", "choose"}, {"Esc", "close"}}));
@@ -242,14 +242,27 @@ Element panel_oauth_exchanging() {
 
 Element panel_api_key(const login::ApiKeyInput& s) {
     std::vector<Element> rows;
-    rows.push_back(text("Anthropic API key", fg_bold(fg)));
-    rows.push_back(body_text(
-        "Paste an sk-ant-… key. It will be saved to "
-        "~/.config/agentty/credentials.json (0600).",
-        fg_dim(muted)));
-    rows.push_back(text(""));
-    rows.push_back(input_row(s.key_input, s.cursor, /*secret=*/true,
-                             /*placeholder=*/"sk-ant-…"));
+    const bool anthropic = s.provider.empty();
+    if (anthropic) {
+        rows.push_back(text("Anthropic API key", fg_bold(fg)));
+        rows.push_back(body_text(
+            "Paste an sk-ant-… key. It will be saved to "
+            "~/.config/agentty/credentials.json (0600).",
+            fg_dim(muted)));
+        rows.push_back(text(""));
+        rows.push_back(input_row(s.key_input, s.cursor, /*secret=*/true,
+                                 /*placeholder=*/"sk-ant-…"));
+    } else {
+        rows.push_back(text(s.provider_label + " API key", fg_bold(fg)));
+        rows.push_back(body_text(
+            "Paste your " + s.provider_label + " API key to switch to it. "
+            "It's saved to ~/.config/agentty settings so you won't be "
+            "asked again.",
+            fg_dim(muted)));
+        rows.push_back(text(""));
+        rows.push_back(input_row(s.key_input, s.cursor, /*secret=*/true,
+                                 /*placeholder=*/"paste API key…"));
+    }
     rows.push_back(text(""));
     rows.push_back(key_hints({{"Enter", "submit"}, {"Esc", "cancel"}}));
     return v(std::move(rows)).build();
