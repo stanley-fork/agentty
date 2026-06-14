@@ -139,7 +139,36 @@ struct StreamCtx {
     // Prefix of "<tool_call>" or a code fence — still possibly a tool call.
     constexpr std::string_view kTag = "<tool_call>";
     if (kTag.starts_with(rest) || rest.starts_with("<")) return true;
-    if (rest.starts_with("`")) return true;  // start of a ``` fence
+    // ```json fence is a tool-call wrapper. But ```cpp / ```python / etc.
+    // are markdown code blocks the model is rendering as prose — DON'T hold.
+    // Only hold if it's exactly "```" (incomplete) or "```json" (tool fence).
+    if (rest.starts_with("```")) {
+        // If we've only seen "```" so far, still incomplete — hold.
+        if (rest.size() <= 3) return true;
+        // If it's "```json" (possibly with trailing whitespace/newline), hold.
+        std::string_view after_fence = rest.substr(3);
+        // Trim leading whitespace after ```
+        std::size_t k = 0;
+        while (k < after_fence.size() && (after_fence[k] == ' '
+               || after_fence[k] == '\t')) ++k;
+        after_fence = after_fence.substr(k);
+        // "```json" or "```\n{..." are tool wrappers
+        if (after_fence.empty()) return true;  // just "```   " so far
+        if (after_fence.starts_with("json")) return true;
+        if (after_fence.front() == '{') return true;
+        if (after_fence.front() == '\n' || after_fence.front() == '\r') {
+            // Check what comes after the newline
+            std::size_t nl = 0;
+            while (nl < after_fence.size() && (after_fence[nl] == '\n'
+                   || after_fence[nl] == '\r')) ++nl;
+            if (nl >= after_fence.size()) return true;  // just newlines
+            if (after_fence[nl] == '{') return true;  // ```\n{ = tool wrapper
+        }
+        // It's ```cpp or ```python etc. — NOT a tool wrapper, don't hold.
+        return false;
+    }
+    // Single backtick is never a tool wrapper.
+    if (rest.front() == '`') return false;
     return false;
 }
 
