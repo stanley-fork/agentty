@@ -465,16 +465,21 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
             while (k < after.size() && (after[k] == ' ' || after[k] == '\t'
                    || after[k] == '\n' || after[k] == '\r')) ++k;
             // Strip if:
-            // - followed by { (opening fence for JSON)
+            // - followed by { (opening fence for JSON body)
             // - followed by </tool_call> (closing fence of wrapper)
-            // - at end of buffer (closing fence, incomplete)
-            // - just whitespace to end (closing fence, incomplete)
-            // DON'T strip if followed by a language tag (```cpp etc.)
-            if (k >= after.size() || after[k] == '{' ||
-                after.substr(k).starts_with("</tool_call>")) {
+            // DON'T strip if:
+            // - at end of buffer (could be incomplete OPENING fence like ```)
+            // - followed by a language tag (```cpp etc. = markdown, not tool)
+            // The key insight: an incomplete ``` could be EITHER an opening
+            // fence (waiting for language tag or content) OR a closing fence.
+            // We can only tell by what follows. If nothing follows yet, DON'T
+            // strip — wait for more data.
+            if (k < after.size() &&
+                (after[k] == '{' || after.substr(k).starts_with("</tool_call>"))) {
                 sv.remove_prefix(3);
             }
-            // Otherwise it's ```cpp / ```python etc. — don't strip anything
+            // Otherwise leave it alone — it's either an incomplete opener or
+            // a markdown code fence (```cpp etc.)
         }
         // More whitespace after fence/tag.
         while (!sv.empty() && (sv.front()==' '||sv.front()=='\t'
