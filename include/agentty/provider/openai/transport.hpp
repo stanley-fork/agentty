@@ -122,4 +122,9 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
     std::string_view sse_bytes,
     std::vector<std::string> known_tools = {});
 
+// Same, for the native Ollama /api/chat NDJSON path (feed_ndjson).
+[[nodiscard]] std::vector<Msg> parse_ndjson_for_test(
+    std::string_view ndjson_bytes,
+    std::vector<std::string> known_tools = {});
+
 } // namespace agentty::provider::openai

@@ -23,7 +23,9 @@
 #include "agentty/domain/profile.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
+#include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/selection.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/policy.hpp"
@@ -545,7 +547,13 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
             resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
             return;
         }
-        if (auth::is_empty(auth_)) {
+        // Local OpenAI-compatible backends (Ollama, llama.cpp) need no key,
+        // so an empty auth is legitimate for them. Only demand credentials
+        // for a hosted (TLS) endpoint or the Anthropic path.
+        const auto& sel = provider::active();
+        const bool keyless_local =
+            sel.kind == provider::Kind::OpenAI && !sel.openai_endpoint.use_tls;
+        if (auth::is_empty(auth_) && !keyless_local) {
             resp.error(a::errc::AuthRequired,
                 "agentty has no credentials — run `agentty login` first");
             return;
@@ -573,15 +581,81 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
     std::string error_msg;
     StopReason last_stop = StopReason::EndTurn;
 
+    // Doom-loop guard for weak local models: count salvaged (leaked-JSON)
+    // tool rounds across the turn. After kMaxSalvaged of them — or any
+    // salvaged memory-tool call — force the turn to finish in plain text
+    // instead of looping (the TUI's dedup_releaked_salvage_calls analog).
+    constexpr int kMaxSalvaged = 3;
+    int salvaged_rounds = 0;
+    bool force_text_retry = false;   // next sub-turn: re-prompt with NO tools
+    bool budget_done = false;        // the one final tool-free retry has fired
+    auto is_salvaged = [](const std::string& id) {
+        return std::string_view{id}.starts_with("call_salvaged_");
+    };
+    static constexpr std::string_view kMemoryTools[] = {
+        "remember", "forget", "wipe_memory"};
+
     for (int turn = 0; turn < 64; ++turn) {
         Session* s = find_session(session_id);
         if (!s) { errored = true; error_msg = "session vanished"; break; }
 
-        StopReason stop = stream_completion(*s, cancelled, error_msg);
+        StopReason stop = stream_completion(*s, cancelled, error_msg,
+                                            force_text_retry);
         last_stop = stop;
+        force_text_retry = false;
         if (!error_msg.empty()) { errored = true; break; }
         if (cancelled) break;
         if (stop != StopReason::ToolUse) break;
+
+        // Inspect the just-streamed assistant message's tool calls. A leaked
+        // call from a weak local model carries the call_salvaged_ id. Memory
+        // tools (remember/forget/wipe) leaked on a non-explicit turn are junk,
+        // and once the salvage budget is spent it's a doom loop. In both cases
+        // we FAIL the leaked calls without running them, feed that failure
+        // back as a tool result (so the wire tool_use↔result pairing stays
+        // valid), and let the model take ONE more sub-turn to answer in plain
+        // text — instead of returning a blank bubble.
+        if (Session* cs = find_session(session_id);
+            cs && !cs->thread.messages.empty()) {
+            Message& back = cs->thread.messages.back();
+            if (back.role == Role::Assistant) {
+                bool any_salvaged = false, mem_leak = false;
+                for (auto& tc : back.tool_calls) {
+                    if (!is_salvaged(tc.id.value)) continue;
+                    any_salvaged = true;
+                    for (auto t : kMemoryTools)
+                        if (t == tc.name.value) mem_leak = true;
+                }
+                if (any_salvaged) ++salvaged_rounds;
+                const bool budget_blown = salvaged_rounds > kMaxSalvaged;
+                if (mem_leak || budget_blown) {
+                    bool failed_any = false;
+                    for (auto& tc : back.tool_calls) {
+                        if (!is_salvaged(tc.id.value) || tc.is_terminal())
+                            continue;
+                        tc.status = ToolUse::Failed{
+                            {}, {}, "this call was not run — do NOT call tools, "
+                            "answer the user in plain text now"};
+                        a::ToolCallUpdate u;
+                        u.toolCallId = a::ToolCallId{tc.id.value};
+                        u.status     = a::Just(a::ToolCallStatus::Failed);
+                        send_update(session_id, a::SU_ToolCallUpdate{std::move(u)});
+                        failed_any = true;
+                    }
+                    // Budget fully blown: one FINAL tool-free retry forces a
+                    // plain-text answer (summarising any results already
+                    // gathered) instead of returning an empty bubble. The
+                    // budget_done latch makes it fire exactly once.
+                    if (budget_blown) {
+                        if (budget_done) { last_stop = StopReason::EndTurn; break; }
+                        budget_done = true;
+                        force_text_retry = true;
+                        continue;
+                    }
+                    if (failed_any) { force_text_retry = true; continue; }
+                }
+            }
+        }
 
         bool ran = run_tools(*s, cancelled);
         if (cancelled || !ran) break;
@@ -600,14 +674,25 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
 }
 
 StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
-                                          std::string& out_error) {
+                                          std::string& out_error,
+                                          bool suppress_tools) {
     provider::Request req;
     req.model         = sess.model.empty() ? model_id_ : sess.model;
-    req.system_prompt = provider::anthropic::default_system_prompt();
+    // Weak local models over the OpenAI-compatible path get a slim,
+    // decision-first prompt (the full Anthropic agentic prompt primes a 7B
+    // model to over-call tools even on a greeting). Hosted Anthropic keeps
+    // the full prompt. Mirrors the TUI's cmd_factory swap.
+    req.system_prompt = provider::active().kind == provider::Kind::OpenAI
+        ? provider::openai::local_model_system_prompt()
+        : provider::anthropic::default_system_prompt();
     req.cancel        = sess.cancel;
     req.auth          = auth_;
     req.messages      = sess.thread.messages;
-    req.tools         = wire_tools();
+    // suppress_tools: a weak local model that just leaked a junk tool call
+    // gets a tool-free retry. With no tools advertised it cannot leak another
+    // and answers the user in plain text (proven: qwen2.5-coder:7b greets
+    // cleanly only when no tools are on the wire).
+    if (!suppress_tools) req.tools = wire_tools();
 
     Message assistant;
     assistant.role = Role::Assistant;

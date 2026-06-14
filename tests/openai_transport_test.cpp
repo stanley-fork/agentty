@@ -308,8 +308,11 @@ static void test_sse_salvage_fenced_tags() {
 }
 
 static void test_sse_salvage_unknown_tool_stays_text() {
-    // A bare JSON naming a tool we did NOT advertise must NOT be salvaged —
-    // it falls through to ordinary text (we never invent a call).
+    // A complete JSON object SHAPED like a tool call ({"name","arguments"})
+    // but naming a tool we did NOT advertise is a weak-model mistype (e.g.
+    // "read_file" for "read"). It is never salvaged (we never invent a call)
+    // AND never surfaced as raw JSON — it's dropped. The empty-turn fallback
+    // then fills the turn so the user never sees a blank bubble.
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"{\\\"name\\\": \\\"nonexistent\\\", \\\"arguments\\\": {}}\"}}]}\n\n"
@@ -317,7 +320,22 @@ static void test_sse_salvage_unknown_tool_stays_text() {
         "data: [DONE]\n\n";
     auto msgs = oai::parse_sse_for_test(sse, {"echo"});
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
-    CHECK(!joined_text(msgs).empty());    // surfaced as text
+    CHECK(joined_text(msgs).find('{') == std::string::npos);  // raw JSON dropped
+    CHECK(joined_text(msgs).find("nonexistent") == std::string::npos);
+}
+
+// A non-tool-shaped JSON object (no name+arguments keys) naming nothing in
+// particular is genuine prose/data — it must still surface as text.
+static void test_sse_plain_object_stays_text() {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"{\\\"answer\\\": 42, \\\"unit\\\": \\\"none\\\"}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"echo"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    CHECK(!joined_text(msgs).empty());          // not tool-shaped — kept
+    CHECK(joined_text(msgs).find("answer") != std::string::npos);
 }
 
 static void test_sse_plain_json_prose_not_salvaged() {
@@ -523,6 +541,81 @@ static void test_sse_salvage_function_key() {
             CHECK(f->stop_reason == StopReason::ToolUse);
 }
 
+// ── Native Ollama /api/chat (NDJSON) path ────────────────────────────────────
+
+// A clean greeting: content streams as plain text, no tool calls.
+static void test_ndjson_plain_greeting() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"Hello! \"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"How can I help?\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+            "\"done\":true,\"done_reason\":\"stop\","
+            "\"prompt_eval_count\":10,\"eval_count\":5}\n";
+    auto msgs = oai::parse_ndjson_for_test(nd, {"read", "remember"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    CHECK(joined_text(msgs) == std::string{"Hello! How can I help?"});
+    for (const auto& m : msgs)
+        if (const auto* f = get_leaf<StreamFinished>(m))
+            CHECK(f->stop_reason == StopReason::EndTurn);
+}
+
+// Structured native tool_calls (function.arguments as an object) become a
+// real tool call with a call_native_ id.
+static void test_ndjson_structured_tool_call() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\","
+            "\"tool_calls\":[{\"function\":{\"name\":\"read\","
+            "\"arguments\":{\"path\":\"/etc/hostname\"}}}]}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+            "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oai::parse_ndjson_for_test(nd, {"read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m)) {
+            CHECK(s->name.value == "read");
+            CHECK(std::string_view{s->id.value}.starts_with("call_native_"));
+        }
+    CHECK(joined_tool_args(msgs) == std::string{"{\"path\":\"/etc/hostname\"}"});
+    for (const auto& m : msgs)
+        if (const auto* f = get_leaf<StreamFinished>(m))
+            CHECK(f->stop_reason == StopReason::ToolUse);
+}
+
+// THE regression: a weak local model leaks a {"name":..} tool call into
+// native message.content. It must be SALVAGED into a real tool call (so the
+// tool actually runs), NOT shown to the user as raw JSON text.
+static void test_ndjson_leaked_content_salvaged() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+            "\"{\\\"name\\\": \\\"read\\\", \\\"arguments\\\": "
+            "{\\\"path\\\": \\\"/etc/hostname\\\"}}\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+            "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oai::parse_ndjson_for_test(nd, {"read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(joined_text(msgs).empty());          // never shown as raw JSON
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m)) {
+            CHECK(s->name.value == "read");
+            CHECK(std::string_view{s->id.value}.starts_with("call_salvaged_"));
+        }
+    for (const auto& m : msgs)
+        if (const auto* f = get_leaf<StreamFinished>(m))
+            CHECK(f->stop_reason == StopReason::ToolUse);
+}
+
+// Plain prose that merely mentions JSON is NOT salvaged.
+static void test_ndjson_prose_not_salvaged() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+            "\"Sure, here is what I think about your question.\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+            "\"done\":true}\n";
+    auto msgs = oai::parse_ndjson_for_test(nd, {"read", "remember"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    CHECK(!joined_text(msgs).empty());
+}
+
 int main() {
     test_build_tools();
     test_build_messages_basic();
@@ -535,6 +628,7 @@ int main() {
     test_sse_salvage_tool_call_tags();
     test_sse_salvage_fenced_tags();
     test_sse_salvage_unknown_tool_stays_text();
+    test_sse_plain_object_stays_text();
     test_sse_truncated_leaked_tool_call_dropped();
     test_sse_fence_only_leak_dropped();
     test_sse_two_leaked_calls_unique_ids();
@@ -547,6 +641,12 @@ int main() {
     test_sse_salvage_array_of_calls();
     test_sse_salvage_two_sequential_calls();
     test_sse_salvage_function_key();
+
+    // Native Ollama /api/chat NDJSON path.
+    test_ndjson_plain_greeting();
+    test_ndjson_structured_tool_call();
+    test_ndjson_leaked_content_salvaged();
+    test_ndjson_prose_not_salvaged();
 
     if (g_failures == 0) {
         std::printf("openai_transport_test: all checks passed\n");

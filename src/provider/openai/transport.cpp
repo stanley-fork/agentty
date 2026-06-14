@@ -224,6 +224,35 @@ void close_active_tool(StreamCtx& ctx) {
     catch (...) { return true; }                    // truncated — drop
 }
 
+// A COMPLETE JSON object shaped EXACTLY like a tool call ({"name"|"function":
+// "<str>", "arguments"|"parameters": {...}}) that names a tool NOT in
+// known_tools. Weak local models leak these constantly with a mistyped tool
+// name (e.g. "read_file" instead of "read"); surfacing the raw JSON dumps
+// garbage into the reply and primes a re-leak next turn. It is never prose a
+// user wants to read. Only consulted when we ARE advertising tools.
+[[nodiscard]] bool hold_is_unknown_tool_call(
+        std::string_view sv, const std::vector<std::string>& known) noexcept {
+    if (known.empty()) return false;            // not in agentic mode
+    sv = strip_tool_call_wrappers(sv);
+    if (sv.empty() || sv.front() != '{') return false;
+    json j;
+    try { j = json::parse(sv); } catch (...) { return false; }
+    if (!j.is_object()) return false;
+    std::string name;
+    if (j.contains("name") && j["name"].is_string())
+        name = j["name"].get<std::string>();
+    else if (j.contains("function") && j["function"].is_string())
+        name = j["function"].get<std::string>();
+    else if (j.contains("tool") && j["tool"].is_string())
+        name = j["tool"].get<std::string>();
+    else
+        return false;                           // no tool-name key — real prose
+    // Must ALSO carry an args/params field to count as a tool-call shape.
+    if (!j.contains("arguments") && !j.contains("parameters")) return false;
+    for (const auto& t : known) if (t == name) return false;  // advertised
+    return true;                                 // tool-shaped, unknown name
+}
+
 // Emit a slice of text_hold as ordinary prose. Used when we've determined
 // some prefix isn't tool JSON (e.g., leading prose before a JSON object).
 void flush_text_slice(StreamCtx& ctx, std::size_t len) {
@@ -257,6 +286,10 @@ void flush_text_hold(StreamCtx& ctx) {
     if (ctx.text_hold.empty()) return;
     if (hold_is_truncated_tool_json(ctx.text_hold)) {
         ctx.text_hold.clear();   // truncated leaked tool call — drop
+        return;
+    }
+    if (hold_is_unknown_tool_call(ctx.text_hold, ctx.known_tools)) {
+        ctx.text_hold.clear();   // complete leak naming an unadvertised tool
         return;
     }
     ctx.sink(StreamTextDelta{ctx.text_hold});
@@ -447,8 +480,19 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
                     i = static_cast<std::size_t>(-1);  // will be 0 after ++
                     continue;
                 } else {
-                    // Not a valid tool call — flush as text.
-                    flush_text_slice(ctx, end);
+                    // Complete object that isn't a salvageable call. If it's
+                    // tool-SHAPED but names an unadvertised tool (weak-model
+                    // mistype), drop it instead of dumping raw JSON. Otherwise
+                    // it's prose — flush as text.
+                    if (hold_is_unknown_tool_call(candidate, ctx.known_tools)) {
+                        ctx.text_hold.erase(0, end);
+                        ctx.json_start = std::string::npos;
+                        ctx.brace_depth = 0;
+                        ctx.bracket_depth = 0;
+                        skip_wrapper_prefix();
+                    } else {
+                        flush_text_slice(ctx, end);
+                    }
                     i = static_cast<std::size_t>(-1);
                     continue;
                 }
@@ -839,15 +883,20 @@ void handle_native_message(StreamCtx& ctx, const json& message) {
             ctx.stop_reason = StopReason::ToolUse;
         }
     }
-    // Plain assistant text. On the native endpoint the template already
-    // separated tool calls into the structured channel, so content is real
-    // prose — emit it directly (no hold/salvage suspicion).
+    // Assistant text. Ideally the template routed tool calls into the
+    // structured channel and `content` is pure prose — but weak local models
+    // (qwen2.5-coder etc.) STILL leak a `{"name":..,"arguments":..}` tool call
+    // into content even on the native endpoint. Run content through the SAME
+    // hold/salvage machinery the OpenAI-compat path uses so a leaked call is
+    // either executed (real request naming an advertised tool) or dropped
+    // (greeting leak / blocked memory tool) — never shown to the user as raw
+    // JSON. handle_delta is the single source of truth for that logic.
     if (message.contains("content") && message["content"].is_string()) {
         const auto& s = message["content"].get_ref<const std::string&>();
-        if (!s.empty()) {
-            ctx.sink(StreamTextDelta{s});
-            ctx.any_text_flushed = true;
-        }
+        // Feed ONLY the content field — handle_delta also processes tool_calls,
+        // which we already handled above; passing the whole message would
+        // double-process the structured calls.
+        if (!s.empty()) handle_delta(ctx, json{{"content", s}});
     }
 }
 
@@ -1411,6 +1460,25 @@ std::vector<Msg> parse_sse_for_test(std::string_view sse_bytes,
     feed_sse(ctx, sse_bytes.data(), sse_bytes.size());
     // Mirror run_stream_sync's terminal guarantee: if [DONE] never arrived,
     // synthesise the close so a test sees a StreamFinished.
+    if (!ctx.terminated) {
+        if (ctx.in_tool_use) { ctx.sink(StreamToolUseEnd{}); ctx.in_tool_use = false; }
+        if (!try_salvage_tool_call(ctx)) flush_text_hold(ctx);
+        ensure_nonempty_turn(ctx);
+        ctx.sink(StreamFinished{ctx.stop_reason});
+    }
+    return out;
+}
+
+// NDJSON (native /api/chat) test harness. Drives feed_ndjson then mirrors
+// run_stream_sync's terminal salvage/flush so a test observes the same Msg
+// sequence the live native path produces.
+std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
+                                       std::vector<std::string> known_tools) {
+    std::vector<Msg> out;
+    StreamCtx ctx;
+    ctx.known_tools = std::move(known_tools);
+    ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
+    feed_ndjson(ctx, ndjson_bytes.data(), ndjson_bytes.size());
     if (!ctx.terminated) {
         if (ctx.in_tool_use) { ctx.sink(StreamToolUseEnd{}); ctx.in_tool_use = false; }
         if (!try_salvage_tool_call(ctx)) flush_text_hold(ctx);

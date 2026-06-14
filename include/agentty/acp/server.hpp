@@ -102,7 +102,8 @@ private:
     void run_turn(std::string session_id, Responder resp);
 
     StopReason stream_completion(Session& sess, bool& out_cancelled,
-                                 std::string& out_error);
+                                 std::string& out_error,
+                                 bool suppress_tools = false);
     bool       run_tools(Session& sess, bool& out_cancelled);
 
     // ── Helpers ──────────────────────────────────────────────────────────
