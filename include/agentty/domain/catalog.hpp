@@ -2,6 +2,7 @@
 // agentty catalog — describes an LLM the user can select.
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -15,6 +16,11 @@ struct ModelInfo {
     std::string provider;
     int  context_window = 200000;
     bool favorite       = false;
+    // Ollama-specific: the model reports "tools" in its capabilities list.
+    // When false (or unset), agentty skips advertising tools entirely —
+    // the model can only be used for plain chat. Set by list_models() via
+    // Ollama's /api/show probe. std::optional so unknown = std::nullopt.
+    std::optional<bool> supports_tools;
 };
 
 // ============================================================================

@@ -1393,6 +1393,44 @@ std::string local_model_system_prompt() {
     return out;
 }
 
+// ── Ollama /api/show probe ───────────────────────────────────────────────────
+// Fetches a model's capabilities from Ollama. Returns std::nullopt on failure.
+// Zed-style: only models that report "tools" in capabilities[] get tools.
+namespace {
+std::optional<bool> probe_ollama_supports_tools(const AuthHeader& auth,
+                                                 const Endpoint& ep,
+                                                 const std::string& model_name) {
+    http::Request hreq;
+    hreq.method     = http::HttpMethod::Post;
+    hreq.host       = ep.host;
+    hreq.port       = ep.port;
+    hreq.path       = "/api/show";
+    hreq.plaintext  = !ep.use_tls;
+    hreq.headers    = build_request_headers(auth);
+    hreq.body       = json{{"model", model_name}}.dump();
+    hreq.max_body_bytes = 512 * 1024;  // /api/show can be large (modelfile)
+
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(2'000);
+    tos.total   = std::chrono::milliseconds(5'000);
+
+    auto resp = http::default_client().send(hreq, tos);
+    if (!resp || resp->status != 200) return std::nullopt;
+
+    try {
+        auto j = json::parse(resp->body);
+        if (j.contains("capabilities") && j["capabilities"].is_array()) {
+            for (const auto& cap : j["capabilities"]) {
+                if (cap.is_string() && cap.get<std::string>() == "tools")
+                    return true;
+            }
+            return false;  // capabilities present but "tools" not in list
+        }
+    } catch (...) {}
+    return std::nullopt;  // parse failure or no capabilities field
+}
+} // namespace
+
 // ── Model listing ────────────────────────────────────────────────────────────
 std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpoint) {
     std::vector<ModelInfo> result;
@@ -1422,13 +1460,25 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
         auto j = json::parse(resp->body);
         if (endpoint.native_api) {
             // Ollama /api/tags: {"models":[{"name":"qwen2.5-coder:7b",...}]}
+            // Collect model names first, then probe /api/show for each to
+            // determine tool support (Zed-style capability check).
+            std::vector<std::string> names;
             for (const auto& m : j.value("models", json::array())) {
                 auto id = m.value("name", "");
-                if (id.empty()) continue;
+                if (!id.empty()) names.push_back(id);
+            }
+            // Probe each model's capabilities via /api/show. This adds a
+            // round-trip per model but runs concurrently in the background
+            // fetch. Without it we'd have no way to know if a model really
+            // supports structured tool calls (Ollama's capabilities[].
+            // "tools") vs. just leaking tool JSON into content.
+            for (const auto& id : names) {
+                auto supports_tools = probe_ollama_supports_tools(auth, endpoint, id);
                 result.push_back(ModelInfo{
-                    .id           = ModelId{id},
-                    .display_name = id,
-                    .provider     = endpoint.label,
+                    .id             = ModelId{id},
+                    .display_name   = id,
+                    .provider       = endpoint.label,
+                    .supports_tools = supports_tools,
                 });
             }
         } else {

@@ -463,10 +463,24 @@ Cmd<Msg> launch_stream(Model& m) {
     std::string model_id   = m.d.model_id.value;
     auth::AuthHeader auth  = deps().auth;
 
+    // Look up the selected model's supports_tools from available_models.
+    // Ollama models have this set via /api/show probe at list time. If
+    // the model reports supports_tools=false, we skip advertising tools
+    // entirely (Zed-style: the model can only be used for plain chat).
+    // std::nullopt = unknown/not probed = fall through to heuristic.
+    std::optional<bool> model_supports_tools;
+    for (const auto& mi : m.d.available_models) {
+        if (mi.id.value == model_id) {
+            model_supports_tools = mi.supports_tools;
+            break;
+        }
+    }
+
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
          compacting, context_max, retry_count,
          model_id = std::move(model_id),
+         model_supports_tools,
          auth = std::move(auth),
          cancel]
         (std::function<void(Msg)> dispatch) mutable {
@@ -489,6 +503,16 @@ Cmd<Msg> launch_stream(Model& m) {
         req.cancel        = cancel;
         req.auth          = std::move(auth);
         req.retry_count   = retry_count;
+
+        // Ollama capability gate: if /api/show reported the model does NOT
+        // support tools (supports_tools == false), skip advertising ANY
+        // tools — the model can only be used for plain chat. This matches
+        // Zed's behavior: models without the "tools" capability don't get
+        // tools on the wire, so they can't leak phantom calls or loop.
+        // std::nullopt means unknown / not probed (non-Ollama endpoints or
+        // probe failure): fall through to the normal heuristic.
+        const bool tools_disabled_by_capability =
+            model_supports_tools.has_value() && !model_supports_tools.value();
 
         // Wire payload diverges on compaction kickoff:
         //   normal turn  → wire_messages_for(thread) substitutes any
@@ -517,20 +541,22 @@ Cmd<Msg> launch_stream(Model& m) {
             }
             // All tools, every profile. Gating is the policy layer's job
             // (`tool::DynamicDispatch::needs_permission`, called from
-            // `kick_pending_tools`). EXCEPTION: weak local models hallucinate
-            // `skill` and the memory tools (remember/forget/wipe_memory) on
-            // greetings/small talk — they can't use them responsibly, and
-            // advertising them just primes a phantom leak that fails/loops.
-            // Don't put them on the wire for weak models. (Memory tools still
-            // run via the explicit slash command; skills via /skill-name.)
-            auto weak_hidden = [](std::string_view n) {
-                return n == "skill" || n == "remember"
-                    || n == "forget" || n == "wipe_memory";
-            };
-            for (const auto& t : tools::registry()) {
-                if (weak_model && weak_hidden(t.name.value)) continue;
-                req.tools.push_back({t.name.value, t.description, t.input_schema,
-                                     t.eager_input_streaming});
+            // `kick_pending_tools`). EXCEPTION 1: if Ollama's /api/show
+            // reported supports_tools=false, skip ALL tools — the model
+            // can only be used for plain chat. EXCEPTION 2: weak local
+            // models hallucinate `skill` and the memory tools on greetings
+            // /small talk — don't put those on the wire for weak models.
+            // (Memory tools still run via /slash command; skills /skill-name.)
+            if (!tools_disabled_by_capability) {
+                auto weak_hidden = [](std::string_view n) {
+                    return n == "skill" || n == "remember"
+                        || n == "forget" || n == "wipe_memory";
+                };
+                for (const auto& t : tools::registry()) {
+                    if (weak_model && weak_hidden(t.name.value)) continue;
+                    req.tools.push_back({t.name.value, t.description, t.input_schema,
+                                         t.eager_input_streaming});
+                }
             }
         }
 
