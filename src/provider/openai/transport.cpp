@@ -136,9 +136,14 @@ struct StreamCtx {
     // structured tool_calls[] channel. Keep holding while the prefix is still
     // a possible opener for any of those forms, or a bare JSON object.
     if (rest.front() == '{') return true;
-    // Prefix of "<tool_call>" or a code fence — still possibly a tool call.
+    // Prefix of "<tool_call>" — still possibly a tool call.
+    // NOTE: We ONLY hold if `rest` is a strict prefix of "<tool_call>"
+    // (e.g. "<", "<t", "<tool_"). We do NOT hold on arbitrary <...
+    // like "<iostream>" or "<vector>" — those are C++ headers, not tool wrappers.
     constexpr std::string_view kTag = "<tool_call>";
-    if (kTag.starts_with(rest) || rest.starts_with("<")) return true;
+    if (kTag.starts_with(rest) && rest.size() < kTag.size()) return true;
+    // If it's the full "<tool_call>" or starts with it, hold.
+    if (rest.starts_with(kTag)) return true;
     // ```json fence is a tool-call wrapper. But ```cpp / ```python / etc.
     // are markdown code blocks the model is rendering as prose — DON'T hold.
     // Only hold if it's exactly "```" (incomplete) or "```json" (tool fence).
@@ -472,6 +477,15 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
             // Otherwise it's ```cpp / ```python etc. — don't strip anything
         }
         // More whitespace after fence/tag.
+        while (!sv.empty() && (sv.front()==' '||sv.front()=='\t'
+                               ||sv.front()=='\n'||sv.front()=='\r')) {
+            sv.remove_prefix(1);
+        }
+        // </tool_call> might come AFTER the closing ``` fence.
+        if (sv.starts_with("</tool_call>")) {
+            sv.remove_prefix(12);
+        }
+        // Final whitespace cleanup.
         while (!sv.empty() && (sv.front()==' '||sv.front()=='\t'
                                ||sv.front()=='\n'||sv.front()=='\r')) {
             sv.remove_prefix(1);
