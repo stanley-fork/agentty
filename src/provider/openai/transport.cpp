@@ -1386,9 +1386,10 @@ std::string local_model_system_prompt() {
     out += "\n";
     if (!cwd.empty()) { out += "  cwd: "; out += cwd; out += "\n"; }
     out += "</environment>\n";
-    // On-demand skills catalog (names + one-line summaries). Cheap; helps the
-    // model know what specialised procedures exist.
-    out += tools::skills::catalog_block();
+    // No skills catalog here on purpose. Weak local models hallucinate a
+    // `skill` tool call from the catalog listing (even on a greeting), which
+    // then fails / loops. On-demand skills stay available via the explicit
+    // /skill-name slash command; they're just not advertised to the model.
     return out;
 }
 

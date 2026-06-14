@@ -694,7 +694,20 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     // gets a tool-free retry. With no tools advertised it cannot leak another
     // and answers the user in plain text (proven: qwen2.5-coder:7b greets
     // cleanly only when no tools are on the wire).
-    if (!suppress_tools) req.tools = wire_tools();
+    if (!suppress_tools) {
+        // Weak local models hallucinate `skill` and the memory tools on
+        // greetings/small talk — don't advertise them (mirrors cmd_factory).
+        if (is_weak_model(req.model)) {
+            auto weak_hidden = [](std::string_view n) {
+                return n == "skill" || n == "remember"
+                    || n == "forget" || n == "wipe_memory";
+            };
+            for (const auto& t : wire_tools())
+                if (!weak_hidden(t.name)) req.tools.push_back(t);
+        } else {
+            req.tools = wire_tools();
+        }
+    }
 
     Message assistant;
     assistant.role = Role::Assistant;

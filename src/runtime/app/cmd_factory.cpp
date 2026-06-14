@@ -481,7 +481,8 @@ Cmd<Msg> launch_stream(Model& m) {
         // local models) get the full prompt. The decision is per-model via
         // ModelCapabilities, not per-provider — a 70B llama on Ollama is
         // treated as strong, a 7B coder on any endpoint as weak.
-        if (is_weak_model(req.model))
+        const bool weak_model = is_weak_model(req.model);
+        if (weak_model)
             req.system_prompt = provider::openai::local_model_system_prompt();
         else
             req.system_prompt = provider::anthropic::default_system_prompt();
@@ -516,8 +517,18 @@ Cmd<Msg> launch_stream(Model& m) {
             }
             // All tools, every profile. Gating is the policy layer's job
             // (`tool::DynamicDispatch::needs_permission`, called from
-            // `kick_pending_tools`).
+            // `kick_pending_tools`). EXCEPTION: weak local models hallucinate
+            // `skill` and the memory tools (remember/forget/wipe_memory) on
+            // greetings/small talk — they can't use them responsibly, and
+            // advertising them just primes a phantom leak that fails/loops.
+            // Don't put them on the wire for weak models. (Memory tools still
+            // run via the explicit slash command; skills via /skill-name.)
+            auto weak_hidden = [](std::string_view n) {
+                return n == "skill" || n == "remember"
+                    || n == "forget" || n == "wipe_memory";
+            };
             for (const auto& t : tools::registry()) {
+                if (weak_model && weak_hidden(t.name.value)) continue;
                 req.tools.push_back({t.name.value, t.description, t.input_schema,
                                      t.eager_input_streaming});
             }
