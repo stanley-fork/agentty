@@ -103,6 +103,13 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.s.last_tick = now;
             if (m.s.active()) m.s.spinner.advance(dt);
 
+            // Post-freeze settling window countdown. Keeps the tick
+            // subscription armed (subscribe.cpp gates on it) for a few
+            // frames after the settle-freeze so maya's renderer fully
+            // reconciles the live-tail→frozen collapse before the clock
+            // stops. Decrement here so each rendered frame burns one.
+            if (m.ui.settle_cooldown_ticks > 0) --m.ui.settle_cooldown_ticks;
+
             // ── Deferred settle-freeze (post-stream redraw fix) ──────
             // finalize_turn settled the just-finished assistant message
             // (finish() on its StreamingMarkdown) but deferred the freeze
@@ -150,7 +157,44 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                         settle_message_md(m, mm);
                     }
                     freeze_through(m, m.d.current.messages.size());
-                    settle_freeze_trim = trim_frozen_if_oversized(m);
+                    // Drop oldest frozen entries past the budget. Take
+                    // the trim's MODEL mutation only; its Cmd is ignored
+                    // (see below) — we do NOT host-issue any scrollback
+                    // commit on the freeze.
+                    (void)trim_frozen_if_oversized(m);
+
+                    // NO host-issued scrollback commit. The live tail
+                    // collapsing into the frozen prefix is a shrink-while-
+                    // overflowed, and maya's Synced render path now
+                    // DISCRIMINATES that case itself (app.cpp, the
+                    // `scrollback_prefix_matches` branch): when the
+                    // already-overflowed prefix is byte-identical after
+                    // the collapse (the turn-finish freeze — exactly our
+                    // case), maya deliberately FALLS THROUGH to the
+                    // append-only per-row diff path, which re-emits only
+                    // the bottom rows + \x1b[J and never rewrites a
+                    // committed scrollback row. That is the corruption-
+                    // free path.
+                    //
+                    // Issuing commit_scrollback_overflow() here FIGHTS
+                    // that machinery: the host commit externally advances
+                    // prev_rows down to term_h, so maya's next render sees
+                    // a shrunk prev and re-emits from content top through
+                    // case (B) — overlapping the rows it already committed
+                    // and stranding a duplicate copy of the just-finished
+                    // turn one screen up. That double-commit is the
+                    // corruption/duplication regression. The fix is to
+                    // let maya own scrollback reconciliation entirely:
+                    // freeze the model, emit none(), and let the diff path
+                    // do the append-only collapse.
+                    settle_freeze_trim = maya::Cmd<Msg>::none();
+
+                    // Keep the clock alive for a few frames so maya's
+                    // shrink reconciliation (its own diff-path collapse)
+                    // completes at fps=0, mirroring agent_session's
+                    // always-on clock.
+                    m.ui.settle_cooldown_ticks = 6;
+                    ::maya::request_animation_frame();
                 } else {
                     // Reveal still draining — keep the frame armed so the
                     // typewriter animates and we re-test the gate next

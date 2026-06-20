@@ -61,6 +61,27 @@ std::chrono::milliseconds streaming_tick_period() noexcept {
 
 namespace {
 
+// True when the last message still carries in-flight wire bytes
+// (streaming_text / pending_stream not yet drained into the settled
+// body). The Tick subscription gates the reveal-fx animation clock and
+// the pending_stream→streaming_text drip; gating it ONLY on
+// m.s.active() leaves a one-tick gap at the very START of a stream:
+// the first 1-2 StreamTextDelta msgs paint via their own render (fps=0),
+// but the animation loop + drip don't engage until the Tick timer the
+// reducer just armed actually fires — a visible split-second hang after
+// the first word or two. agent_session never sees this because it
+// subscribes to Tick UNCONDITIONALLY (the clock is always running).
+// Rather than run an always-on tick when idle (wasteful at fps=0), we
+// extend the tick window to cover any frame where live bytes exist, so
+// the clock is already ticking the instant the first delta lands and
+// the reveal animation is continuous from byte one — same end result
+// as the reference, with zero idle cost.
+bool tail_has_live_bytes(const Model& m) noexcept {
+    if (m.d.current.messages.empty()) return false;
+    const auto& back = m.d.current.messages.back();
+    return !back.streaming_text.empty() || !back.pending_stream.empty();
+}
+
 // ── Per-modal key handlers — return std::nullopt to fall through ──────────
 
 std::optional<Msg> on_permission(const KeyEvent& ev) {
@@ -565,7 +586,20 @@ Sub<Msg> subscribe(const Model& m) {
     // SPEED is unchanged — the pacer is bytes/second, not bytes/tick, so
     // prose fills at the same wall-clock rate, just in fewer, larger
     // frames.
-    if (m.s.active()) {
+    // The settle-freeze (meta.cpp Tick, the agent_session MessageStop
+    // analog) fires on a Tick while m.s.is_idle() and pending_settle_
+    // freeze is set. Gating the tick ONLY on active()/live-bytes drops
+    // the clock the instant the reveal drains its last bytes into the
+    // settled body — but the widget hasn't flipped live_ off yet, so
+    // pending_settle_freeze is still set with no tick left to fire it.
+    // The deferred freeze then strands until the next user keystroke and
+    // diffs against a stale prev_cells = cache-miss re-emit = the
+    // duplicated turn the user sees in scrollback. Keep ticking until the
+    // freeze has actually fired (flag cleared) so the live-tail→frozen
+    // handoff always lands on a fresh frame, exactly like agent_session's
+    // always-on 30fps clock reconciles the collapse the same frame.
+    if (m.s.active() || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
+        || m.ui.settle_cooldown_ticks > 0) {
         auto tick = Sub<Msg>::every(streaming_tick_period(), Tick{});
         return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));
     }

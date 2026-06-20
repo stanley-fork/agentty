@@ -66,6 +66,30 @@ inline constexpr std::size_t kMaxFileBytes        = 256u * 1024u;  // 256 KiB / 
 inline constexpr std::size_t kMaxRecordsPerScope  = 200;           // hard cap on lines
 inline constexpr std::size_t kTailLoadCount       = 50;            // load tail-N into prompt
 
+// ── Prompt-budget caps (the defence against memory eating the context) ──
+//
+// load_recent_*() returns the tail-N records, but the system prompt must
+// not grow without bound as the store fills up — a user who stores
+// hundreds of facts would otherwise pay ~100 KiB of prompt on EVERY turn,
+// pushing the conversation toward compaction far sooner. select_for_prompt
+// applies a hard BYTE budget on top of tail-N, ranked so the
+// highest-signal facts survive when the budget is tight:
+//
+//   1. pinned records are always kept (cap-exempt by design);
+//   2. remaining budget filled by rank = (hits, then recency);
+//   3. any single record longer than kPromptRecordCap is shown truncated
+//      with an ellipsis note (the on-disk record stays whole — only the
+//      prompt copy is clipped);
+//   4. records that don't fit are dropped from the prompt (still on disk,
+//      still editable, the dropped count is reported so the loader can
+//      emit a "+N more stored" footer).
+//
+// Budget sized so the WHOLE learned-memory block (both scopes combined)
+// stays a few KiB — a rounding error against a 200 K-token window — no
+// matter how much has accumulated on disk.
+inline constexpr std::size_t kPromptByteBudget = 6u * 1024u;   // ~6 KiB / scope block
+inline constexpr std::size_t kPromptRecordCap  = 400;          // clip any one record to this in-prompt
+
 // Resolve the on-disk path for a scope. Creates parent directories
 // lazily on the first `append` — this function is pure and never
 // touches the filesystem.
@@ -146,6 +170,23 @@ struct AppendResult {
 // the same way CLAUDE.md is.
 [[nodiscard]] std::vector<Record> load_recent_user();
 [[nodiscard]] std::vector<Record> load_recent_project();
+
+// Budgeted prompt selection. Takes the records load_recent_*() returned
+// for ONE scope and pares them down to fit kPromptByteBudget, keeping all
+// pinned records and then the highest-signal remainder (by hits, then
+// recency). Returns the chosen records in oldest-first stable order (so
+// the prompt still reads chronologically), plus the number dropped so the
+// caller can emit a "+N more stored" footer. Records whose text exceeds
+// kPromptRecordCap are returned with text clipped + an ellipsis marker;
+// the on-disk record is untouched. This is THE bound that stops a growing
+// memory store from inflating every system prompt.
+struct PromptSelection {
+    std::vector<Record> records;   // clipped, oldest-first, within budget
+    std::size_t         dropped = 0;   // records elided to fit the budget
+};
+[[nodiscard]] PromptSelection select_for_prompt(
+    std::vector<Record> recent,
+    std::size_t byte_budget = kPromptByteBudget);
 
 // Forget by exact id. Returns count removed (0 if not found).
 [[nodiscard]] std::size_t forget_by_id(std::string_view id);

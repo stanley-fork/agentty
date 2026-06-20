@@ -657,6 +657,73 @@ std::vector<Record> load_all(Scope s) {
 std::vector<Record> load_recent_user()    { return load_recent_for(Scope::User); }
 std::vector<Record> load_recent_project() { return load_recent_for(Scope::Project); }
 
+// UTF-8-safe clip to at most `cap` bytes, ending on a complete code point.
+static std::string clip_text(const std::string& s, std::size_t cap) {
+    if (s.size() <= cap) return s;
+    std::size_t cut = cap;
+    for (int back = 0; back < 4 && cut > 0; ++back, --cut) {
+        unsigned char c = static_cast<unsigned char>(s[cut]);
+        if ((c & 0xC0) != 0x80) break;   // leading byte → safe boundary
+    }
+    std::string out = s.substr(0, cut);
+    out += "\xe2\x80\xa6";   // … — signals the prompt copy is clipped
+    return out;
+}
+
+PromptSelection select_for_prompt(std::vector<Record> recent,
+                                  std::size_t byte_budget) {
+    PromptSelection sel;
+    if (recent.empty()) return sel;
+
+    // Approximate per-record prompt cost: render_for_prompt adds an
+    // `[id] ` prefix (~11 bytes), an optional ★, a tag suffix, and a
+    // trailing newline. Charge the clipped text length + a fixed chrome
+    // estimate so the budget reflects what actually lands in the prompt.
+    auto cost_of = [](const Record& r) -> std::size_t {
+        std::size_t c = std::min(r.text.size(), kPromptRecordCap);
+        c += 16;                                   // [id] + ★ + newline
+        for (const auto& tg : r.tags) c += tg.size() + 2;
+        return c;
+    };
+
+    // Rank for budget-fill: pinned first, then more hits, then more
+    // recent. We keep an index list so the FINAL emission can be restored
+    // to stable oldest-first order (recent[] is already oldest-first).
+    std::vector<std::size_t> order(recent.size());
+    for (std::size_t i = 0; i < recent.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(),
+        [&](std::size_t a, std::size_t b) {
+            const Record& ra = recent[a];
+            const Record& rb = recent[b];
+            if (ra.pinned != rb.pinned) return ra.pinned;       // pinned wins
+            if (ra.hits   != rb.hits)   return ra.hits > rb.hits;// more hits wins
+            return ra.ts > rb.ts;                                // more recent wins
+        });
+
+    // Walk the ranked order, admitting records until the byte budget is
+    // spent. Pinned records are admitted even past the budget (they are
+    // load-bearing by definition); everything else respects the cap.
+    std::vector<char> keep(recent.size(), false);
+    std::size_t spent = 0;
+    for (std::size_t idx : order) {
+        const std::size_t c = cost_of(recent[idx]);
+        if (recent[idx].pinned || spent + c <= byte_budget) {
+            keep[idx] = true;
+            spent += c;
+        }
+    }
+
+    // Emit kept records in stable oldest-first order, clipping any
+    // over-long text to the per-record cap. Count the drops.
+    for (std::size_t i = 0; i < recent.size(); ++i) {
+        if (!keep[i]) { ++sel.dropped; continue; }
+        Record r = std::move(recent[i]);
+        r.text = clip_text(r.text, kPromptRecordCap);
+        sel.records.push_back(std::move(r));
+    }
+    return sel;
+}
+
 std::size_t forget_by_id(std::string_view id) {
     std::string want{id};
     if (trim(want).empty()) return 0;

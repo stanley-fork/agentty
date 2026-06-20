@@ -179,21 +179,24 @@ static void check_invariants(const Model& m, bool stream_active,
         INV(f.frozen_through < m.d.current.messages.size(), "I5",
             "froze the mutable streaming back message");
 
-    // I6 trim commit is row-exact
+    // I6 trim issues NO host scrollback commit. Current maya owns the
+    // scrollback reconciliation: when the frozen tree shrinks (trim drops
+    // oldest entries, or the live-tail collapse), maya's Synced render
+    // discriminates the shrink-while-overflowed case itself and either
+    // takes the append-only diff path or its own commit-overflow +
+    // soft-repaint recovery. A host-issued commit on top double-commits
+    // and strands a duplicate. So the contract is now: the trim mutates
+    // the model and returns none() — ANY CommitScrollback / CommitScroll‐
+    // backOverflow from the trim is FORBIDDEN.
     if (trim_cmd) {
         using Cmd = maya::Cmd<agentty::Msg>;
-        const auto* overflow =
-            std::get_if<Cmd::CommitScrollbackOverflow>(&trim_cmd->inner);
-        INV(overflow == nullptr, "I6",
-            "trim returned CommitScrollbackOverflow (over-commits)");
-        const auto* exact = std::get_if<Cmd::CommitScrollback>(&trim_cmd->inner);
-        if (expected_dropped_rows > 0) {
-            INV(exact != nullptr, "I6",
-                "trim dropped rows but returned no CommitScrollback");
-            if (exact)
-                INV(static_cast<std::size_t>(exact->rows) == expected_dropped_rows,
-                    "I6", "trim commit count != rows dropped");
-        }
+        const bool is_none =
+            std::holds_alternative<Cmd::None>(trim_cmd->inner);
+        INV(is_none, "I6",
+            "trim returned a host scrollback commit — forbidden; current "
+            "maya owns reconciliation and a host commit double-commits, "
+            "stranding a duplicate. The trim must return none().");
+        (void)expected_dropped_rows;
     }
 }
 

@@ -1320,17 +1320,31 @@ namespace {
     if (!user.empty())    m << "<user-memory>\n"    << user    << "\n</user-memory>\n";
     if (!project.empty()) m << "<project-memory>\n" << project << "\n</project-memory>\n";
     if (!local.empty())   m << "<local-memory>\n"   << local   << "\n</local-memory>\n";
-    auto emit_learned = [&](const char* tag, const std::vector<tools::memory::Record>& rs) {
+    auto emit_learned = [&](const char* tag, std::vector<tools::memory::Record> rs) {
         if (rs.empty()) return;
+        // Budget the block so a large memory store can't inflate every
+        // system prompt. select_for_prompt keeps all pinned records +
+        // the highest-signal remainder within kPromptByteBudget, clipping
+        // any over-long record; the rest stay on disk (recallable, still
+        // editable) and we note the elided count so the model knows the
+        // store holds more than what's shown.
+        auto picked = tools::memory::select_for_prompt(std::move(rs));
+        if (picked.records.empty() && picked.dropped == 0) return;
         m << "<learned-memory scope=\"" << tag << "\">\n"
           << "Facts you previously stored via the `remember` tool. Each "
              "line is prefixed with the record id — pass that id to "
              "`forget` if the fact is no longer true.\n";
-        for (const auto& r : rs) m << tools::memory::render_for_prompt(r) << "\n";
+        for (const auto& r : picked.records)
+            m << tools::memory::render_for_prompt(r) << "\n";
+        if (picked.dropped > 0)
+            m << "[+" << picked.dropped << " more stored fact(s) not shown "
+                 "here to keep the prompt small — they remain on disk; ask "
+                 "about a topic and recall surfaces them, or pin the ones "
+                 "that should always be visible.]\n";
         m << "</learned-memory>\n";
     };
-    emit_learned("user",    learned_user);
-    emit_learned("project", learned_project);
+    emit_learned("user",    std::move(learned_user));
+    emit_learned("project", std::move(learned_project));
     m << "</memory>";
     return m.str();
 }

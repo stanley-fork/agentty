@@ -951,20 +951,24 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     std::size_t removed_rows = pop_front_frozen(m, drop);
     removed_rows += pop_front_frozen_leading_separators(m);
 
-    // commit_scrollback(removed_rows): commit EXACTLY the rows this
-    // trim dropped from the front — no more. The generic
-    // commit_scrollback_overflow() commits down to a single viewport
-    // (prev_rows - term_h), but this trim KEEPS ~1.5 viewports
-    // (frozen_row_budget). Over-committing the extra ~0.5 viewport
-    // releases rows that are STILL in the live frozen tree: the next
-    // render re-emits them above the committed boundary, stranding a
-    // duplicate copy of the most-recent off-budget turn one screen up
-    // (the "after the third write the second duplicates" ghost). The
-    // dropped rows all overflowed (we retain >= term_h on screen), so
-    // commit_inline_prefix's clamp to (prev_rows - term_h) never bites
-    // and the committed boundary lands exactly at the new tree's top.
-    return maya::Cmd<Msg>::commit_scrollback(
-        static_cast<int>(removed_rows));
+    // NO host-issued scrollback commit. The trim drops the OLDEST frozen
+    // entries — content already deep in native scrollback — shrinking the
+    // frozen tree at the TOP. maya's Synced render path reconciles this
+    // shrink itself: its shrink-while-overflowed discrimination (app.cpp)
+    // sees the canvas prefix no longer matches prev_cells (content
+    // shifted up after the top-drop), takes its OWN commit-overflow +
+    // soft-repaint recovery, and corrects the viewport in place without
+    // a \x1b[3J wipe.
+    //
+    // Issuing commit_scrollback_overflow() from the host on top of that
+    // double-commits: the host commit advances prev_rows down externally,
+    // then maya's recovery commits AGAIN against the already-advanced
+    // state, stranding a duplicate copy of the trimmed boundary one
+    // screen up — the corruption/duplication the user is seeing. The
+    // correct contract with current maya is: mutate the model (drop the
+    // oldest entries) and emit none(); maya owns the wire reconciliation.
+    (void)removed_rows;
+    return maya::Cmd<Msg>::none();
 }
 
 } // namespace agentty::app::detail

@@ -263,6 +263,26 @@ struct Model {
         // re-emit), and clears the flag.
         bool                pending_settle_freeze = false;
 
+        // Post-freeze settling window. When the deferred settle-freeze
+        // fires, the live tail collapses into the frozen prefix in ONE
+        // reducer step. If that tail had overflowed the viewport (the
+        // common case for a long reply), maya's renderer needs SEVERAL
+        // frames to fully reconcile the shrink: detect the shrink-while-
+        // overflowed prefix, commit the off-viewport rows, demote to
+        // Stale, then soft-repaint the corrected viewport on the
+        // FOLLOWING render. At fps=0 the tick subscription drops the
+        // instant pending_settle_freeze clears, so without an explicit
+        // settling window maya might get only ONE post-collapse frame —
+        // not enough for the detect→commit→demote→repaint chain — and a
+        // stranded duplicate turn lingers until the next user keystroke.
+        // agent_session never has this problem: its always-on 30fps clock
+        // keeps rendering frames after MessageStop, so the reconciliation
+        // chain always completes. We emulate that by keeping the tick
+        // alive for a few frames after the freeze. Set to kSettleCooldown
+        // when the freeze fires; decremented each Tick; the tick
+        // subscription stays armed while > 0.
+        int                 settle_cooldown_ticks = 0;
+
         // One-shot hint to maya's run loop: "the next view() result
         // contains a heavy frozen scrollback that hasn't been painted
         // yet on this thread; please pre-warm the component cache

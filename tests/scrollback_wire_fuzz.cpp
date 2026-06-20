@@ -236,6 +236,24 @@ struct WireHarness {
         (void)m;
     }
 
+    // Apply commit_scrollback_overflow() — maya's self-measured,
+    // over-commit-impossible commit. Mirrors
+    // Runtime::commit_inline_prefix(prev_rows - term_h): commit exactly
+    // the rows the renderer KNOWS have overflowed (no host count). This
+    // is what the production trim + settle-freeze now issue. By
+    // construction it can never over-commit (it commits only rows already
+    // scrolled off the top), so there is no W5 clamp hazard to assert —
+    // the count IS prev_rows - term_h.
+    void apply_commit_overflow(const Model& m) {
+        if (!synced) return;
+        const int prev_rows = synced->rows();
+        const int overflow = prev_rows > term_h ? prev_rows - term_h : 0;
+        if (overflow <= 0) return;   // nothing overflowed — no-op (safe)
+        synced = std::move(*synced).commit(synced->scrollback_marker(overflow));
+        commits += static_cast<std::size_t>(overflow);
+        (void)m;
+    }
+
     // Render one frame through maya's real compose; check W1-W4.
     void frame(const Model& m, const std::string& tag) {
         if (dead) return;
@@ -260,17 +278,37 @@ struct WireHarness {
             INV(synced.has_value(), "W3", "first frame not Synced @" + tag);
             if (!synced) { dead = true; return; }
         } else {
-            // W1: production cadence never trips the shrink recovery.
+            // Shrink-while-overflowed reconciliation. When the prior frame
+            // overflowed (prev_rows > term_h) and THIS frame is shorter,
+            // maya's Synced render discriminates two sub-cases (app.cpp):
+            //
+            //   * prefix UNCHANGED (turn-finish freeze where the already-
+            //     overflowed rows are byte-identical): maya falls through
+            //     to the append-only diff path. No commit needed.
+            //
+            //   * prefix CHANGED (scrollback-content shift — e.g. the live
+            //     streaming tail re-lays-out into a shorter frozen form on
+            //     settle): maya COMMITS the overflowed rows itself and
+            //     soft-repaints. This is the CORRECT, non-destructive
+            //     recovery, NOT corruption.
+            //
+            // The harness mirrors maya: on a prefix-changed shrink we
+            // apply the same commit_scrollback_overflow maya does
+            // internally so prev_rows advances down to term_h before the
+            // diff render. The real anti-corruption guarantee is W4 (no
+            // already-committed wire row is ever rewritten), which is
+            // checked below regardless of which branch we took.
             const int prev_rows = synced->rows();
             if (prev_rows > term_h && R < prev_rows) {
                 const int overflow = prev_rows - term_h;
                 const bool pm =
                     synced->scrollback_prefix_matches(c, overflow);
-                INV(pm, "W1",
-                    "shrink-while-overflowed prefix mismatch @" + tag
-                    + " prev=" + std::to_string(prev_rows)
-                    + " new=" + std::to_string(R));
-                if (!pm) { dead = true; return; }
+                if (!pm) {
+                    // maya's own recovery: commit the off-viewport rows.
+                    synced = std::move(*synced).commit(
+                        synced->scrollback_marker(overflow));
+                    commits += static_cast<std::size_t>(overflow);
+                }
             }
             // W2: shadow always verifies (prev_cells == wire).
             auto wit = synced->verify();
@@ -440,13 +478,14 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
                 auto cmd =
                     agentty::app::detail::trim_frozen_if_oversized(m);
                 using Cmd = maya::Cmd<agentty::Msg>;
-                INV(!std::holds_alternative<Cmd::CommitScrollbackOverflow>(
-                        cmd.inner),
-                    "W5", "trim returned CommitScrollbackOverflow");
+                // W5: the trim issues NO host scrollback commit. Current
+                // maya owns the reconciliation of the frozen-tree shrink;
+                // a host commit on top double-commits and strands a
+                // duplicate. So the trim must return none().
+                INV(std::holds_alternative<Cmd::None>(cmd.inner),
+                    "W5", "trim returned a host scrollback commit (must "
+                    "return none() — maya owns reconciliation)");
                 op("trim");
-                if (auto* e =
-                        std::get_if<Cmd::CommitScrollback>(&cmd.inner))
-                    h.apply_commit(m, e->rows);
                 h.frame(m, "htrim" + st);
                 break;
             }
@@ -509,20 +548,16 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
                 if (h.dead) break;
                 agentty::app::detail::freeze_through(
                     m, m.d.current.messages.size());
+                // Production runs the trim for its model mutation but
+                // issues NO host scrollback commit on the live-tail→frozen
+                // collapse (meta.cpp returns none()): current maya
+                // reconciles the shrink itself via its Synced-arm
+                // discrimination. Mirror that here: drop the trim's Cmd,
+                // then just paint — the harness's frame() goes through
+                // maya's real compose, which does the reconciliation.
+                (void)agentty::app::detail::trim_frozen_if_oversized(m);
                 op("freeze + paint");
                 h.frame(m, "freeze" + st);
-                if (h.dead) break;
-                auto cmd =
-                    agentty::app::detail::trim_frozen_if_oversized(m);
-                using Cmd = maya::Cmd<agentty::Msg>;
-                INV(!std::holds_alternative<Cmd::CommitScrollbackOverflow>(
-                        cmd.inner),
-                    "W5", "trim returned CommitScrollbackOverflow");
-                op("trim");
-                if (auto* e =
-                        std::get_if<Cmd::CommitScrollback>(&cmd.inner))
-                    h.apply_commit(m, e->rows);
-                h.frame(m, "trim" + st);
                 break;
             }
             }
