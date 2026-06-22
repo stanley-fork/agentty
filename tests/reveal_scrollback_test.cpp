@@ -49,6 +49,9 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <pty.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include <maya/render/canvas.hpp>
@@ -113,6 +116,35 @@ static std::pair<Writer, int> make_pipe_writer() {
     fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL, 0) | O_NONBLOCK);
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
     return {Writer{static_cast<platform::NativeHandle>(fds[1])}, fds[0]};
+}
+
+// Install a PTY pair as the process's STDOUT, sized to (cols x rows).
+// CRITICAL: agentty's frozen.cpp sizes the trim's commit_scrollback(N)
+// off term_dims(), which queries ioctl(TIOCGWINSZ) on STDOUT_FILENO. In
+// a plain piped test that ioctl fails and falls back to 80x40 — geometry
+// that disagrees with the harness's real (width x term_h) render, so the
+// trim over-commits and strands a duplicate (a TEST artifact that masks
+// whether the PRODUCTION freeze+trim path is actually correct). Backing
+// stdout with a real PTY sized to the harness geometry makes term_dims()
+// return the SAME size the renderer laid out at, so the trim's proof is
+// geometry-consistent — exactly the production invariant. Returns the
+// master fd (read side); writes maya sends to STDOUT come back here.
+static int install_pty_stdout(int cols, int rows) {
+    int master = -1, slave = -1;
+    if (openpty(&master, &slave, nullptr, nullptr, nullptr) != 0) {
+        std::perror("openpty");
+        return -1;
+    }
+    struct winsize ws{};
+    ws.ws_col = static_cast<unsigned short>(cols);
+    ws.ws_row = static_cast<unsigned short>(rows);
+    ioctl(slave, TIOCSWINSZ, &ws);
+    // Redirect STDOUT to the slave so term_dims()'s ioctl on STDOUT_FILENO
+    // sees (cols x rows). The slave is also the fd maya writes through.
+    dup2(slave, STDOUT_FILENO);
+    close(slave);
+    fcntl(master, F_SETFL, fcntl(master, F_GETFL, 0) | O_NONBLOCK);
+    return master;
 }
 
 static void drain_fd(int rfd) {
@@ -302,6 +334,7 @@ struct Harness {
     std::optional<InlineFrame<Synced>> synced;
     std::vector<std::string> wire;   // committed rows (immutable forever)
     std::size_t commits = 0;
+    std::size_t last_wrote = 0;      // bytes maya wrote on the last frame
     bool dead = false;
     TermEmu emu;                     // real terminal: scrollback + viewport
 
@@ -474,7 +507,7 @@ struct Harness {
             auto o = std::move(*synced).render(
                 c, content_rows(c), term_rows_for_test(term_h), pool,
                 writer, std::move(*wit), false);
-            emu.feed(read_fd(rfd));
+            { std::string b = read_fd(rfd); last_wrote = b.size(); emu.feed(b); }
             synced = std::visit(
                 [](auto&& a) -> std::optional<InlineFrame<Synced>> {
                     using T = std::decay_t<decltype(a)>;
@@ -489,11 +522,29 @@ struct Harness {
         // R1: wire-model byte check. Canvas row y → absolute wire index
         // commits + y. Rows past the viewport top (R - term_h) are
         // committed from now on; any already-captured index must match.
+        //
+        // CAVEAT: the reveal_fx overlay transiently INFLATES canvas height
+        // (ghost-extend + scramble tail) on the live edge without those
+        // rows ever physically scrolling off in the real terminal. So the
+        // canvas-derived `R - term_h` boundary can momentarily mark an
+        // IN-VIEWPORT row as "committed" and then the row legitimately
+        // mutates next frame (the live line growing). That is NOT
+        // corruption — nothing scrolled off. The authoritative immutable-
+        // row set is the EMULATOR's native scrollback (built from the real
+        // bytes). Only treat a wire index as committed-immutable once the
+        // emulator has actually scrolled it off (wi < emu.scrollback.size()).
+        // R5 below is the on-screen-duplication ground truth; R1 is the
+        // tighter wire-immutability guard, scoped here to genuinely-
+        // scrolled-off rows so reveal height jitter can't false-positive.
         const int over = R > term_h ? R - term_h : 0;
+        const std::size_t real_sb = emu.scrollback.size();
         for (int y = 0; y < over; ++y) {
             const std::size_t wi = commits + static_cast<std::size_t>(y);
             if (wi < wire.size()) {
-                if (wire[wi] != cur[static_cast<std::size_t>(y)]) {
+                // Only assert immutability for rows the REAL terminal has
+                // committed to scrollback; in-viewport rows (even if past
+                // the inflated canvas boundary) may still change.
+                if (wi < real_sb && wire[wi] != cur[static_cast<std::size_t>(y)]) {
                     CHK(false,
                         "R1: committed wire row " + std::to_string(wi)
                         + " REWRITTEN @" + tag
@@ -502,6 +553,10 @@ struct Harness {
                     dead = true;
                     return;
                 }
+                // Keep the shadow tracking the latest in-viewport content
+                // so a later genuine scroll-off compares against the right
+                // bytes.
+                if (wi >= real_sb) wire[wi] = cur[static_cast<std::size_t>(y)];
             } else if (wi == wire.size()) {
                 wire.push_back(cur[static_cast<std::size_t>(y)]);
             } else {
@@ -513,6 +568,13 @@ struct Harness {
         // R5: the screenshot symptom — run duplication detection over the
         // REAL terminal transcript (native scrollback + viewport) built
         // from the actual bytes maya wrote, not the canvas reconstruction.
+        if (std::getenv("REVEAL_DBG")) {
+            std::fprintf(stderr,
+                "[dbg] %-14s R=%d prev=%d commits=%zu sb=%zu wrote=%zu\n",
+                tag.c_str(), R,
+                synced ? synced->rows() : -1, commits,
+                emu.scrollback.size(), last_wrote);
+        }
         check_emu(tag);
     }
 };
@@ -530,6 +592,7 @@ static void tick() {
 static void run_scenario(int width, int term_h) {
     setenv("LINES", std::to_string(term_h).c_str(), 1);
     setenv("COLUMNS", std::to_string(width).c_str(), 1);
+    const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
     m.d.current.id = agentty::ThreadId{"reveal"};
@@ -585,21 +648,34 @@ static void run_scenario(int width, int term_h) {
     }
 
     // 4) Settle: move streaming_text → text, settle the md cache, idle,
-    //    paint the deferred-freeze frame, then freeze.
+    //    then WAIT for the reveal to fully drain before freezing —
+    //    exactly the production gate (meta.cpp Tick freezes only once
+    //    live_tail_reveal_settled(m) is true). Freezing before the
+    //    reveal drains captures a tree that diverges from the last live
+    //    (reveal-animated) frame → maya re-emits the whole turn.
     {
         auto& b = m.d.current.messages.back();
         b.text += b.streaming_text;
         b.streaming_text.clear();
         agentty::app::detail::settle_message_md(m, b);
         m.s.phase = agentty::phase::Idle{};
-        // Deferred settle paint(s) — reveal finalize ramp drains over
-        // ~200ms; render a few frames so it completes before freeze.
-        for (int f = 0; f < 12; ++f) { tick(); h.frame(m, "settle" + std::to_string(f)); }
+        // Deferred-settle paints: tick + render until the reveal has
+        // fully drained (bounded so a hang can't wedge the test).
+        int guard = 0;
+        do {
+            tick();
+            h.frame(m, "settle" + std::to_string(guard));
+        } while (!agentty::app::detail::live_tail_reveal_settled(m)
+                 && ++guard < 200 && !h.dead);
         agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        // Trim runs on geometry-consistent dims now (PTY-backed stdout),
+        // exactly as production: the commit_scrollback(N) it returns is
+        // sized off the SAME term_dims() the renderer laid out at.
         auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
         h.apply_trim(trim);
         h.frame(m, "freeze");
     }
+    if (pty_master >= 0) close(pty_master);
 }
 
 // Multi-sub-turn scenario — the screenshot shape: text → ACTIONS panel →
@@ -628,6 +704,7 @@ static ToolUse done_tool(const std::string& tag) {
 static void run_multiturn_scenario(int width, int term_h) {
     setenv("LINES", std::to_string(term_h).c_str(), 1);
     setenv("COLUMNS", std::to_string(width).c_str(), 1);
+    const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
     m.d.current.id = agentty::ThreadId{"revealmt"};
@@ -700,6 +777,7 @@ static void run_multiturn_scenario(int width, int term_h) {
         h.apply_trim(trim);
         h.frame(m, "mt-freeze");
     }
+    if (pty_master >= 0) close(pty_master);
 }
 
 // Submit-mid-reveal scenario — mirrors modal.cpp's submit path, which
@@ -713,6 +791,7 @@ static void run_multiturn_scenario(int width, int term_h) {
 static void run_submit_mid_reveal_scenario(int width, int term_h) {
     setenv("LINES", std::to_string(term_h).c_str(), 1);
     setenv("COLUMNS", std::to_string(width).c_str(), 1);
+    const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
     m.d.current.id = agentty::ThreadId{"revealsub"};
@@ -773,10 +852,96 @@ static void run_submit_mid_reveal_scenario(int width, int term_h) {
         m.ui.pending_settle_freeze = true;
         h.frame(m, "sub" + st + "-idle");
     }
+    if (pty_master >= 0) close(pty_master);
+}
+
+// Code-block fold scenario — the screenshot shape: "Let me check the
+// diagram source:" followed by a LONG fenced code block (a mermaid /
+// diagram source) that overflows the viewport. auto_fold_long_blocks
+// folds a >40-line code block to ~1 row THE MOMENT its closing fence
+// commits, WHILE LIVE (turn.cpp). That is a large mid-stream height
+// SHRINK over content that has already overflowed into native
+// scrollback. If maya re-emits the post-fold (short) canvas from the
+// top against the pre-fold (tall) prev_cells, the body lands a second
+// time below the committed copy — the visible duplicate. Reveal_fx is
+// ON, so the live edge is also animating colored SGR onto the rows that
+// scroll off. This is the closest reproduction of the reported bug.
+static void run_codeblock_fold_scenario(int width, int term_h) {
+    setenv("LINES", std::to_string(term_h).c_str(), 1);
+    setenv("COLUMNS", std::to_string(width).c_str(), 1);
+    const int pty_master = install_pty_stdout(width, term_h);
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"revealcb"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
+    agentty::app::detail::clear_frozen(m);
+
+    Harness h(width, term_h);
+    h.frame(m, "cb-welcome");
+
+    {
+        Message u; u.role = Role::User;
+        u.text = "Show me the rendering pipeline diagram.";
+        m.d.current.messages.push_back(std::move(u));
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        h.frame(m, "cb-submit");
+    }
+
+    Message a; a.role = Role::Assistant;
+    a.streaming_text = "Let me check the diagram source:";
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    for (int f = 0; f < 4; ++f) { tick(); h.frame(m, "cb-open" + std::to_string(f)); }
+
+    auto& back = m.d.current.messages.back();
+    // Open a fenced code block, then stream >40 lines so it overflows
+    // AND crosses the fold threshold, then CLOSE the fence (commit →
+    // live fold to ~1 row).
+    back.streaming_text += "\n\n```mermaid";
+    tick(); h.frame(m, "cb-fence-open");
+    for (int d = 0; d < 70 && !h.dead; ++d) {
+        back.streaming_text +=
+            "\n  node" + std::to_string(d) + " --> builds tree-"
+            + std::to_string(d) + "; diffs canvas-" + std::to_string(d)
+            + "; serializes runs batch-" + std::to_string(d) + ";";
+        tick(); h.frame(m, "cb-line" + std::to_string(d));
+        tick(); h.frame(m, "cb-anim" + std::to_string(d));
+    }
+    if (h.dead) { if (pty_master >= 0) close(pty_master); return; }
+    // Close the fence → the block commits and folds live.
+    back.streaming_text += "\n```\n\nThat is the full pipeline graph.";
+    for (int f = 0; f < 6 && !h.dead; ++f) {
+        tick(); h.frame(m, "cb-fold" + std::to_string(f));
+    }
+    if (h.dead) { if (pty_master >= 0) close(pty_master); return; }
+
+    // Settle + freeze through the production gate.
+    {
+        auto& b = m.d.current.messages.back();
+        b.text += b.streaming_text;
+        b.streaming_text.clear();
+        agentty::app::detail::settle_message_md(m, b);
+        m.s.phase = agentty::phase::Idle{};
+        int guard = 0;
+        do {
+            tick();
+            h.frame(m, "cb-settle" + std::to_string(guard));
+        } while (!agentty::app::detail::live_tail_reveal_settled(m)
+                 && ++guard < 200 && !h.dead);
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        h.apply_trim(trim);
+        h.frame(m, "cb-freeze");
+    }
+    if (pty_master >= 0) close(pty_master);
 }
 
 int main() {
-    std::printf("reveal_scrollback_test\n");
+    // Each scenario dup2's a PTY over STDOUT to give term_dims() real
+    // geometry; save the original so the summary is visible afterward.
+    const int saved_stdout = dup(STDOUT_FILENO);
+    std::fprintf(stderr, "reveal_scrollback_test\n");
     const struct { int w, th; } shapes[] = {
         {80, 24}, {60, 16}, {100, 20}, {72, 12},
     };
@@ -792,8 +957,13 @@ int main() {
         if (g_failures) break;
         run_submit_mid_reveal_scenario(s.w, s.th);
     }
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures) { std::printf("FAILED\n"); return 1; }
-    std::printf("PASSED\n");
+    for (auto s : shapes) {
+        if (g_failures) break;
+        run_codeblock_fold_scenario(s.w, s.th);
+    }
+    if (saved_stdout >= 0) { dup2(saved_stdout, STDOUT_FILENO); close(saved_stdout); }
+    std::fprintf(stderr, "%d checks, %d failures\n", g_checks, g_failures);
+    if (g_failures) { std::fprintf(stderr, "FAILED\n"); return 1; }
+    std::fprintf(stderr, "PASSED\n");
     return 0;
 }

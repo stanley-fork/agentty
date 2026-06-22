@@ -1439,15 +1439,23 @@ if(AGENTTY_BUILD_TESTS)
             "-framework Security"
             "-framework CoreFoundation")
     endif()
+    if(UNIX AND NOT APPLE)
+        # openpty() lives in libutil on glibc.
+        target_link_libraries(reveal_scrollback_test PRIVATE util)
+    endif()
     add_test(NAME reveal_scrollback_test COMMAND reveal_scrollback_test)
-    # KNOWN-FAILING reproduction (R5): the reveal_fx settle->freeze handoff
-    # re-emits the whole turn, landing a SECOND copy in native scrollback
-    # below the live (SGR-garbled) copy — the production duplication bug.
-    # Marked WILL_FAIL so CI stays green while the repro is committed;
-    # FLIP THIS OFF (delete the WILL_FAIL property) the moment the fix
-    # lands so the test guards the regression going forward.
-    set_tests_properties(reveal_scrollback_test PROPERTIES
-        TIMEOUT 120 WILL_FAIL TRUE)
+    # Regression guard for the streaming scrollback DUPLICATION bug: a
+    # tall code block streamed with reveal_fx ON corrupted native
+    # scrollback via (1) the line-number gutter widening at power-of-ten
+    # boundaries, (2) the gutter appearing at the >=5-line threshold, and
+    # (3) the reveal clip cutting a partial line that scrolled off then
+    # completed. All three fixed in maya (syntax_highlight gutter floor +
+    # always-on gutter, reveal_fx line-aligned clip). Drives the REAL
+    # ui::view through maya's REAL inline compose into a real ANSI
+    # terminal emulator (scrollback + viewport) and asserts no on-screen
+    # duplication (R5) and no committed-row rewrite (R1) across four
+    # terminal shapes x five streaming scenarios.
+    set_tests_properties(reveal_scrollback_test PROPERTIES TIMEOUT 180)
 
     # anthropic_md_stream — dev tool, NOT a ctest entry. Captures a real
     # Anthropic SSE markdown stream to a .jsonl fixture (network +

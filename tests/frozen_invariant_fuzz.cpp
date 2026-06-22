@@ -179,24 +179,43 @@ static void check_invariants(const Model& m, bool stream_active,
         INV(f.frozen_through < m.d.current.messages.size(), "I5",
             "froze the mutable streaming back message");
 
-    // I6 trim issues NO host scrollback commit. Current maya owns the
-    // scrollback reconciliation: when the frozen tree shrinks (trim drops
-    // oldest entries, or the live-tail collapse), maya's Synced render
-    // discriminates the shrink-while-overflowed case itself and either
-    // takes the append-only diff path or its own commit-overflow +
-    // soft-repaint recovery. A host-issued commit on top double-commits
-    // and strands a duplicate. So the contract is now: the trim mutates
-    // the model and returns none() — ANY CommitScrollback / CommitScroll‐
-    // backOverflow from the trim is FORBIDDEN.
+    // I6 trim Cmd contract. A front-trim (dropping the OLDEST frozen
+    // entries) is a top-DELETION that maya's render-time shrink
+    // reconciliation CANNOT fix: after the drop the canvas content
+    // shifts up, canvas row 0 differs from prev_cells, and maya's only
+    // recovery (scrollback_marker(prev_rows - term_h) + soft-repaint)
+    // commits the NEW prefix over the PHYSICAL old rows, stranding a
+    // duplicate. So the trim MUST host-commit EXACTLY the rows it
+    // dropped (commit b6f8dac; authoritative coverage in
+    // midrun_wire_test / midrun_freeze_test). Contract: the trim returns
+    // none() when it dropped nothing, OR a row-exact CommitScrollback
+    // whose count == the rows it actually removed; CommitScrollbackOverflow
+    // is never valid (it advances prev_rows past whatever maya thinks
+    // overflowed, which over-commits).
     if (trim_cmd) {
         using Cmd = maya::Cmd<agentty::Msg>;
         const bool is_none =
             std::holds_alternative<Cmd::None>(trim_cmd->inner);
-        INV(is_none, "I6",
-            "trim returned a host scrollback commit — forbidden; current "
-            "maya owns reconciliation and a host commit double-commits, "
-            "stranding a duplicate. The trim must return none().");
-        (void)expected_dropped_rows;
+        const auto* commit =
+            std::get_if<Cmd::CommitScrollback>(&trim_cmd->inner);
+        INV(is_none || commit != nullptr, "I6",
+            "trim returned an unexpected Cmd type — must be none() or a "
+            "row-exact commit_scrollback(N) (never CommitScrollbackOverflow).");
+        if (commit) {
+            // The commit count must equal the rows the trim dropped from
+            // the model this step (no over/under commit).
+            INV(static_cast<std::size_t>(std::max(0, commit->rows))
+                    == expected_dropped_rows,
+                "I6",
+                "trim's commit_scrollback row count != rows actually "
+                "dropped (over/under commit strands a duplicate).");
+        } else {
+            // none() ⇒ nothing was dropped.
+            INV(expected_dropped_rows == 0, "I6",
+                "trim dropped rows but returned none() — the deletion is "
+                "uncommitted, maya will re-emit the shifted prefix over "
+                "committed scrollback.");
+        }
     }
 }
 
