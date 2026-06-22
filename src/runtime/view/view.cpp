@@ -8,6 +8,7 @@
 #include <maya/element/builder.hpp>
 #include <maya/platform/io.hpp>
 #include <maya/widget/app_layout.hpp>
+#include <maya/widget/overlay.hpp>
 
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
@@ -37,7 +38,7 @@ std::optional<maya::Element> pick_overlay(const Model& m) {
     return std::nullopt;
 }
 
-// Bottom-inset overlay layer. maya's Overlay widget bottom-pins the
+// Bottom-inset overlay compose. maya's Overlay widget bottom-pins the
 // picker to the base BOX bottom and paints a full-width bg fill over
 // its whole hugging rect. The base vstack's box is content_height + 2
 // (the outer bottom-padding row + the idle anti-bounce blank()), so
@@ -49,24 +50,20 @@ std::optional<maya::Element> pick_overlay(const Model& m) {
 // strands a wordmark slice EVERY open/close cycle — "the wordmark gets
 // longer with every picker".
 //
-// Fix: pin the overlay 2 rows ABOVE the box bottom so its painted
-// extent never exceeds the base's painted extent — opening a picker
-// can never change the frame height, so no rows cross the viewport
-// boundary and nothing strands. The inset must sit OUTSIDE the
-// bg-filled box (padding inside it gets bg-painted, which is why
-// maya::Overlay's slot can't express this), so we build the z-stack
-// here: same layer shape as maya::Overlay::build, plus the bottom
-// inset on the justify-End wrapper.
-maya::Element overlay_layer(maya::Element el) {
-    return maya::vstack()
-        .align_items(maya::Align::Center)
-        .justify(maya::Justify::End)
-        .padding(0, 0, 2, 0)(
-            maya::vstack()
-                .width(maya::Dimension::percent(100))
-                .padding(0, 2)
-                .bg(maya::Color::default_color())(std::move(el)))
-        .build();
+// Fix: pin the overlay 2 rows ABOVE the box bottom (inset bottom=2) so
+// its painted extent never exceeds the base's painted extent — opening
+// a picker can never change the frame height, so no rows cross the
+// viewport boundary and nothing strands. maya::Overlay's Anchor +
+// inset express exactly this (the inset sits OUTSIDE the bg-filled box,
+// which a plain in-box padding can't do).
+maya::Element compose_overlay(maya::Element base, maya::Element overlay) {
+    return maya::Overlay{{
+        .base    = std::move(base),
+        .overlay = std::move(overlay),
+        .present = true,
+        .anchor  = maya::Overlay::Anchor::BottomCenter,
+        .inset   = {0, 0, 2, 0},
+    }}.build();
 }
 
 } // namespace
@@ -135,10 +132,7 @@ maya::Element view(const Model& m) {
 
     auto base = maya::AppLayout{std::move(alc)}.build();
     if (!overlay) return base;
-    return maya::detail::zstack({
-        std::move(base),
-        overlay_layer(std::move(*overlay)),
-    });
+    return compose_overlay(std::move(base), std::move(*overlay));
 }
 
 } // namespace agentty::ui
