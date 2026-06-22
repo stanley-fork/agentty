@@ -257,11 +257,38 @@ ExecResult run_bash(const BashArgs& a) {
             // still emit the preview without the file reference.
         }
         // Build the head + (optional) tail preview envelope.
+        // Smart extraction: if there are error lines, include them even if
+        // they're in the middle of the output.
         std::string head = r.output.substr(0, kSpillPreviewHead);
         std::string tail;
         if (r.output.size() > kSpillPreviewHead + kSpillPreviewTail + 100) {
             tail = r.output.substr(r.output.size() - kSpillPreviewTail);
         }
+
+        // Extract error lines from anywhere in the output (not just head/tail).
+        std::vector<std::string> error_lines;
+        {
+            std::size_t pos = 0;
+            while (pos < r.output.size() && error_lines.size() < 10) {
+                std::size_t eol = r.output.find('\n', pos);
+                if (eol == std::string::npos) eol = r.output.size();
+                std::string_view line{r.output.data() + pos, eol - pos};
+                // Check for common error patterns.
+                bool is_error = (line.find("error:") != std::string_view::npos ||
+                                 line.find("Error:") != std::string_view::npos ||
+                                 line.find("ERROR:") != std::string_view::npos ||
+                                 line.find("FAILED") != std::string_view::npos ||
+                                 line.find("error[") != std::string_view::npos ||
+                                 line.find("panicked") != std::string_view::npos ||
+                                 line.find("Traceback") != std::string_view::npos ||
+                                 line.find("Exception") != std::string_view::npos);
+                if (is_error) {
+                    error_lines.emplace_back(line);
+                }
+                pos = eol + 1;
+            }
+        }
+
         std::ostringstream env;
         env << "<persisted-output>\n";
         env << "Output too large (" << (spill_total / 1024) << " KB total). ";
@@ -274,6 +301,12 @@ ExecResult run_bash(const BashArgs& a) {
         }
         env << "Preview (first " << kSpillPreviewHead << " bytes):\n"
             << head;
+        if (!error_lines.empty()) {
+            env << "\n\n❌ Errors found (extracted from full output):\n";
+            for (const auto& el : error_lines) {
+                env << "  " << el << "\n";
+            }
+        }
         if (!tail.empty()) {
             env << "\n\n... [" << (spill_total - kSpillPreviewHead - kSpillPreviewTail)
                 << " bytes elided] ...\n\n"
