@@ -1046,6 +1046,14 @@ if(AGENTTY_BUILD_TESTS)
     # ToolDefs (find("read") / find("grep")) over temp-dir fixtures.
     agentty_add_full_test(read_grep_features_test)
 
+    # edit_minimal_splice_test — verifies the char-level minimal-splice
+    # path in the `edit` tool: edits whose old_text/new_text share a
+    # common prefix+suffix produce a TIGHT unified diff (only the changed
+    # run, not a wholesale block delete+insert), and the splice is
+    # byte-correct across UTF-8 / prefix-only / suffix-only / no-share
+    # cases. Drives the real registered `edit` ToolDef.
+    agentty_add_full_test(edit_minimal_splice_test)
+
     # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
     # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
     # re-leaks a tool call it already ran this turn must not run it twice.

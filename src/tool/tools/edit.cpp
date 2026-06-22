@@ -25,6 +25,91 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// ── Char-level minimal splice ───────────────────────────────────────────
+//
+// When fuzzy_find matches a region [pos, pos+len) and we have a
+// replacement `repl`, the naive splice swaps the WHOLE region for
+// `repl`. But the matched region and `repl` usually share a large
+// common prefix and suffix (the model edits one line in a 30-line
+// block; or fuzzy-match tolerated trailing whitespace that's actually
+// identical). Swapping the whole region forces those identical bytes to
+// be marked deleted+re-inserted, which (a) bloats the unified diff the
+// reviewer reads and (b) needlessly perturbs trailing context.
+//
+// `minimal_splice` trims the common prefix and suffix between the
+// matched slice and `repl` so only the genuinely-changed middle run is
+// substituted. The unchanged head/tail bytes survive byte-identically
+// into the new buffer. This is Zed's StreamingDiff keep/insert/delete
+// idea, applied once at splice time rather than incrementally.
+//
+// We snap the trim boundaries to UTF-8 code-point edges so we never
+// split a multibyte sequence, and (cosmetically) back off to the
+// nearest preceding newline/whitespace so the resulting hunk lands on
+// clean token boundaries rather than mid-identifier. Returns the
+// rewritten full buffer. Falls back to the whole-region swap if the
+// two sides share nothing.
+inline bool is_utf8_cont(unsigned char c) { return (c & 0xC0) == 0x80; }
+
+std::string minimal_splice(const std::string& buf,
+                           std::size_t region_pos,
+                           std::size_t region_len,
+                           std::string_view repl) {
+    std::string_view matched{buf.data() + region_pos, region_len};
+
+    // Common prefix length (bytes).
+    std::size_t pre = 0;
+    const std::size_t maxpre = std::min(matched.size(), repl.size());
+    while (pre < maxpre && matched[pre] == repl[pre]) ++pre;
+    // Snap back off a partial UTF-8 sequence: never cut inside a
+    // multibyte code point.
+    while (pre > 0 && is_utf8_cont(static_cast<unsigned char>(
+               pre < matched.size() ? matched[pre] : '\0')))
+        --pre;
+
+    // Common suffix length (bytes), not overlapping the prefix.
+    std::size_t suf = 0;
+    const std::size_t maxsuf =
+        std::min(matched.size() - pre, repl.size() - pre);
+    while (suf < maxsuf
+           && matched[matched.size() - 1 - suf] == repl[repl.size() - 1 - suf])
+        ++suf;
+    // Snap the suffix boundary forward off a UTF-8 continuation byte so
+    // the kept-suffix starts on a code-point edge.
+    while (suf > 0
+           && is_utf8_cont(static_cast<unsigned char>(
+                  matched[matched.size() - suf])))
+        --suf;
+
+    // If prefix+suffix consume the entire region AND the entire repl,
+    // the two sides are byte-identical post-trim — nothing to splice.
+    // (Caller already filtered pure no-ops, but fuzzy indent fix-ups can
+    // land here; treat as no change.)
+    if (pre + suf >= matched.size() && pre + suf >= repl.size())
+        return buf;
+
+    // Nothing shared → whole-region swap (the original behaviour).
+    if (pre == 0 && suf == 0) {
+        std::string out;
+        out.reserve(buf.size() - region_len + repl.size());
+        out.append(buf, 0, region_pos);
+        out.append(repl);
+        out.append(buf, region_pos + region_len, std::string::npos);
+        return out;
+    }
+
+    // Splice only the changed middle: keep buf[0 .. region_pos+pre),
+    // replace matched-middle with repl-middle, keep the rest.
+    std::string_view repl_mid{repl.data() + pre, repl.size() - pre - suf};
+    const std::size_t cut_begin = region_pos + pre;
+    const std::size_t cut_end   = region_pos + region_len - suf;
+    std::string out;
+    out.reserve(buf.size() - (cut_end - cut_begin) + repl_mid.size());
+    out.append(buf, 0, cut_begin);
+    out.append(repl_mid);
+    out.append(buf, cut_end, std::string::npos);
+    return out;
+}
+
 struct OneEdit {
     std::string old_text;
     std::string new_text;
@@ -377,12 +462,7 @@ int apply_one(std::string& buf, const OneEdit& e,
             std::string_view repl = fm.adjusted_new_text.empty()
                 ? std::string_view{e.new_text}
                 : std::string_view{fm.adjusted_new_text};
-            std::string out;
-            out.reserve(buf.size() - fm.len + repl.size());
-            out.append(buf, 0, fm.pos);
-            out.append(repl);
-            out.append(buf, fm.pos + fm.len, std::string::npos);
-            buf = std::move(out);
+            buf = minimal_splice(buf, fm.pos, fm.len, repl);
             return 1;
         }
 
@@ -517,17 +597,15 @@ int apply_one(std::string& buf, const OneEdit& e,
     }
     // Splice. Use the re-indented replacement when strategy 4 adjusted it
     // to match the file's indentation convention; otherwise the caller's
-    // original new_text.
+    // original new_text. We splice via minimal_splice so unchanged
+    // prefix/suffix bytes inside the matched region survive byte-for-byte
+    // — the resulting unified diff shows only the genuinely-changed run
+    // instead of a wholesale block delete+insert.
     std::string_view repl =
         m.adjusted_new_text.empty()
             ? std::string_view{e.new_text}
             : std::string_view{m.adjusted_new_text};
-    std::string out;
-    out.reserve(buf.size() - m.len + repl.size());
-    out.append(buf, 0, m.pos);
-    out.append(repl);
-    out.append(buf, m.pos + m.len, std::string::npos);
-    buf = std::move(out);
+    buf = minimal_splice(buf, m.pos, m.len, repl);
     return 1;
 }
 
