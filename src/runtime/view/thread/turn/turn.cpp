@@ -62,23 +62,26 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // caret on the streaming edge (maya reveal_fx). Only animates while
         // the widget is live_; the settled build is untouched.
         cache.streaming->set_reveal_fx(true);
-        // Reveal pacing. floor_cps is a CEILING under sparse arrival and a
-        // FLOOR otherwise: the cursor walks at max(backlog/drain_secs,
-        // floor_cps), then that RATE is velocity-smoothed by the RateCursor
-        // so chunky SSE arrival no longer reads as the cursor SPRINTING then
-        // IDLING ("bursts, not smooth").
-        //
-        // With the smoothing low-pass (RateCursor::smooth_tau_, ~0.18 s) the
-        // old razor-tight drain (0.06 s) is counter-productive: it spiked the
-        // raw rate on every chunk, and the smoother then spent its whole
-        // budget chasing those spikes. A relaxed drain (0.5 s) keeps the
-        // backlog-driven target stable across chunks so the smoothed velocity
-        // glides — the cursor accelerates into a burst and eases back out
-        // instead of teleporting. floor 80 cps still sets the steady minimum
-        // typing speed under sparse arrival; the deadline ramp at settle
-        // still bypasses smoothing so the tail always lands on time.
-        cache.streaming->set_reveal_pacing(/*floor_cps=*/80.0,
-                                           /*drain_secs=*/0.5);
+        // Reveal pacing for the constant-glide cursor (the ChatGPT / Vercel
+        // smoothStream model): the cursor drains the arrived-bytes BUFFER at
+        // a near-constant cruising speed and lets the buffer absorb the wire's
+        // burstiness — instead of tracking the (spiky) backlog. So the args
+        // mean:
+        //   • floor_cps = the CRUISING speed (≈45 cp/s ≈ a brisk, readable
+        //     typewriter). This is the speed the text actually glides at
+        //     almost all the time. The cursor auto-tunes UP from here when a
+        //     fast model sustains a big buffer, but drifts slowly (base_tau)
+        //     so the speed never steps at a chunk boundary.
+        //   • drain_secs = the target LEAD window (how far behind the live
+        //     edge the cursor comfortably rides). 0.4s of buffer is enough to
+        //     smooth out SSE chunk jitter without the reveal lagging the wire
+        //     noticeably.
+        // The instantaneous rate is hard-capped at 1.8× cruising (set in
+        // RateCursor) so even a huge burst can't make the cursor sprint — it
+        // just leans forward briefly and keeps gliding. The settle deadline
+        // ramp still bypasses all caps so the tail always lands on time.
+        cache.streaming->set_reveal_pacing(/*cruise_cps=*/45.0,
+                                           /*lead_secs=*/0.4);
     }
 
     // Pick the source bytes for THIS frame. The reveal cursor must see
