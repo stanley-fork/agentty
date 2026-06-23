@@ -845,9 +845,17 @@ Cmd<Msg> fetch_models() {
             }
             dispatch(ModelsLoaded{std::move(models)});
         } catch (const std::exception& e) {
+            // Dispatch an EMPTY ModelsLoaded (not StreamError) so the
+            // reducer always clears `models_loading` and the model
+            // picker drops out of "Loading models…" into a "no models"
+            // state the user can escape. A StreamError here would leave
+            // the picker spinning forever after a failed provider switch.
+            // Still surface the reason as a transient status toast.
             dispatch(StreamError{std::string{"models fetch: "} + e.what()});
+            dispatch(ModelsLoaded{std::vector<ModelInfo>{}});
         } catch (...) {
             dispatch(StreamError{"models fetch: unknown exception"});
+            dispatch(ModelsLoaded{std::vector<ModelInfo>{}});
         }
     });
 }

@@ -452,6 +452,15 @@ struct StreamState {
     // additional ThreadListSelect dispatches so a mashed Enter can't
     // queue multiple loads behind each other.
     bool thread_loading = false;
+    // True while a background model-list fetch is in flight (kicked off
+    // by init(), OpenModelPicker, a provider switch, or a login). The
+    // model picker view consults this to render "Loading models…" vs.
+    // "No models available" — without it, a fetch that throws or
+    // returns an empty list would leave the picker stuck on the
+    // spinner forever (the available_models list stays empty). ALWAYS
+    // cleared by the `ModelsLoaded` handler, which fetch_models()
+    // dispatches on BOTH success and failure.
+    bool models_loading = false;
     std::string status;
     // Optional expiry for `status`. When set, the status bar hides the
     // banner once now() passes this point and the reducer treats the

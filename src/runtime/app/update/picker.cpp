@@ -40,9 +40,13 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
                 if (m.d.available_models[i].id == m.d.model_id) idx = i;
             m.ui.model_picker = pick::OpenAt{idx};
+            m.s.models_loading = true;
             return {std::move(m), cmd::fetch_models()};
         },
         [&](ModelsLoaded& e) -> Step {
+            // The fetch finished (success OR failure) — always clear the
+            // in-flight flag so the picker leaves "Loading models…".
+            m.s.models_loading = false;
             if (e.models.empty()) return done(std::move(m));
             auto settings = deps().load_settings();
             m.d.available_models.clear();
@@ -241,6 +245,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
 
             // Models differ per backend — drop the stale list and refetch.
             m.d.available_models.clear();
+            m.s.models_loading = true;
 
             // Confirmation toast + refetch the new backend's model list.
             auto toast = set_status_toast(

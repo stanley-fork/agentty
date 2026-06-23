@@ -111,7 +111,11 @@ Element model_picker(const Model& m) {
     cfg.selected   = picker->index;
 
     if (m.d.available_models.empty()) {
-        cfg.items.push_back(text("  Loading models…", fg_italic(muted)));
+        cfg.items.push_back(text(
+            m.s.models_loading
+                ? "  Loading models…"
+                : "  No models available — check the provider/key, then Esc.",
+            fg_italic(muted)));
     } else {
         cfg.rows.reserve(m.d.available_models.size());
         int i = 0;

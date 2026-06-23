@@ -202,6 +202,7 @@ Step login_submit(Model m) {
                 tools::subagent::set_model(m.d.model_id.value);
             }
             m.d.available_models.clear();
+            m.s.models_loading = true;
             m.ui.login = login::Closed{};
             auto toast = set_status_toast(
                 m, "provider → " + provider_label,

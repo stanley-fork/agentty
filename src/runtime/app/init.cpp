@@ -117,8 +117,10 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // BEFORE the user sends anything — the same validation the model
     // picker does, just not gated on the user opening it. Anthropic has
     // a trustworthy built-in seed list, so it skips this round trip.
-    if (provider::active().kind == provider::Kind::OpenAI)
+    if (provider::active().kind == provider::Kind::OpenAI) {
+        m.s.models_loading = true;
         cmds.push_back(cmd::fetch_models());
+    }
 
     // Background OAuth refresh handoff. `auth::resolve()` parked a
     // refresh token here when it found expired-but-refreshable creds
