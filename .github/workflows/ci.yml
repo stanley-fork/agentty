@@ -1,10 +1,17 @@
 name: ci
 
-# Lightweight build + test gate so every master commit / PR gets a status
-# check (the green tick). NOT a release: a single native Linux build against
-# the system's shared libs (no musl/static, no QEMU cross-builds, no
-# packaging) — those run in release.yml on a tag. Goal here is "does it still
-# compile and do the smoke tests pass", fast.
+# Single build + test gate matching the LOCAL toolchain (GCC on Linux,
+# Release). No cross-compiler matrix, no sanitizer legs, no macOS/Windows
+# runners — those churn and fail on toolchains nobody builds with here.
+# One job: does it compile with the same compiler used locally, and do the
+# smoke tests pass. Fast and deterministic.
+#
+# NOTE: if GitHub still shows phantom failing checks named linux-clang19,
+# sanitizers (...), macos-gcc, windows-msvc, or "fuzz harness smoke", those
+# are REQUIRED STATUS CHECKS configured by NAME in the repo's branch-
+# protection rules (Settings → Branches → master). No workflow in this repo
+# produces them, so they hang forever. Remove those names from the required-
+# checks list there — this workflow only emits the single job below.
 
 on:
   push:
@@ -22,7 +29,7 @@ permissions:
 
 jobs:
   build-test:
-    name: build + test (linux x86_64)
+    name: build + test (linux gcc)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -32,9 +39,9 @@ jobs:
           git submodule update --init --recursive
 
       - name: Install deps
-        # GCC 14 for C++26 (std::expected / std::format); ubuntu-latest's
-        # default g++ can lag. Shared libs are fine here — this isn't a
-        # distributable build.
+        # GCC 14 for C++26 (std::expected / std::format). Mirrors the local
+        # GCC toolchain; ubuntu-latest's default g++ can lag. Shared libs are
+        # fine — this isn't a distributable build.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -52,8 +59,6 @@ jobs:
             -DAGENTTY_BUILD_TESTS=ON
 
       - name: Build
-        # Build the main binary AND the test aggregate (EXCLUDE_FROM_ALL)
-        # in one ninja invocation so ctest has something to run.
         run: cmake --build build -j"$(nproc)" --target all tests
 
       - name: Test
